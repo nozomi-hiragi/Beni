@@ -72,6 +72,18 @@ When working with an external SDK or API:
 - Do not invent APIs, methods, parameters, or behavior when they can be verified.
 - Account for failures at external boundaries rather than silently ignoring them.
 
+## Linear Workflow
+
+When a task is received through Linear:
+
+1. Review the issue and relevant repository context.
+2. Reply to the Linear issue with a concise proposal before modifying the repository.
+3. Wait for the requester to approve the proposal or provide revision instructions.
+4. If revisions are requested, reply with an updated proposal and wait for approval again.
+5. If the proposal is approved, perform only the approved work and reply with the result.
+
+Do not begin implementation until the proposal has been explicitly approved.
+
 ## Safety
 
 - Do not perform destructive operations such as deleting user data, resetting databases, destroying local work, or rewriting history without explicit approval.
