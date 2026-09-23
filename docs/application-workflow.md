@@ -2,92 +2,56 @@
 
 ## 目的
 
-Beni は常駐するデスクトップアプリケーションとして Linear の Agent Session を受け取り、ローカルプロジェクトに対する作業を Codex へ依頼します。本書では、Linear Agent API の操作モデルに沿って、依頼の受付、必要な情報の取得、計画の提案、ユーザーの承認、作業の実行、完了通知までの流れを整理します。
+Beni は Bun のコンソールアプリケーションとして継続実行し、Linear の Agent Session を定期取得して、ローカルプロジェクトに対する作業を Codex へ依頼します。本書では、Linear Agent API の操作モデルに沿って、依頼の受付、必要な情報の取得、計画の提案、ユーザーの承認、作業の実行、完了通知までの流れを整理します。
 
 Linear の Agent API は Developer Preview であり、一般提供までに変更される可能性があります。実装時は最新の公式ドキュメントと SDK の型定義を確認します。
 
 ## 基本方針
 
-- Beni は OAuth の `actor=app` でインストールされる Linear Agent として動作する。
-- 起点には、Beni へのメンションまたはイシューの委任によって作られる Agent Session を使用する。
-- Linear の全イベントを受信・保存せず、Beni に直接関係する `AgentSessionEvent` だけを受信する。
-- 初期コンテキストには Webhook の `promptContext` を使用する。
-- 追加情報は、Codex が必要なリソースの識別子を選んだ後で、原則として TypeScript SDK（`@linear/sdk`）から取得する。
-- Linear 上の会話履歴は Agent Activity から復元し、ローカルに全イベントのコピーを作らない。
-- 作業開始前に計画を提示し、ユーザーから明示的な承認を得る。
-- Beni の状態と進捗は Agent Activity を通じて Linear 上へ返す。
-- 最終的な責任と親イシューを完了する判断はユーザーが持つ。
+- OAuthの`actor=app`で接続する。PKCEと一時的なlocalhostコールバックを使う。
+- 初期版ではWebhookを受けず、PCからAgent SessionとActivityをポーリングする。
+- 取得間隔は初期15秒。API制限時は待機し、停止指示を取得できない場合は実行も止める。
+- 対象は自分のapp userと登録済みLinearプロジェクトに限定する。
+- 対象ローカルリポジトリは実行ディレクトリまたはパス引数で指定する。
+- 会話の正本はLinearのAgent Activityとし、全イベントを保存しない。
+- 計画の提示と明示的な承認を経てからCodexへ実作業を依頼する。
+- サブイシューの成果はローカルで親イシューブランチへ統合し、人のレビューを待つ。
 
 ## 全体フロー
 
 ```mermaid
 flowchart TD
-    A[ユーザーが Beni をメンションまたはイシューを委任] --> B[Linear が Agent Session を作成]
-    B --> C[created AgentSessionEvent Webhook を受信]
-    C --> D[5 秒以内に Webhook へ応答]
-    D --> E[10 秒以内に thought Activity で受付を通知]
-    E --> F[promptContext を Codex が確認]
-    F --> G{計画に必要な情報は十分か}
-    G -- いいえ --> H[必要な Linear リソースの識別子を抽出]
-    H --> I[TypeScript SDK で必要な情報だけを取得]
-    I --> F
-    G -- 不明点が残る --> J[elicitation Activity でユーザーへ質問]
-    J --> K[prompted AgentSessionEvent を受信]
-    K --> L[Agent Activity の履歴を取得]
-    L --> F
-    G -- はい --> M[工程・優先度・依存関係を含む計画を作成]
-    M --> N[計画をサブイシューとして登録]
-    N --> O[elicitation Activity で承認を依頼]
-    O --> K
-    K --> P{ユーザーの回答}
-    P -- 修正依頼 --> Q[未着手の計画を修正]
-    Q --> O
-    P -- 承認 --> R[依存関係に従って Codex が作業を実行]
-    P -- stop --> S[作業と追加 API 操作を直ちに停止]
-    S --> T[response または error Activity で停止を通知]
-    R --> U[Activity とサブイシューへ進捗を反映]
-    U --> V{すべて完了したか}
-    V -- いいえ --> R
-    V -- はい --> W[response Activity で完了を通知]
-    W --> X{追加変更が必要か}
-    X -- いいえ --> Y[ユーザーによる親イシュー完了を待つ]
-    X -- はい --> Z[追加作業を新しいサブイシューとして提案]
-    Z --> O
+    A[SessionとActivityを定期取得] --> B{対象プロジェクトか}
+    B -- はい --> C[イシューと会話を確認]
+    C --> D{情報は十分か}
+    D -- いいえ --> E[必要な情報だけ取得または質問]
+    E --> A
+    D -- はい --> F[Backlogサブイシューで計画を提案]
+    F --> G[明示的な承認を待つ]
+    G --> A
+    A --> H{依頼者が最新計画を承認したか}
+    H -- はい --> I[専用worktreeで工程を実行・検証]
+    I --> J[ローカルcommitを親ブランチへ統合]
+    J --> K{全工程が完了したか}
+    K -- いいえ --> I
+    K -- はい --> L[完了通知・親ブランチのレビュー待ち]
+    A --> M{stopを検知したか}
+    M -- はい --> N[中断して状態保存・再開指示待ち]
 ```
 
-## 1. Linear Agent のセットアップ
+## 1. セットアップ
 
-Beni は通常のユーザーになり代わる統合ではなく、Linear 上で独立した Agent として表示します。
+利用者自身のLinear OAuthアプリを用意し、`actor=app`で認可します。イシューの作成・更新とメンション・委任に必要な権限を要求します。トークンはOSの資格情報ストアへ保存し、SQLiteやリポジトリには保存しません。初期版は1ワークスペース・1端末の構成です。
 
-1. Linear OAuth アプリケーションを作成し、インストール URL に `actor=app` を指定する。
-2. Beni をイシューへ委任できるようにする場合は `app:assignable`、メンションできるようにする場合は `app:mentionable` スコープを要求する。
-3. OAuth アプリケーション設定で **Agent session events** の Webhook カテゴリを有効にする。
-4. ワークスペースごとに異なる Beni の app user ID をアクセストークンと対応付け、安全な資格情報ストアへ保存する。
-5. 必要なチームとリソースだけにアクセスできるスコープを要求する。
+Webhookは設定せず試します。公開サーバーやトンネルは作りません。認証コールバックのみ`127.0.0.1`で一時的に受信します。
 
-イシューをBeniへ割り当てる操作は、人間の assignee を置き換えるのではなく、Beni を delegate に設定します。これにより、人間が所有権と最終責任を持ったままAgentへ作業を委任できます。
+## 2. SessionとActivityの定期取得
 
-## 2. Agent Session Webhook の受信
+SDKの`agentSessions`とSessionの`activities`を使い、ページネーションを含めて対象を確認します。Activity IDを使って同じ入力の二重処理を防ぎます。初期コンテキストはSession・イシュー・関連コメントから取得します。Webhook専用の`promptContext`を受け取る構成ではありません。
 
-Beni がメンションされるかイシューを委任されると、Linear が Agent Session を自動的に作成します。Beni はこのSessionに関する `AgentSessionEvent` のみを処理します。
+Webhook未設定でメンション・委任からSessionが自動生成されるかは実接続の検証対象です。取得APIがあることだけを根拠に、成立すると断定しません。成立しなければユーザーと受信方式を再検討します。
 
-### `created`
-
-新しいAgent Sessionが作成されたことを表します。ペイロードには対象の `agentSession` と、関連するイシュー、コメント、親イシュー、プロジェクト、Guidanceなどを整形した `promptContext` が含まれます。Beniはこれを新しいCodexループの起点にします。
-
-### `prompted`
-
-ユーザーが既存のAgent Sessionへ追加メッセージを送ったことを表します。新しいメッセージはWebhookの `agentActivity.body` から取得し、既存の会話へ追加します。計画の修正、承認、質問への回答、追加作業の依頼もこのイベントとして扱います。
-
-### 受信時の制約
-
-1. Webhook署名を検証し、不正なリクエストは処理しない。
-2. Webhook receiverは5秒以内に応答する。
-3. `created`を受け取った場合は、Agentが応答不能と表示されないよう10秒以内に `thought` Activityを送る。
-4. Webhook IDとAgent Session IDで重複実行を防ぐ。
-5. 時間のかかるCodex処理はWebhookへの応答後に行う。
-
-`AgentSessionEvent` はBeni固有のAgentへ直接関係するイベントだけが配信されます。そのため、通常のイシュー更新、コメント、ラベル変更などを網羅的に購読したり、そのペイロードをすべてSQLiteへ保存したりしません。
+ポーリングでは受付や停止に取得間隔とAPI応答時間の遅延が発生します。Webhook方式における5秒以内のHTTP応答や10秒以内の受付通知は、この構成の保証には含めません。Linear公式はポーリングを推奨していないため、利用規模とAPI制限に注意して検証します。
 
 ## 3. Agent Activity による対話と状態表示
 
@@ -107,7 +71,7 @@ ActivityはユーザーがAgentの状態をLinear上で確認できる粒度に�
 
 ## 4. 必要な情報の選択と取得
 
-最初のCodex呼び出しでは実作業を行いません。まず `promptContext` を確認し、作業計画を作るために十分な情報があるかを判定します。
+最初のCodex呼び出しでは実作業を行いません。まずSessionと関連イシューのコンテキストを確認し、作業計画を作るために十分な情報があるかを判定します。
 
 Codexの判定結果には次を含めます。
 
@@ -123,7 +87,7 @@ Linearとのデータ取得および更新には、型が付いた `@linear/sdk`
 
 使用中のSDKでまだ提供されていないDeveloper Preview機能が必要な場合、または必要なフィールドをSDKで取得できない場合に限り、Linear GraphQL APIを直接使用します。GraphQLを使う場合も取得範囲を必要なフィールドに限定し、SDKと同じ認証情報およびエラー処理の方針に従います。
 
-ユーザーへの質問が必要な場合は `elicitation` Activityを送り、Sessionを入力待ちにします。回答の `prompted` Webhookを受けたら、Agent Sessionに紐づくActivity一覧をAPIから取得して会話を復元します。通常のコメントは編集される可能性があるため、ユーザー入力の履歴には変更されないスナップショットであるAgent Activityを優先します。
+ユーザーへの質問が必要な場合は `elicitation` Activityを送り、Sessionを入力待ちにします。回答のprompt Activityを定期取得で検知したら、Agent Sessionに紐づくActivity一覧をAPIから取得して会話を復元します。通常のコメントは編集される可能性があるため、ユーザー入力の履歴には変更されないスナップショットであるAgent Activityを優先します。
 
 ## 5. ローカルで保持する最小限の状態
 
@@ -131,9 +95,9 @@ Linearを情報の正本とし、SQLiteには再起動からの復旧と重複�
 
 - ワークスペースとBeniのapp user IDの対応
 - Agent Session IDと対象イシューID
-- 最後に処理したWebhook IDまたはActivity ID
+- 処理済みActivity ID
 - 現在実行中のCodex処理と、その再開に必要な状態
-- ユーザーによる計画の承認状態
+- ユーザーによる計画の承認状態と、実行・復旧に必要な計画情報
 - Beniが作成したサブイシューの識別子
 - ローカルプロジェクトとLinearリソースの必要最小限の対応
 
@@ -157,10 +121,10 @@ Agent Plan APIはSession内の進捗表示に利用できますが、Technology 
 
 ## 7. 計画の確認と修正
 
-`prompted`イベントで受け取ったユーザーの回答をCodexが解釈します。
+定期取得で検知した依頼者のprompt Activityの回答をCodexが解釈します。
 
 - **承認**: 計画を確定し、実行段階へ進む。
-- **修正指示**: 指示に従い、Beniが作成した未着手のBacklogサブイシューだけを更新する。
+- **修正指示**: 指示に従い、Beniが作成した未着手のBacklogサブイシューだけを取消にし、改訂した計画のサブイシューを作成する。
 - **追加情報**: コンテキストへ加え、必要であれば関連リソースをAPIから取得する。
 - **不明確な回答**: `elicitation` Activityで確認し、承認されたものと推測しない。
 
@@ -172,9 +136,9 @@ Agent Plan APIはSession内の進捗表示に利用できますが、Technology 
 
 1. 未完了で、ブロックされていないサブイシューを選ぶ。
 2. `action` Activityで開始する操作をユーザーへ示す。
-3. 並列実行可能な工程は、同じファイルへの競合や前提条件がない範囲で並列に処理する。
+3. 同一リポジトリの工程は直列で処理し、別リポジトリの工程のみ設定した並列数まで実行する。
 4. 依存工程があるものは、ブロッカーが完了してから開始する。
-5. 各工程で変更、検証、結果の記録を行う。
+5. 各工程の専用ブランチ・worktreeで変更と検証を行い、ローカルcommitを親イシューブランチへ統合する。GitHubへのpush・PR作成は行わない。
 6. 成功したサブイシューを完了にし、後続工程のブロックを解除する。
 7. 続行できない失敗は `error` Activityで通知し、根拠なく後続工程を進めない。
 
@@ -182,7 +146,7 @@ Agent Plan APIはSession内の進捗表示に利用できますが、Technology 
 
 ## 9. 停止、完了、追加変更
 
-ユーザーから `stop` signalを持つprompt Activityを受け取った場合、Beniはコード変更、Linear更新、その他のAPI呼び出しを直ちに停止します。安全に停止した後、`response`または`error` Activityで停止したことと現在の状態を知らせます。ユーザーから明確な再開指示を受けるまで処理を再開しません。
+定期取得で `stop` signalを持つprompt Activity、または明示的な停止入力を検知した場合、Beniは実行中のCodexへ中断を要求し、新たなコード変更・Linear更新を停止します。進行中の外部操作を取り消せる保証はなく、結果を保存して再開時に照合します。安全に停止した後、`response`または`error` Activityで停止したことと現在の状態を知らせます。ユーザーから明確な再開指示を受けるまで処理を再開しません。
 
 すべてのサブイシューが完了したら、Beniは `response` Activityで結果を通知します。親イシューを完了ステータスへ変更する最終判断はユーザーに委ねます。
 
@@ -192,9 +156,9 @@ Agent Plan APIはSession内の進捗表示に利用できますが、Technology 
 
 | Beniの処理段階 | Linear上の表現 | 次へ進む条件 |
 | --- | --- | --- |
-| Session受付 | `thought` Activity | `created`を受信して受付を通知 |
-| 情報確認 | `thought`または`action` Activity | `promptContext`と必要なAPI取得結果を確認 |
-| 情報待ち | `elicitation` Activity | `prompted`でユーザー回答を受信 |
+| Session受付 | `thought` Activity | 新規Sessionを検知して受付を通知 |
+| 情報確認 | `thought`または`action` Activity | Sessionと必要なAPI取得結果を確認 |
+| 情報待ち | `elicitation` Activity | prompt Activityでユーザー回答を検知 |
 | 計画確認 | `elicitation` Activity | ユーザーが計画を明示的に承認 |
 | 実行中 | `action` Activity | 依存工程を順次完了 |
 | 失敗 | `error` Activity | ユーザーの追加指示または再試行条件を受信 |
