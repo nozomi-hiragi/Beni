@@ -55,7 +55,7 @@ export async function loadConfig(file: string, root: string): Promise<Config> {
   return {
     clientId: v.clientId,
     oauthPort: integer("oauthPort", 3456, 1024, 65535),
-    pollIntervalMs: integer("publicBaseUrl", 15_000, 5_000, 3_600_000),
+    publicBaseUrl,
     maxConcurrent: integer("maxConcurrent", 2, 1, 8),
     taskTimeoutMs: integer("taskTimeoutMs", 1_800_000, 1_000, 86_400_000),
     maxContextRounds: integer("maxContextRounds", 10, 1, 100),

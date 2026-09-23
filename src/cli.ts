@@ -9,6 +9,8 @@ import { CodexAgent } from "./codex.ts";
 import { Workspace } from "./git.ts";
 import { Engine } from "./engine.ts";
 import { BeniError, safeError } from "./types.ts";
+import { webhookHandler } from "./webhook.ts";
+import { startTunnel } from "./tunnel.ts";
 
 export const help = `Beni — Linearの依頼をローカルのCodexで処理します
 
@@ -21,7 +23,7 @@ export const help = `Beni — Linearの依頼をローカルのCodexで処理し
 project-root省略時はカレントディレクトリを使います。
 設定の初期パス: XDG_CONFIG_HOME/beni/config.json または ~/.config/beni/config.json
 runはフォアグラウンドで継続実行し、Ctrl+Cで安全に停止します。
-OAuth接続はloginで行います。通常運転に公開HTTP受信口は不要です。
+通常運転にはCloudflare TunnelとLinear Webhookが必要です。公開HTTPS起点(publicBaseUrl)へWebhookを届けます。
 設定例と初回接続手順はREADME.mdを参照してください。`;
 
 export async function main(argv: string[]): Promise<void> {
@@ -32,7 +34,7 @@ export async function main(argv: string[]): Promise<void> {
   if (positionals.length > 1) throw new BeniError("arguments", "引数が多すぎます。--helpを確認してください。");
   const config = await loadConfig(values.config ?? defaultConfigPath(), positionals[0] ?? process.cwd());
   const secrets = new Keychain(config.clientId);
-  if (command === "login") { await login(config.clientId, config.oauthPort, secrets); console.log("Linearに接続しました。"); return; }
+  if (command === "login") { await login(config.clientId, config.oauthPort, secrets, config.publicBaseUrl); console.log("Linearに接続しました。"); return; }
   const auth = new Auth(config.clientId, secrets);
   if (command === "logout") { await auth.logout(); console.log("Linearとの接続を解除しました。"); return; }
   for (const target of config.targets) {
@@ -47,9 +49,20 @@ export async function main(argv: string[]): Promise<void> {
     store.close();
     return;
   }
+  const secret = process.env.BENI_LINEAR_WEBHOOK_SECRET?.trim();
+  if (!secret) throw new BeniError("webhook_secret", ".envにBENI_LINEAR_WEBHOOK_SECRETを設定してください。");
   let engine: Engine | undefined;
+  let server: ReturnType<typeof Bun.serve> | undefined;
+  let tunnel: ReturnType<typeof startTunnel> | undefined;
   const controller = new AbortController();
   const stop = () => controller.abort();
+  let dirty = true;
+  let notify: (() => void) | undefined;
+  const wake = () => {
+    dirty = true;
+    notify?.();
+    notify = undefined;
+  };
   try {
     store.claim();
     const credentials = await auth.credentials();
@@ -61,27 +74,46 @@ export async function main(argv: string[]): Promise<void> {
     const linear = new Linear(auth, credentials.appUserId);
     engine = new Engine(config, store, linear, new CodexAgent(config.model), workspace);
     process.on("SIGINT", stop); process.on("SIGTERM", stop);
-    console.log(`Beniを起動しました。取得間隔: ${config.pollIntervalMs / 1000}秒。Ctrl+Cで停止します。`);
+    server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: config.oauthPort,
+      fetch: webhookHandler(secret, { organizationId: credentials.organizationId, appUserId: credentials.appUserId, clientId: config.clientId }, store, wake),
+    });
+    tunnel = startTunnel();
+    console.log(`Beniを起動しました。Webhook: ${config.publicBaseUrl}/webhooks/linear 。Ctrl+Cで停止します。`);
+    try { await engine.poll(controller.signal); }
+    catch (error) {
+      if (!controller.signal.aborted) console.error(error instanceof BeniError ? `[${error.code}] ${safeError(error)}` : safeError(error));
+    }
     while (!controller.signal.aborted) {
-      let delay = config.pollIntervalMs;
-      try { await engine.poll(controller.signal); }
-      catch (error) {
-        if (controller.signal.aborted) break;
-        console.error(error instanceof BeniError ? `[${error.code}] ${safeError(error)}` : safeError(error));
-        // If input cannot be fetched, do not continue work while stop requests are invisible.
-        await engine.pause();
-        delay = Math.max(delay, linear.notBefore - Date.now(), 30_000);
+      while (dirty && !controller.signal.aborted) {
+        dirty = false;
+        for (const item of store.pendingWebhooks()) {
+          if (controller.signal.aborted) break;
+          try {
+            const session = await linear.session(item.session, controller.signal);
+            await engine.receive([session], controller.signal);
+            store.finishWebhook(item.id);
+          } catch (error) {
+            if (controller.signal.aborted) break;
+            console.error(error instanceof BeniError ? `[${error.code}] ${safeError(error)}` : safeError(error));
+            if (error instanceof BeniError && (error.code === "owner" || error.code === "not_found" || error.code === "linear_input")) store.finishWebhook(item.id);
+          }
+        }
       }
       if (controller.signal.aborted) break;
       await new Promise<void>(resolve => {
-        const done = () => { clearTimeout(timer); controller.signal.removeEventListener("abort", done); resolve(); };
-        const timer = setTimeout(done, delay);
+        const done = () => { notify = undefined; controller.signal.removeEventListener("abort", done); resolve(); };
+        notify = done;
         controller.signal.addEventListener("abort", done, { once: true });
       });
     }
   } finally {
-    await engine?.shutdown();
     process.removeListener("SIGINT", stop); process.removeListener("SIGTERM", stop);
+    if (!controller.signal.aborted) controller.abort();
+    await server?.stop(true);
+    tunnel?.kill();
+    await engine?.shutdown();
     store.release(); store.close();
   }
 }

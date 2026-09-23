@@ -2,15 +2,15 @@
 
 ## 目的
 
-Beni は Bun のコンソールアプリケーションとして継続実行し、Linear の Agent Session を定期取得して、ローカルプロジェクトに対する作業を Codex へ依頼します。本書では、Linear Agent API の操作モデルに沿って、依頼の受付、必要な情報の取得、計画の提案、ユーザーの承認、作業の実行、完了通知までの流れを整理します。
+Beni は Bun のコンソールアプリケーションとして継続実行し、Linear の Agent Session Webhook を Cloudflare Tunnel 経由で受け取り、ローカルプロジェクトに対する作業を Codex へ依頼します。本書では、Linear Agent API の操作モデルに沿って、依頼の受付、必要な情報の取得、計画の提案、ユーザーの承認、作業の実行、完了通知までの流れを整理します。
 
 Linear の Agent API は Developer Preview であり、一般提供までに変更される可能性があります。実装時は最新の公式ドキュメントと SDK の型定義を確認します。
 
 ## 基本方針
 
-- OAuthの`actor=app`で接続する。PKCEと一時的なlocalhostコールバックを使う。
-- 初期版ではWebhookを受けず、PCからAgent SessionとActivityをポーリングする。
-- 取得間隔は初期15秒。API制限時は待機し、停止指示を取得できない場合は実行も止める。
+- OAuthの`actor=app`で接続する。PKCEと`publicBaseUrl`経由のコールバックを使う。
+- 通常運転はWebhook + Cloudflare Tunnel。ローカルで`127.0.0.1:oauthPort`にHTTPを開き、Tunnelで公開HTTPSへ届ける。
+- `publicBaseUrl`はHTTPS origin必須。Redirect URIとLinear Webhook URLの公開起点とする。
 - 対象は自分のapp userと登録済みLinearプロジェクトに限定する。
 - 対象ローカルリポジトリは実行ディレクトリまたはパス引数で指定する。
 - 会話の正本はLinearのAgent Activityとし、全イベントを保存しない。
@@ -21,7 +21,7 @@ Linear の Agent API は Developer Preview であり、一般提供までに変�
 
 ```mermaid
 flowchart TD
-    A[SessionとActivityを定期取得] --> B{対象プロジェクトか}
+    A[Webhook受信とSession取得] --> B{対象プロジェクトか}
     B -- はい --> C[イシューと会話を確認]
     C --> D{情報は十分か}
     D -- いいえ --> E[必要な情報だけ取得または質問]
@@ -43,15 +43,13 @@ flowchart TD
 
 利用者自身のLinear OAuthアプリを用意し、`actor=app`で認可します。イシューの作成・更新とメンション・委任に必要な権限を要求します。トークンはOSの資格情報ストアへ保存し、SQLiteやリポジトリには保存しません。初期版は1ワークスペース・1端末の構成です。
 
-Webhookは設定せず試します。公開サーバーやトンネルは作りません。認証コールバックのみ`127.0.0.1`で一時的に受信します。
+Cloudflare TunnelとLinear Webhookを設定します。ローカルHTTPは`127.0.0.1:oauthPort`で受け、公開起点は`publicBaseUrl`です。認証コールバックも同じ公開起点配下（`/oauth/callback`）を使います。
 
-## 2. SessionとActivityの定期取得
+## 2. Webhook受信とSession取得
 
-SDKの`agentSessions`とSessionの`activities`を使い、ページネーションを含めて対象を確認します。Activity IDを使って同じ入力の二重処理を防ぎます。初期コンテキストはSession・イシュー・関連コメントから取得します。Webhook専用の`promptContext`を受け取る構成ではありません。
+Linearから`AgentSessionEvent`（created / prompted）のWebhookを受け取り、署名検証後にキューへ保存してACKします。処理側はSession IDからSDKの`agentSession`と`activities`で詳細を取得します。Activity IDを使って同じ入力の二重処理を防ぎます。初期コンテキストはSession・イシュー・関連コメントから取得します。
 
-Webhook未設定でメンション・委任からSessionが自動生成されるかは実接続の検証対象です。取得APIがあることだけを根拠に、成立すると断定しません。成立しなければユーザーと受信方式を再検討します。
-
-ポーリングでは受付や停止に取得間隔とAPI応答時間の遅延が発生します。Webhook方式における5秒以内のHTTP応答や10秒以内の受付通知は、この構成の保証には含めません。Linear公式はポーリングを推奨していないため、利用規模とAPI制限に注意して検証します。
+起動時に一度だけSession一覧の追いつき取得を行うことがありますが、定期ポーリングを主経路にはしません。Webhookキューが空の間はイベント待ちで待機します。
 
 ## 3. Agent Activity による対話と状態表示
 
@@ -87,7 +85,7 @@ Linearとのデータ取得および更新には、型が付いた `@linear/sdk`
 
 使用中のSDKでまだ提供されていないDeveloper Preview機能が必要な場合、または必要なフィールドをSDKで取得できない場合に限り、Linear GraphQL APIを直接使用します。GraphQLを使う場合も取得範囲を必要なフィールドに限定し、SDKと同じ認証情報およびエラー処理の方針に従います。
 
-ユーザーへの質問が必要な場合は `elicitation` Activityを送り、Sessionを入力待ちにします。回答のprompt Activityを定期取得で検知したら、Agent Sessionに紐づくActivity一覧をAPIから取得して会話を復元します。通常のコメントは編集される可能性があるため、ユーザー入力の履歴には変更されないスナップショットであるAgent Activityを優先します。
+ユーザーへの質問が必要な場合は `elicitation` Activityを送り、Sessionを入力待ちにします。回答のprompt ActivityをWebhookで検知したら、Agent Sessionに紐づくActivity一覧をAPIから取得して会話を復元します。通常のコメントは編集される可能性があるため、ユーザー入力の履歴には変更されないスナップショットであるAgent Activityを優先します。
 
 ## 5. ローカルで保持する最小限の状態
 
@@ -121,7 +119,7 @@ Agent Plan APIはSession内の進捗表示に利用できますが、Technology 
 
 ## 7. 計画の確認と修正
 
-定期取得で検知した依頼者のprompt Activityの回答をCodexが解釈します。
+Webhookで検知した依頼者のprompt Activityの回答をCodexが解釈します。
 
 - **承認**: 計画を確定し、実行段階へ進む。
 - **修正指示**: 指示に従い、Beniが作成した未着手のBacklogサブイシューだけを取消にし、改訂した計画のサブイシューを作成する。
@@ -146,7 +144,7 @@ Agent Plan APIはSession内の進捗表示に利用できますが、Technology 
 
 ## 9. 停止、完了、追加変更
 
-定期取得で `stop` signalを持つprompt Activity、または明示的な停止入力を検知した場合、Beniは実行中のCodexへ中断を要求し、新たなコード変更・Linear更新を停止します。進行中の外部操作を取り消せる保証はなく、結果を保存して再開時に照合します。安全に停止した後、`response`または`error` Activityで停止したことと現在の状態を知らせます。ユーザーから明確な再開指示を受けるまで処理を再開しません。
+Webhookで `stop` signalを持つprompt Activity、または明示的な停止入力を検知した場合、Beniは実行中のCodexへ中断を要求し、新たなコード変更・Linear更新を停止します。進行中の外部操作を取り消せる保証はなく、結果を保存して再開時に照合します。安全に停止した後、`response`または`error` Activityで停止したことと現在の状態を知らせます。ユーザーから明確な再開指示を受けるまで処理を再開しません。
 
 すべてのサブイシューが完了したら、Beniは `response` Activityで結果を通知します。親イシューを完了ステータスへ変更する最終判断はユーザーに委ねます。
 
