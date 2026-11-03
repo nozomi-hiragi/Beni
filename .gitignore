@@ -144,3 +144,7 @@ vite.config.ts.timestamp-*
 
 # Local Beni data
 /beni.sqlite*
+
+# Built frontend
+/ui/generated.css
+/ui/build/

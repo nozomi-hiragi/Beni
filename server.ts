@@ -9,7 +9,7 @@ export function createHandler(store: Store) {
   if (url.hostname !== '127.0.0.1') return new Response('Forbidden',{status:403});
   const json = (value: unknown, status = 200) => Response.json(value,{status,headers:{'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}});
   if (request.method === 'GET') {
-   if (url.pathname === '/' || ['/ui/index.html','/ui/app.js','/ui/style.css'].includes(url.pathname)) {
+   if (url.pathname === '/' || ['/ui/index.html','/ui/build/app.js','/ui/generated.css','/ui/style.css'].includes(url.pathname)) {
     const file = url.pathname === '/' ? 'index.html' : url.pathname.slice('/ui/'.length);
     return new Response(Bun.file(new URL(`./ui/${file}`,import.meta.url)),{headers:{'Content-Security-Policy':"default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'",'X-Content-Type-Options':'nosniff','Cache-Control':'no-store'}});
    }

@@ -7,8 +7,11 @@
 [Bun](https://bun.sh/) を用意して、このディレクトリで実行します。
 
 ```sh
+bun install
 bun run start
 ```
+
+起動時に SolidJS の TypeScript と Tailwind CSS・daisyUI のスタイルをビルドします。
 
 ブラウザーで http://127.0.0.1:3210/ を開きます。ポートは `BENI_PORT`、データベースの保存先は `BENI_DB` で変更できます。既定では作業ディレクトリの `beni.sqlite` に保存します。会話は平文で保存されるので、秘密情報を入力しないでください。
 

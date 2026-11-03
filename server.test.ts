@@ -16,3 +16,18 @@ test('project, task, chat and initial document flow', async () => {
   expect((await post('/api/projects',{name:'x'.repeat(70000),folder:'/tmp/example'})).status).toBe(413);
  } finally {store.close()}
 });
+
+test('serves the compiled Solid app and locally generated stylesheet', async () => {
+ const store = new Store(':memory:');
+ try {
+  const handle = createHandler(store);
+  const page = await handle(new Request('http://127.0.0.1:3210/'));
+  expect(await page.text()).toContain('/ui/build/app.js');
+  const js = await handle(new Request('http://127.0.0.1:3210/ui/build/app.js'));
+  expect(js.status).toBe(200);
+  expect((await js.text()).length).toBeGreaterThan(1000);
+  const css = await handle(new Request('http://127.0.0.1:3210/ui/generated.css'));
+  expect(css.status).toBe(200);
+  expect(await css.text()).toContain('.btn-primary');
+ } finally { store.close(); }
+});
