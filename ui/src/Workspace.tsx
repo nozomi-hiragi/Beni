@@ -56,6 +56,18 @@ export default function Workspace(props: WorkspaceProps) {
   const documentTabs = new Map<number, DocumentTabs>();
   let documentOwner: number | undefined;
   let alive = true;
+  let taskTreeToggle: HTMLButtonElement | undefined;
+  let documentTreeToggle: HTMLButtonElement | undefined;
+
+  function dismissTrees(event: MouseEvent) {
+    const target = event.target;
+    if (!(target instanceof Node)) return;
+    if (taskTreeOpen() && !taskTreeToggle?.contains(target) && !document.getElementById('task-tree')?.contains(target)) setTaskTreeOpen(false);
+    if (documentTreeOpen() && !documentTreeToggle?.contains(target) && !document.getElementById('document-tree')?.contains(target)) setDocumentTreeOpen(false);
+  }
+  // Capture before Solid updates the toggle element in response to this click.
+  onMount(() => document.addEventListener('click', dismissTrees, true));
+  onCleanup(() => document.removeEventListener('click', dismissTrees, true));
 
   const taskOptions = createMemo(() => {
     const project = projectId();
@@ -212,15 +224,15 @@ export default function Workspace(props: WorkspaceProps) {
       publish(draft);
     }
   }
-  const toggle = (label: string, expanded: boolean, controls: string, onClick: () => void) =>
-    <button type="button" class="btn btn-ghost btn-square btn-sm m-1" aria-label={label} aria-expanded={expanded} aria-controls={controls} onClick={onClick}>☰</button>;
+  const toggle = (label: string, expanded: boolean, controls: string, onClick: () => void, setRef: (element: HTMLButtonElement) => void) =>
+    <button ref={setRef} type="button" class="btn btn-ghost btn-square btn-sm m-1" aria-label={label} aria-expanded={expanded} aria-controls={controls} onClick={onClick}>☰</button>;
 
   return <section class="mx-auto grid h-auto min-h-[34rem] min-w-0 max-w-7xl gap-4 px-4 pb-5 pt-4 lg:h-[calc(100vh-7rem)] lg:grid-cols-2">
     <div class="flex min-h-0 min-w-0 flex-col gap-4">
       <section class="card flex min-h-[20rem] min-w-0 flex-1 flex-col overflow-hidden border border-base-300 bg-base-100 shadow-sm" aria-label="タスクチャット">
-        <TabBar label="チャット" tabs={openTasks().map(id => ({ id: String(id), label: taskName(id) }))} activeId={activeTask() === undefined ? undefined : String(activeTask())} onSelect={id => openTask(Number(id))} onClose={id => closeTask(Number(id))} left={toggle('タスクツリーを開閉', taskTreeOpen(), 'task-tree', () => setTaskTreeOpen(value => !value))} />
+        <TabBar label="チャット" tabs={openTasks().map(id => ({ id: String(id), label: taskName(id) }))} activeId={activeTask() === undefined ? undefined : String(activeTask())} onSelect={id => openTask(Number(id))} onClose={id => closeTask(Number(id))} left={toggle('タスクツリーを開閉', taskTreeOpen(), 'task-tree', () => setTaskTreeOpen(value => !value), element => { taskTreeToggle = element; })} />
         <div class="relative flex min-h-0 flex-1 flex-col">
-          <Show when={taskTreeOpen()}><TreeView id="task-tree" label="タスク" nodes={[...taskOptions().map(task => ({id:String(task.id), label:taskLabel(task)})), ...(!taskOptions().some(task => task.id === props.taskId) ? [{id:String(props.taskId),label:taskName(props.taskId)}] : [])]} onSelect={id => openTask(Number(id))} /></Show>
+          <Show when={taskTreeOpen()}><TreeView id="task-tree" label="タスク" nodes={[...taskOptions().map(task => ({id:String(task.id), label:taskLabel(task)})), ...(!taskOptions().some(task => task.id === props.taskId) ? [{id:String(props.taskId),label:taskName(props.taskId)}] : [])]} onSelect={id => { openTask(Number(id)); setTaskTreeOpen(false); }} /></Show>
           <Show when={taskTreeOpen() && treeError()}><p role="alert" class="relative z-20 m-2 text-sm text-error">{treeError()}</p></Show>
           <Show when={activeTask() !== undefined}>
             <Show when={loadError()}><div role="alert" class="alert alert-error text-sm">{loadError()}</div></Show>
@@ -244,9 +256,9 @@ export default function Workspace(props: WorkspaceProps) {
       </section>
     </div>
     <section class="card flex min-h-[20rem] min-w-0 flex-col overflow-hidden border border-base-300 bg-base-100 shadow-sm" aria-label="文書プレビュー">
-      <TabBar label="文書" tabs={openDocuments().map(id => { const document = documents().find(item => documentId(item) === id); return {id, label:document ? documentLabel(document) : id}; })} activeId={activeDocument()} onSelect={openDocument} onClose={closeDocument} left={toggle('文書ツリーを開閉', documentTreeOpen(), 'document-tree', () => setDocumentTreeOpen(value => !value))} />
+      <TabBar label="文書" tabs={openDocuments().map(id => { const document = documents().find(item => documentId(item) === id); return {id, label:document ? documentLabel(document) : id}; })} activeId={activeDocument()} onSelect={openDocument} onClose={closeDocument} left={toggle('文書ツリーを開閉', documentTreeOpen(), 'document-tree', () => setDocumentTreeOpen(value => !value), element => { documentTreeToggle = element; })} />
       <div class="relative flex min-h-0 flex-1 flex-col">
-        <Show when={documentTreeOpen()}><TreeView id="document-tree" label="文書" nodes={documents().map(document => ({id:documentId(document),label:documentLabel(document)}))} onSelect={openDocument} /></Show>
+        <Show when={documentTreeOpen()}><TreeView id="document-tree" label="文書" nodes={documents().map(document => ({id:documentId(document),label:documentLabel(document)}))} onSelect={id => { openDocument(id); setDocumentTreeOpen(false); }} /></Show>
         <Show when={currentDocument()}>{document => <pre class="min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-words p-5 font-mono text-sm leading-relaxed">{document().content}</pre>}</Show>
       </div>
     </section>

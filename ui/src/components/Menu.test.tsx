@@ -18,13 +18,21 @@ it('displays the current title and only shows the home button outside home', () 
   const search = screen.getByRole('searchbox', { name: 'タスクを検索' }) as HTMLInputElement;
   fireEvent.input(search, { target: { value: '画面' } });
   expect(query()).toBe('画面');
-  fireEvent.click(screen.getByRole('button', { name: '設定' }));
+  const settingsButton = screen.getByRole('button', { name: '設定' });
+  const settingsIcon = settingsButton.querySelector('svg');
+  expect(settingsIcon?.getAttribute('aria-hidden')).toBe('true');
+  fireEvent.click(settingsButton);
   expect(onSettings).toHaveBeenCalledOnce();
 
   setTitle('架空プロジェクト');
   setShowHome(true);
   expect(screen.getByText('架空プロジェクト')).toBeTruthy();
-  fireEvent.click(screen.getByRole('button', { name: 'ホームへ戻る' }));
+  const homeButton = screen.getByRole('button', { name: 'ホームへ戻る' });
+  const homeIcon = homeButton.querySelector('svg');
+  expect(homeIcon?.getAttribute('aria-hidden')).toBe('true');
+  expect(homeIcon?.getAttribute('viewBox')).toBe(settingsIcon?.getAttribute('viewBox'));
+  expect(homeIcon?.getAttribute('stroke-width')).toBe(settingsIcon?.getAttribute('stroke-width'));
+  fireEvent.click(homeButton);
   expect(onHome).toHaveBeenCalledOnce();
   setTitle('設定');
   expect(screen.getByText('設定', { selector: 'strong' })).toBeTruthy();

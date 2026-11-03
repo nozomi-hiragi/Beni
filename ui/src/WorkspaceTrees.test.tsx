@@ -15,6 +15,73 @@ function json(value: unknown): Response {
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 describe('Workspace task and document tabs', () => {
+  it('dismisses each tree after selection or an outside click without interfering with the toggles', async () => {
+    const first = { id: 101, projectId: 24, name: '設計', phase: 'requirements', status: 'idle' };
+    const second = { id: 102, projectId: 24, name: '画面', phase: 'requirements', status: 'idle' };
+    const documents = [{ name: '指示書.md', content: '# 設計', version: 1 }, { name: '仕様.md', content: '# 仕様', version: 1 }];
+    vi.stubGlobal('fetch', vi.fn((path: string) => {
+      if (path === '/api/state') return Promise.resolve(json({ projects: [], tasks: [first, second] }));
+      if (path === '/api/tasks/101') return Promise.resolve(json({ task: first, messages: [], documents }));
+      if (path === '/api/tasks/102') return Promise.resolve(json({ task: second, messages: [], documents }));
+      throw new Error(`Unexpected request: ${path}`);
+    }));
+    render(() => <Workspace taskId={101} onHome={() => {}} />);
+    await screen.findByRole('tab', { name: '#101 設計' });
+    const taskToggle = () => screen.getByRole('button', { name: 'タスクツリーを開閉' });
+    const documentToggle = () => screen.getByRole('button', { name: '文書ツリーを開閉' });
+
+    fireEvent.click(taskToggle());
+    expect(taskToggle().getAttribute('aria-expanded')).toBe('true');
+    const taskTree = screen.getByRole('complementary', { name: 'タスク' });
+    fireEvent.click(taskTree);
+    // Future nested tree items still count as inside when opening a folder.
+    const details = document.createElement('details');
+    const summary = document.createElement('summary');
+    summary.textContent = 'フォルダ';
+    details.append(summary);
+    taskTree.append(details);
+    fireEvent.click(summary);
+    expect(taskToggle().getAttribute('aria-expanded')).toBe('true');
+    fireEvent.click(document.body);
+    expect(taskToggle().getAttribute('aria-expanded')).toBe('false');
+    fireEvent.click(taskToggle());
+    fireEvent.click(taskToggle());
+    expect(taskToggle().getAttribute('aria-expanded')).toBe('false');
+
+    fireEvent.click(taskToggle());
+    fireEvent.click(documentToggle());
+    expect(taskToggle().getAttribute('aria-expanded')).toBe('false');
+    expect(documentToggle().getAttribute('aria-expanded')).toBe('true');
+    fireEvent.click(screen.getByRole('button', { name: '仕様.md' }));
+    expect(documentToggle().getAttribute('aria-expanded')).toBe('false');
+    expect(screen.getByText('# 仕様')).toBeTruthy();
+
+    fireEvent.click(taskToggle());
+    fireEvent.click(await screen.findByRole('button', { name: '#102 画面' }));
+    await screen.findByRole('tab', { name: '#102 画面' });
+    expect(taskToggle().getAttribute('aria-expanded')).toBe('false');
+    expect(screen.getByRole('tab', { name: '#102 画面' }).getAttribute('aria-selected')).toBe('true');
+    fireEvent.click(documentToggle());
+    fireEvent.click(document.body);
+    expect(documentToggle().getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('removes the outside-click listener when the workspace is unmounted', () => {
+    const add = vi.spyOn(document, 'addEventListener');
+    const remove = vi.spyOn(document, 'removeEventListener');
+    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(() => {})));
+    try {
+      const view = render(() => <Workspace taskId={103} onHome={() => {}} />);
+      const registered = add.mock.calls.find(([type, , capture]) => type === 'click' && capture === true);
+      expect(registered).toBeTruthy();
+      view.unmount();
+      expect(remove).toHaveBeenCalledWith('click', registered![1], true);
+    } finally {
+      add.mockRestore();
+      remove.mockRestore();
+    }
+  });
+
   it('uses real same-project tasks and documents to close, switch and reopen tabs', async () => {
     const first = { id: 1, projectId: 4, name: '設計', phase: 'requirements', status: 'idle' };
     const second = { id: 2, projectId: 4, name: '画面', phase: 'requirements', status: 'idle' };
@@ -52,6 +119,7 @@ describe('Workspace task and document tabs', () => {
     fireEvent.click(screen.getByRole('button', { name: '仕様.md を閉じる' }));
     expect(screen.queryByRole('tab', { name: '仕様.md' })).toBeNull();
     expect(screen.getByText('# 設計')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: '文書ツリーを開閉' }));
     fireEvent.click(screen.getByRole('button', { name: '仕様.md' }));
     expect(screen.getByText('# 仕様')).toBeTruthy();
 
@@ -59,6 +127,7 @@ describe('Workspace task and document tabs', () => {
     fireEvent.click(screen.getByRole('button', { name: '#1 設計 を閉じる' }));
     expect(screen.queryByRole('tab', { name: '#1 設計' })).toBeNull();
     expect(screen.queryByRole('textbox', { name: '希望や回答を入力' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'タスクツリーを開閉' }));
     fireEvent.click(screen.getByRole('button', { name: '#1 設計' }));
     await screen.findByRole('tab', { name: '#1 設計' });
     expect(screen.getByRole('textbox', { name: '希望や回答を入力' })).toBeTruthy();
