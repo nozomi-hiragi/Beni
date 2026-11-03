@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Beni プロジェクト詳細画面案</title><link rel="stylesheet" href="beni-layout.css"></head>
+<body data-page="project"><div data-include="menu"></div>
+<main id="projectView">
+    <div class="workspace">
+      <div class="left">
+        <section class="pane chat-pane" data-tree-id="taskTree" data-tree-label="タスクツリー">
+          <div data-include="tab-bar"></div>
+          <template class="tab-items"><button id="taskChatTab" class="active" onclick="document.getElementById('taskIndicator').classList.remove('hidden'); document.getElementById('taskChatTab').classList.add('active'); document.getElementById('generalChatTab').classList.remove('active'); document.getElementById('taskMessages').classList.remove('hidden'); document.getElementById('generalMessages').classList.add('hidden')">#12 ログイン画面</button><button id="generalChatTab" onclick="document.getElementById('taskIndicator').classList.add('hidden'); document.getElementById('generalChatTab').classList.add('active'); document.getElementById('taskChatTab').classList.remove('active'); document.getElementById('generalMessages').classList.remove('hidden'); document.getElementById('taskMessages').classList.add('hidden')">ジェネラル</button></template>
+          <div data-include="phase-indicator"></div>
+          <div data-include="tree-view" data-tree-id="taskTree" data-tree-label="タスク"></div>
+          <script type="application/json" class="tree-data">[{"label":"#12 ログイン画面の検討","target":"taskChatTab"}]</script>
+          <div data-include="chat-content"></div>
+          <div data-include="chat-composer"></div>
+        </section>
+        <section class="pane terminal" data-add-label="ターミナルを追加">
+ <div data-include="tab-bar"></div>
+ <template class="tab-items"><button id="terminalTab1" class="active" type="button">ターミナル 1</button><button id="terminalTab2" type="button">ターミナル 2</button></template>
+ <div class="content terminal-output" id="terminalOutput1"><pre class="muted">ターミナル 1 のサンプル</pre></div>
+ <div class="content terminal-output hidden" id="terminalOutput2"><pre class="muted">ターミナル 2 のサンプル</pre></div>
+</section>
+      </div>
+      <section class="pane preview" data-tree-id="previewTree" data-tree-label="ファイルツリー">
+          <div data-include="tab-bar"></div>
+          <template class="tab-items"><button id="specBtn" class="active" onclick="document.getElementById('specPreview').classList.remove('hidden');document.getElementById('planPreview').classList.add('hidden');document.getElementById('phaseEmpty').classList.add('hidden');document.getElementById('specBtn').classList.add('active');document.getElementById('planBtn').classList.remove('active')">指示書.md</button><button id="planBtn" onclick="document.getElementById('planPreview').classList.remove('hidden');document.getElementById('specPreview').classList.add('hidden');document.getElementById('phaseEmpty').classList.add('hidden');document.getElementById('planBtn').classList.add('active');document.getElementById('specBtn').classList.remove('active')">実装計画.md</button></template>
+        <div data-include="tree-view" data-tree-id="previewTree" data-tree-label="ファイル"></div>
+        <script type="application/json" class="tree-data">[{"label":"docs","children":[{"label":"指示書.md","target":"specBtn"},{"label":"実装計画.md","target":"planBtn"}]}]</script>
+        <div class="content" id="specPreview">
+          <h2>ログイン画面</h2>
+          <h3>希望</h3>
+          <p>ログイン画面を作成する。</p>
+          <h3>未確定</h3>
+          <p>認証方法などを確認する。</p>
+          <p class="muted">プレビューのサンプル</p>
+        </div>
+        <div class="content hidden" id="phaseEmpty"><p>このフェーズの MD はまだありません。</p></div>
+        <div class="content hidden" id="planPreview">
+          <h2>実装計画</h2>
+          <p>ここに実装計画を表示します。</p>
+          <p class="muted">プレビューのサンプル</p>
+        </div>
+      </section>
+    </div>
+  </main>
+<script>
+async function prepare() {
+  try {
+    while (document.querySelector('[data-include]:not([data-loaded])')) {
+      await Promise.all([...document.querySelectorAll('[data-include]:not([data-loaded])')].map(async node => {
+        const response = await fetch(`components/${node.dataset.include}.html`);
+        if (!response.ok) throw new Error('部品を読み込めませんでした');
+        node.innerHTML = await response.text();
+        node.dataset.loaded = 'true';
+      }));
+    }
+    function renderTree(node, items) {
+  const section = node.closest('section'), panel = node.querySelector('.tree-panel'), container = panel.querySelector('.tree-items');
+  panel.id = node.dataset.treeId; panel.setAttribute('aria-label', node.dataset.treeLabel); panel.querySelector('.tree-title').textContent = node.dataset.treeLabel;
+  container.replaceChildren();
+  function appendItems(parent, children) {
+    children.forEach(item => {
+      if (item.children) { const details = document.createElement('details'), summary = document.createElement('summary'); summary.textContent = item.label; details.open = true; details.append(summary); appendItems(details, item.children); parent.append(details); }
+      else { const button = document.createElement('button'); button.type = 'button'; button.textContent = item.label; button.onclick = () => section.dispatchEvent(new CustomEvent('tree-select', {detail:item, bubbles:true})); parent.append(button); }
+    });
+  }
+  appendItems(container, items);
+}
+function attachClosableTabs(items, section) {
+  [...items.children].filter(node => node.tagName === 'BUTTON').forEach(tab => {
+    const wrapper = document.createElement('span'); wrapper.className = 'tab-item';
+    items.insertBefore(wrapper, tab); wrapper.append(tab); tab.classList.add('tab-label');
+    const close = document.createElement('button'); close.type = 'button'; close.className = 'tab-close'; close.textContent = '×'; close.setAttribute('aria-label', tab.textContent.trim() + 'を閉じる');
+    close.onclick = () => {
+      const active = tab.classList.contains('active'); wrapper.classList.add('hidden');
+      if (!active) return;
+      const visible = [...items.querySelectorAll('.tab-item:not(.hidden) .tab-label')];
+      if (visible.length) visible[visible.length - 1].click();
+      else section.querySelectorAll('.terminal-output, #specPreview, #planPreview, #phaseEmpty, #taskMessages, #generalMessages, #taskIndicator').forEach(node => node.classList.add('hidden'));
+    };
+    wrapper.append(close);
+  });
+}
+function setupShared(root = document) {
+ root.querySelectorAll('[data-include="tab-bar"]').forEach(node => {
+  const bar = node.querySelector('.fixed-tabs'), section = node.closest('section');
+  const button = bar.querySelector('.tab-left'), template = section.querySelector('template.tab-items');
+  if (section.dataset.treeId) { button.classList.remove('hidden'); button.textContent = '☰'; button.setAttribute('aria-expanded', 'false'); button.setAttribute('aria-controls', section.dataset.treeId); button.setAttribute('aria-label', section.dataset.treeLabel + 'を開閉'); button.title = section.dataset.treeLabel; button.onclick = () => { const panel = document.getElementById(section.dataset.treeId); if (panel) { panel.classList.toggle('hidden'); button.setAttribute('aria-expanded', String(!panel.classList.contains('hidden'))); } }; }
+  bar.querySelector('.tab-items').append(template.content.cloneNode(true));
+  attachClosableTabs(bar.querySelector('.tab-items'), section);
+  const add = bar.querySelector('.tab-right');
+  if (section.dataset.addLabel) { add.classList.remove('hidden'); add.textContent = '＋'; add.setAttribute('aria-label', section.dataset.addLabel); add.title = section.dataset.addLabel; add.onclick = () => section.dispatchEvent(new CustomEvent('tab-add')); }
+ });
+ root.querySelectorAll('[data-include="tree-view"]').forEach(node => {
+  const data = node.closest('section').querySelector('.tree-data');
+  const items = JSON.parse(data.textContent); node._items = items; renderTree(node, items);
+ });
+ const terminal = root.querySelector('.terminal[data-add-label]');
+ if (terminal) {
+  const bar = terminal.querySelector('.tab-items');
+  function select(id) {
+    terminal.querySelectorAll('.terminal-output').forEach(el => el.classList.toggle('hidden', el.id !== 'terminalOutput' + id));
+    bar.querySelectorAll('.tab-label').forEach(el => el.classList.toggle('active', el.dataset.terminal === String(id)));
+  }
+  function addEntry(id, exists) {
+    const tab = exists ? terminal.querySelector('#terminalTab' + id) : document.createElement('button');
+    tab.type = 'button'; tab.id = 'terminalTab' + id; tab.dataset.terminal = String(id); tab.textContent = 'ターミナル ' + id; tab.onclick = () => select(id);
+    if (!exists) { bar.append(tab); attachClosableTabs(bar, terminal); const output = document.createElement('div'); output.className = 'content terminal-output hidden'; output.id = 'terminalOutput' + id; const pre = document.createElement('pre'); pre.className = 'muted'; pre.textContent = 'ターミナル ' + id + ' のサンプル'; output.append(pre); terminal.append(output); }
+  }
+  addEntry(1, true); addEntry(2, true); select(1);
+  terminal.addEventListener('tab-add', () => { const id = bar.querySelectorAll('.tab-label').length + 1; addEntry(id, false); select(id); });
+ }
+ const chat = root.querySelector('.chat-pane[data-tree-id]');
+ if (chat) chat.addEventListener('tree-select', event => { const tab = document.getElementById(event.detail.target); if (tab) { tab.closest('.tab-item')?.classList.remove('hidden'); tab.click(); } });
+ const preview = root.querySelector('.preview[data-tree-id]');
+ if (preview) preview.addEventListener('tree-select', event => { const tab = document.getElementById(event.detail.target); if (tab) { tab.closest('.tab-item')?.classList.remove('hidden'); tab.click(); } });
+}
+    setupShared();
+    const $ = id => document.getElementById(id);
+    $('homeBtn').onclick = () => { location.href = 'beni-layout.html'; };
+    $('settingsBtn').onclick = () => { location.href = 'settings.html'; };
+    if (document.body.dataset.page !== 'home') $('homeBtn').classList.remove('hidden');
+    if (document.body.dataset.page === 'project') { $('menuTitle').textContent = 'サンプルプロジェクト'; $('projectSettingsBtn').classList.remove('hidden'); }
+    if (document.body.dataset.page === 'settings') $('menuTitle').textContent = '設定';
+    if (document.body.dataset.page === 'home') {
+      document.querySelectorAll('.row').forEach(row => {
+        row.onclick = () => { location.href = 'project-detail.html'; };
+        row.onkeydown = event => { if (event.key === 'Enter') location.href = 'project-detail.html'; };
+      });
+      const check = () => { $('create').disabled = !$('taskName').value.trim() || !$('project').value || $('project').value === 'new'; };
+      $('taskName').oninput = check;
+      const dialog = $('projectCreateDialog');
+      $('project').onchange = () => { if ($('project').value === 'new') { $('project').value = ''; dialog.showModal(); } check(); };
+      dialog.addEventListener('close', () => { if (dialog.returnValue === 'create') { const name = $('projectName').value; const option = new Option(name, name); $('project').add(option, $('project').querySelector('[value=new]')); $('project').value = name; } check(); });
+      $('createForm').onsubmit = event => { event.preventDefault(); location.href = 'project-detail.html'; };
+      const directions = new Map();
+      document.querySelectorAll('.task-head button').forEach(button => {
+        const label = button.textContent;
+        button.onclick = () => {
+          const column = Number(button.dataset.sort), direction = directions.get(column) === 'asc' ? 'desc' : 'asc';
+          directions.set(column, direction);
+          const section = document.querySelector('.tasks');
+          const rows = [...section.querySelectorAll('.row')].map((row, index) => ({row, index}));
+          const value = row => row.children[column].textContent.trim(), collator = new Intl.Collator('ja', {numeric:true});
+          rows.sort((a,b) => (direction === 'asc' ? 1 : -1) * collator.compare(value(a.row), value(b.row)) || a.index - b.index);
+          rows.forEach(({row}) => section.appendChild(row));
+          document.querySelectorAll('.task-head button').forEach(other => { other.textContent = other.dataset.label; other.removeAttribute('aria-pressed'); });
+          button.textContent = label + (direction === 'asc' ? ' ▲' : ' ▼'); button.setAttribute('aria-pressed', 'true');
+        };
+        button.dataset.label = label;
+      });
+    }
+  } catch { document.body.insertAdjacentText('beforeend', '画面部品を読み込めませんでした。'); }
+}
+prepare();
+</script>
+</body></html>

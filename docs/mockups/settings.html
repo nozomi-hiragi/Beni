@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Beni 設定画面案</title><link rel="stylesheet" href="beni-layout.css"></head>
+<body data-page="settings"><div data-include="menu"></div>
+<main id="settingsView" class="page">
+  <h1>設定</h1>
+  <div data-include="connections"></div>
+</main>
+<script>
+async function prepare() {
+  try {
+    while (document.querySelector('[data-include]:not([data-loaded])')) {
+      await Promise.all([...document.querySelectorAll('[data-include]:not([data-loaded])')].map(async node => {
+        const response = await fetch(`components/${node.dataset.include}.html`);
+        if (!response.ok) throw new Error('部品を読み込めませんでした');
+        node.innerHTML = await response.text();
+        node.dataset.loaded = 'true';
+      }));
+    }
+    document.querySelectorAll('[data-include="tab-bar"]').forEach(node => {
+  const bar = node.querySelector('.fixed-tabs'), section = node.closest('section');
+  const button = bar.querySelector('.tab-left'), template = section.querySelector('template.tab-items');
+  button.setAttribute('aria-controls', section.dataset.treeId);
+  button.setAttribute('aria-label', section.dataset.treeLabel + 'を開閉');
+  button.title = section.dataset.treeLabel;
+  bar.querySelector('.tab-items').append(template.content.cloneNode(true));
+});
+    const $ = id => document.getElementById(id);
+    $('homeBtn').onclick = () => { location.href = 'beni-layout.html'; };
+    $('settingsBtn').onclick = () => { location.href = 'settings.html'; };
+    if (document.body.dataset.page !== 'home') $('homeBtn').classList.remove('hidden');
+    if (document.body.dataset.page === 'project') { $('menuTitle').textContent = 'サンプルプロジェクト'; $('projectSettingsBtn').classList.remove('hidden'); }
+    if (document.body.dataset.page === 'settings') $('menuTitle').textContent = '設定';
+    if (document.body.dataset.page === 'home') {
+      document.querySelectorAll('.row').forEach(row => {
+        row.onclick = () => { location.href = 'project-detail.html'; };
+        row.onkeydown = event => { if (event.key === 'Enter') location.href = 'project-detail.html'; };
+      });
+      const check = () => { $('create').disabled = !$('taskName').value.trim() || !$('project').value || $('project').value === 'new'; };
+      $('taskName').oninput = check;
+      const dialog = $('projectCreateDialog');
+      $('project').onchange = () => { if ($('project').value === 'new') { $('project').value = ''; dialog.showModal(); } check(); };
+      dialog.addEventListener('close', () => { if (dialog.returnValue === 'create') { const name = $('projectName').value; const option = new Option(name, name); $('project').add(option, $('project').querySelector('[value=new]')); $('project').value = name; } check(); });
+      $('createForm').onsubmit = event => { event.preventDefault(); location.href = 'project-detail.html'; };
+      const directions = new Map();
+      document.querySelectorAll('.task-head button').forEach(button => {
+        const label = button.textContent;
+        button.onclick = () => {
+          const column = Number(button.dataset.sort), direction = directions.get(column) === 'asc' ? 'desc' : 'asc';
+          directions.set(column, direction);
+          const section = document.querySelector('.tasks');
+          const rows = [...section.querySelectorAll('.row')].map((row, index) => ({row, index}));
+          const value = row => row.children[column].textContent.trim(), collator = new Intl.Collator('ja', {numeric:true});
+          rows.sort((a,b) => (direction === 'asc' ? 1 : -1) * collator.compare(value(a.row), value(b.row)) || a.index - b.index);
+          rows.forEach(({row}) => section.appendChild(row));
+          document.querySelectorAll('.task-head button').forEach(other => { other.textContent = other.dataset.label; other.removeAttribute('aria-pressed'); });
+          button.textContent = label + (direction === 'asc' ? ' ▲' : ' ▼'); button.setAttribute('aria-pressed', 'true');
+        };
+        button.dataset.label = label;
+      });
+    }
+  } catch { document.body.insertAdjacentText('beforeend', '画面部品を読み込めませんでした。'); }
+}
+prepare();
+</script>
+</body></html>

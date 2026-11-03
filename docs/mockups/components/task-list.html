@@ -1,0 +1,31 @@
+<link rel="stylesheet" href="beni-layout.css">
+<section class="box tasks">
+      <div class="section-head">
+        <h2>タスク一覧</h2>
+      </div>
+      <div class="task-head" aria-label="タスク一覧の並び替え"><button type="button" data-sort="0">ID</button><button type="button" data-sort="1">タスク名</button><button type="button" data-sort="2">フェーズ</button><button type="button" data-sort="3">状態</button></div>
+      <div class="row" tabindex="0"><span>#12</span><strong>ログイン画面の検討</strong><span>実装フロー</span><span
+          class="status">確認待ち</span></div>
+      <div class="row" tabindex="0"><span>#11</span><strong>設定画面の作成</strong><span>実装中</span><span
+          class="status">処理中</span></div>
+      <div class="row" tabindex="0"><span>#10</span><strong>検索機能を考える</strong><span>タスク内容</span><span
+          class="status">完了</span></div>
+    </section>
+
+<script>
+const directions = new Map();
+document.querySelectorAll('.task-head button').forEach(button => {
+  const label = button.textContent; button.dataset.label = label;
+  button.onclick = () => {
+    const column = Number(button.dataset.sort), direction = directions.get(column) === 'asc' ? 'desc' : 'asc';
+    directions.set(column, direction);
+    const section = document.querySelector('.tasks');
+    const rows = [...section.querySelectorAll('.row')].map((row,index) => ({row,index}));
+    const collator = new Intl.Collator('ja', {numeric:true});
+    rows.sort((a,b) => (direction === 'asc' ? 1 : -1) * collator.compare(a.row.children[column].textContent.trim(), b.row.children[column].textContent.trim()) || a.index - b.index);
+    rows.forEach(({row}) => section.appendChild(row));
+    document.querySelectorAll('.task-head button').forEach(other => {other.textContent = other.dataset.label; other.removeAttribute('aria-pressed');});
+    button.textContent = label + (direction === 'asc' ? ' ▲' : ' ▼'); button.setAttribute('aria-pressed', 'true');
+  };
+});
+</script>
