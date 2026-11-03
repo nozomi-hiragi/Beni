@@ -6,6 +6,6 @@
 
 ## LLM の接続
 
-ChatGPT、Codex CLI、Claude Code CLI などの接続先の設定と状態を確認する。設定の有無、実行ファイルの検出、認証状態、利用可能性を区別し、未確認を利用可能として表示しない。ChatGPT の認証は Codex CLI の認証と別に扱う。接続方法は実装時に調査する。
+ChatGPT、Codex CLI、Claude Code CLI などの接続先の設定と状態を確認する。設定の有無、実行ファイルの検出、認証状態、利用可能性を区別し、未確認を利用可能として表示しない。Codex が管理する認証、アプリ自身が管理する ChatGPT 認可、API キーは管理経路を区別する。接続方式と認証方式の組み合わせは [LLM チャット連携](../features/llm-chat.md)を参照する。
 
 関連：[ホーム画面](home.md) / [プロジェクト詳細画面](project-detail.md)
