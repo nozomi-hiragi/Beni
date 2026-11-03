@@ -3,6 +3,7 @@ import { api } from './api';
 import TaskCreate from './components/TaskCreate';
 import TaskList, { type SortKey } from './components/TaskList';
 import ProjectCreateDialog from './components/ProjectCreateDialog';
+import { scheduleRequirements } from './workflowController';
 import type { AppState, Project, Task } from './types';
 
 export interface HomeProps {
@@ -175,6 +176,8 @@ export default function Home(props: HomeProps) {
     try {
       const task = await api<Task>('/api/tasks', { projectId: project.id, name });
       for (const notify of taskListeners) notify(task);
+      // Task creation may finish after Home unmounts; scheduling must not depend on navigation.
+      scheduleRequirements(task.id, true);
       if (taskNameEditVersion === nameEditBefore) setTaskName('');
       // A completion from an old Home must never take over the current view.
       if (alive && interactionVersion === before && String(project.id) === projectId()) props.onOpenTask(task, project, true);
