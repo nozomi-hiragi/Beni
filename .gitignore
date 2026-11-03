@@ -141,3 +141,10 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
+
+# Local Beni data
+/beni.sqlite*
+
+# Built frontend
+/ui/generated.css
+/ui/build/
