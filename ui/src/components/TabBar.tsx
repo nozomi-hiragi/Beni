@@ -19,7 +19,7 @@ export default function TabBar(props: TabBarProps) {
     <Show when={props.left}><div class="shrink-0">{props.left}</div></Show>
     <div class="flex min-w-0 flex-1 overflow-x-auto">
       <div class="flex shrink-0" role="tablist" aria-label={props.label}>
-        <For each={props.tabs}>{tab => <span class="flex shrink-0 items-center border-b-2" classList={{ 'border-primary font-semibold': props.activeId === tab.id, 'border-transparent text-base-content/60': props.activeId !== tab.id }}>
+        <For each={props.tabs}>{tab => <span class="flex shrink-0 items-center border-b-2 border-r border-r-base-300" classList={{ 'border-b-primary font-semibold': props.activeId === tab.id, 'border-b-transparent text-base-content/60': props.activeId !== tab.id }}>
           <button type="button" role="tab" class="px-4 py-3 text-sm" aria-selected={props.activeId === tab.id} onClick={() => props.onSelect(tab.id)}>{tab.label}</button>
           <Show when={props.onClose}>{onClose => <button type="button" class="px-2 py-3 text-sm" aria-label={`${tab.label} を閉じる`} onClick={() => onClose()(tab.id)}>×</button>}</Show>
         </span>}</For>

@@ -1,5 +1,5 @@
 import { For, Show } from 'solid-js';
-import type { Project } from './types';
+import type { Project } from '../types';
 
 export interface TaskCreateProps {
   taskName: string;
@@ -16,10 +16,10 @@ export interface TaskCreateProps {
 }
 
 export default function TaskCreate(props: TaskCreateProps) {
-  return <div class="create-card">
-    <form class="create" onSubmit={props.onCreateTask}>
+  return <div class="rounded-2xl border border-base-300 bg-base-100 p-[1.1rem] shadow-sm">
+    <form class="flex items-center gap-3 max-[900px]:flex-wrap max-[540px]:[&>*]:w-full" onSubmit={props.onCreateTask}>
       <input
-        class="input input-bordered task-name"
+        class="input input-bordered min-w-0 flex-[1_1_18rem] max-[900px]:basis-full"
         aria-label="タスク名"
         placeholder="タスク名"
         required
@@ -28,7 +28,7 @@ export default function TaskCreate(props: TaskCreateProps) {
       />
       <select
         ref={props.projectSelectRef}
-        class="select select-bordered project-select"
+        class="select select-bordered min-w-40 flex-[0_1_14rem] max-[540px]:basis-full"
         aria-label="プロジェクト"
         value={props.projectId}
         onChange={event => props.onChooseProject(event.currentTarget.value)}

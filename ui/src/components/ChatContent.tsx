@@ -1,5 +1,5 @@
 import { For, Show } from 'solid-js';
-import type { Message } from './types';
+import type { Message } from '../types';
 
 export default function ChatContent(props: { messages: Message[] }) {
   return <div class="min-h-0 flex-1 space-y-3 overflow-y-auto p-5" aria-live="polite">

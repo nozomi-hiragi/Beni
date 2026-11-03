@@ -1,8 +1,8 @@
 import { createEffect, createMemo, createSignal, onCleanup, onMount, Show } from 'solid-js';
 import { api } from './api';
-import TaskCreate from './TaskCreate';
-import TaskList, { type SortKey } from './TaskList';
-import ProjectCreateDialog from './ProjectCreateDialog';
+import TaskCreate from './components/TaskCreate';
+import TaskList, { type SortKey } from './components/TaskList';
+import ProjectCreateDialog from './components/ProjectCreateDialog';
 import type { AppState, Project, Task } from './types';
 
 export interface HomeProps {
@@ -194,7 +194,7 @@ export default function Home(props: HomeProps) {
     props.onOpenTask(task, project, false);
   }
 
-  return <section class="home-surface mx-auto max-w-6xl">
+  return <section class="mx-auto max-w-6xl py-[clamp(1rem,3vw,2.5rem)]">
     <Show when={error() || actionError()}><p role="alert" class="alert alert-error mb-4">{error() || actionError()}</p></Show>
     <TaskCreate
       taskName={taskName()}
