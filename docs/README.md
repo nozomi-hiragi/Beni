@@ -11,6 +11,6 @@
 - 機能
   - [タスク検索](features/task-search.md)
 
-## 既存版の資料
+## 旧版
 
-- [アプリケーション動作フロー](application-workflow.md)
+- [旧版のアプリケーション動作フロー](../legacy/docs/application-workflow.md)

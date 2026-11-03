@@ -2,9 +2,9 @@
 
 ## Project
 
-Beni is a continuously running desktop application that automates work on local projects.
+Beni helps users direct, plan, and supervise coding tasks with multiple agents through a Web UI.
 
-It receives events from services such as Linear and uses Codex to perform tasks on local repositories.
+The current specifications are in `docs/`. Earlier application files are preserved under `legacy/`.
 
 Keep implementations focused on this purpose. Do not introduce features or infrastructure based only on hypothetical future needs.
 
