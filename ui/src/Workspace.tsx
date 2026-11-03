@@ -8,7 +8,9 @@ import TreeView from './components/TreeView';
 import type { AppState, Document, Task, TaskDetail } from './types';
 
 export interface WorkspaceProps {
-  taskId: number;
+  taskId?: number;
+  projectId?: number;
+  onTaskChange?: (id: number | undefined, task?: Task) => void;
   onHome: () => void;
 }
 
@@ -40,8 +42,8 @@ type DocumentTabs = { known: string[]; open: string[]; selected?: string };
 export default function Workspace(props: WorkspaceProps) {
   const [detail, setDetail] = createSignal<TaskDetail>();
   const [activeTask, setActiveTask] = createSignal<number | undefined>(props.taskId);
-  const [openTasks, setOpenTasks] = createSignal<number[]>([props.taskId]);
-  const [projectId, setProjectId] = createSignal<number>();
+  const [openTasks, setOpenTasks] = createSignal<number[]>(props.taskId === undefined ? [] : [props.taskId]);
+  const [projectId, setProjectId] = createSignal<number | undefined>(props.projectId);
   const [tasks, setTasks] = createSignal<Task[]>([]);
   const [treeError, setTreeError] = createSignal('');
   const [taskTreeOpen, setTaskTreeOpen] = createSignal(false);
@@ -84,6 +86,13 @@ export default function Workspace(props: WorkspaceProps) {
   const documents = createMemo(() => detail()?.documents ?? []);
   const documentLabel = (document: Document) => documents().filter(item => item.name === document.name).length > 1 ? `${document.name} · v${document.version}` : document.name;
   const currentDocument = createMemo(() => documents().find(document => documentId(document) === activeDocument()));
+
+  // URL changes select tabs without remounting this workspace or creating history.
+  createEffect(() => {
+    const id = props.taskId;
+    if (id !== undefined) setOpenTasks(previous => previous.includes(id) ? previous : [...previous, id]);
+    setActiveTask(id);
+  });
 
   onMount(async () => {
     try {
@@ -175,11 +184,16 @@ export default function Workspace(props: WorkspaceProps) {
     if (id !== props.taskId && !taskOptions().some(task => task.id === id)) return;
     setOpenTasks(previous => previous.includes(id) ? previous : [...previous, id]);
     setActiveTask(id);
+    props.onTaskChange?.(id, taskOptions().find(task => task.id === id));
   }
   function closeTask(id: number) {
     const remaining = openTasks().filter(item => item !== id);
     setOpenTasks(remaining);
-    if (activeTask() === id) setActiveTask(remaining[remaining.length - 1]);
+    if (activeTask() === id) {
+      const next = remaining[remaining.length - 1];
+      setActiveTask(next);
+      props.onTaskChange?.(next, taskOptions().find(task => task.id === next));
+    }
   }
   function openDocument(id: string) {
     if (documentOwner === undefined || !documents().some(document => documentId(document) === id)) return;
@@ -232,8 +246,9 @@ export default function Workspace(props: WorkspaceProps) {
       <section class="card flex min-h-[20rem] min-w-0 flex-1 flex-col overflow-hidden border border-base-300 bg-base-100 shadow-sm" aria-label="タスクチャット">
         <TabBar label="チャット" tabs={openTasks().map(id => ({ id: String(id), label: taskName(id) }))} activeId={activeTask() === undefined ? undefined : String(activeTask())} onSelect={id => openTask(Number(id))} onClose={id => closeTask(Number(id))} left={toggle('タスクツリーを開閉', taskTreeOpen(), 'task-tree', () => setTaskTreeOpen(value => !value), element => { taskTreeToggle = element; })} />
         <div class="relative flex min-h-0 flex-1 flex-col">
-          <Show when={taskTreeOpen()}><TreeView id="task-tree" label="タスク" nodes={[...taskOptions().map(task => ({id:String(task.id), label:taskLabel(task)})), ...(!taskOptions().some(task => task.id === props.taskId) ? [{id:String(props.taskId),label:taskName(props.taskId)}] : [])]} onSelect={id => { openTask(Number(id)); setTaskTreeOpen(false); }} /></Show>
+          <Show when={taskTreeOpen()}><TreeView id="task-tree" label="タスク" nodes={[...taskOptions().map(task => ({id:String(task.id), label:taskLabel(task)})), ...(props.taskId !== undefined && !taskOptions().some(task => task.id === props.taskId) ? [{id:String(props.taskId),label:taskName(props.taskId)}] : [])]} onSelect={id => { openTask(Number(id)); setTaskTreeOpen(false); }} /></Show>
           <Show when={taskTreeOpen() && treeError()}><p role="alert" class="relative z-20 m-2 text-sm text-error">{treeError()}</p></Show>
+          <Show when={activeTask() === undefined}><p class="p-4 text-sm text-base-content/60">ツリーからタスクを選択してください。</p></Show>
           <Show when={activeTask() !== undefined}>
             <Show when={loadError()}><div role="alert" class="alert alert-error text-sm">{loadError()}</div></Show>
             <Show when={loading() && !detail()}><p class="p-4 text-sm text-base-content/60">読み込み中...</p></Show>

@@ -29,8 +29,8 @@ export function createHandler(store: Store, initialFolder = homedir()) {
   if (url.hostname !== '127.0.0.1') return new Response('Forbidden',{status:403});
   const json = (value: unknown, status = 200) => Response.json(value,{status,headers:{'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}});
   if (request.method === 'GET') {
-   if (url.pathname === '/' || ['/ui/index.html','/ui/build/app.js','/ui/generated.css'].includes(url.pathname)) {
-    const file = url.pathname === '/' ? 'index.html' : url.pathname.slice('/ui/'.length);
+   if (url.pathname === '/' || url.pathname === '/settings' || /^\/project\/[1-9]\d*$/.test(url.pathname) || ['/ui/index.html','/ui/build/app.js','/ui/generated.css'].includes(url.pathname)) {
+    const file = url.pathname.startsWith('/ui/') ? url.pathname.slice('/ui/'.length) : 'index.html';
     return new Response(Bun.file(new URL(`./ui/${file}`,import.meta.url)),{headers:{'Content-Security-Policy':"default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'",'X-Content-Type-Options':'nosniff','Cache-Control':'no-store'}});
    }
    if (url.pathname === '/api/state') return json({projects:store.projects(),tasks:store.tasks().map(projectTask)});

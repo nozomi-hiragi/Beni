@@ -35,6 +35,21 @@ test('serves the compiled Solid app and locally generated stylesheet', async () 
  } finally { store.close(); }
 });
 
+test('serves SPA entry for supported direct URLs without intercepting API or other paths', async () => {
+ const store = new Store(':memory:');
+ try {
+  const handle = createHandler(store);
+  for (const path of ['/settings', '/project/1', '/project/42?task=10']) {
+   const response = await handle(new Request(`http://127.0.0.1:3210${path}`));
+   expect(response.status).toBe(200);
+   expect(await response.text()).toContain('/ui/build/app.js');
+  }
+  for (const path of ['/project', '/project/0', '/settings/extra', '/api/missing']) {
+   expect((await handle(new Request(`http://127.0.0.1:3210${path}`))).status).toBe(404);
+  }
+ } finally { store.close(); }
+});
+
 test('folder picker lists direct real folders, resolves paths safely and rejects cross-origin or invalid input', async () => {
  const root = await mkdtemp(join(tmpdir(), 'beni-picker-test-'));
  const store = new Store(':memory:');
