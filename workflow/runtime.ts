@@ -3,6 +3,7 @@ import { Store } from '../store';
 import { createHandler } from '../server';
 import { createWorkflowHandler, type WorkflowAdapters } from './http';
 import { databasePath } from './database';
+import { outcomeState } from './outcome';
 
 type Task = { id: number; phase: string; status: string; [key: string]: unknown };
 type Event = { id: number; kind: string; payload: any };
@@ -21,6 +22,7 @@ const nonempty = (value: unknown): value is string => typeof value === 'string' 
 const sameDocument = (a: any, b: any) => !!a && !!b && a.version === b.version && a.content === b.content;
 function assertCompleted(taskId: number, requirements: any, plan: any, approval: Event, requested: Event, result: Event, verdict: Event, attempts: any[], reviews: any[]) {
   const execution = result.payload.result;
+  if (outcomeState(execution) !== 'known') throw new CorruptHistory('execution outcome is not confirmed');
   if (!nonempty(execution?.output) || !Array.isArray(execution.evidence) || !execution.evidence.length || !execution.evidence.every(nonempty)) throw new CorruptHistory('execution evidence missing');
   const attempt = attempts.find(r => r.id === requested.payload.attemptId);
   const review = reviews.find(r => r.id === verdict.payload.reviewId);
@@ -38,8 +40,12 @@ function projectTask(db: Database, task: Task, tables: Set<string>): Task {
   const planGenerations = rows('plan_generations');
   const attempts = rows('execution_attempts');
   const reviews = rows('execution_reviews');
+  const events = (rows('workflow_events') as Event[]).reverse().map(e => ({ ...e, payload: objectJson(e.payload) }));
+  if (events.some(event => event.kind === 'execution_result' && outcomeState(event.payload.result) === 'invalid')) throw new CorruptHistory('invalid execution outcome');
   // Preserve the existing UI's canonical value for the requirements phase.
   const display = (phase: string, status: string) => ({ ...task, phase: phase === 'タスク内容' ? 'requirements' : phase, status });
+  if (events.some(event => ((event.kind === 'execution_result' && outcomeState(event.payload.result) === 'unknown') || event.kind === 'execution_interrupted')
+    && !events.some(ack => ack.kind === 'recovery_acknowledged' && ack.payload.attemptId === event.payload.attemptId))) return display('実装中', '結果の確認が必要');
   if (reqGenerations.some(r => r.status === 'running')) return display('タスク内容', '指示書を作成中');
   if (planGenerations.some(r => r.status === 'running')) return display('実装フロー', '計画を作成中');
   if (attempts.some(r => r.status === 'running')) return display('実装中', '実行中');
@@ -47,7 +53,6 @@ function projectTask(db: Database, task: Task, tables: Set<string>): Task {
   if (reqGenerations.some(r => ['unknown', 'interrupted'].includes(r.status) && !r.acknowledged_by)) return display('タスク内容', '結果の確認が必要');
   if (planGenerations.some(r => ['unknown', 'interrupted'].includes(r.status) && !r.acknowledged_by)) return display('実装フロー', '結果の確認が必要');
 
-  const events = (rows('workflow_events') as Event[]).reverse().map(e => ({ ...e, payload: objectJson(e.payload) }));
   const last = (kind: string) => events.filter(e => e.kind === kind).at(-1);
   const doc = (kind: string) => db.query('SELECT version,content FROM documents WHERE task_id=? AND kind=? ORDER BY version DESC LIMIT 1').get(task.id, kind) as { version: number } | null;
   const requirements = doc('requirements'), plan = doc('plan');
@@ -62,7 +67,7 @@ function projectTask(db: Database, task: Task, tables: Set<string>): Task {
   if (!requested) return display('実装フロー', '実行指示待ち');
   const result = events.filter(e => e.kind === 'execution_result' && e.payload.attemptId === requested.payload.attemptId).at(-1);
   if (!result) return display('実装中', '結果の確認が必要');
-  if (result.payload.result?.outcomeUnknown) return display('実装中', '結果の確認が必要');
+  if (outcomeState(result.payload.result) === 'unknown') return display('実装中', '結果の確認が必要');
   if (result.payload.stale === true) return display('タスク内容', '追加指示・変更あり');
   if (result.payload.stale !== false) throw new CorruptHistory('invalid execution freshness');
   if (result.payload.status !== 'succeeded') return display('実装中', '実行失敗');

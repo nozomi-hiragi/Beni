@@ -200,6 +200,71 @@ test('review sees saved evidence, changes requested feed a new plan, and old app
   } finally { f.close(); }
 });
 
+test('review rejects unknown or malformed execution outcomes and accepts absent or false flags', async () => {
+  const cases: { label: string; result: Record<string, unknown>; accepted: boolean }[] = [
+    { label: 'unknown', result: { outcomeUnknown: true }, accepted: false },
+    { label: 'null', result: { outcomeUnknown: null }, accepted: false },
+    { label: 'string', result: { outcomeUnknown: 'false' }, accepted: false },
+    { label: 'number', result: { outcomeUnknown: 0 }, accepted: false },
+    { label: 'object', result: { outcomeUnknown: {} }, accepted: false },
+    { label: 'absent', result: {}, accepted: true },
+    { label: 'false', result: { outcomeUnknown: false }, accepted: true },
+  ];
+  for (const entry of cases) {
+    let reviewCalls = 0;
+    const f = fixture({
+      plan: { generate: async () => ({ content: 'plan' }) },
+      execution: { execute: async () => ({ output: 'done', evidence: ['evidence'], ...entry.result }) },
+      review: { review: async () => { reviewCalls++; return { passed: true, feedback: 'checked' }; } },
+    });
+    try {
+      expect((await f.post('plan', { requestKey: `p-${entry.label}` }))!.status).toBe(200);
+      expect((await f.post('approve', { requirementsVersion: 1, planVersion: 1 }))!.status).toBe(200);
+      const execution = await (await f.post('execute'))!.json();
+      expect(execution.status).toBe(entry.accepted ? 'succeeded' : 'failed');
+      if (!entry.accepted) expect(execution.result.outcomeUnknown).toBe(true);
+      const response = await f.post('review', { attemptId: execution.attemptId });
+      expect(response!.status).toBe(entry.accepted ? 200 : 409);
+      expect(reviewCalls).toBe(entry.accepted ? 1 : 0);
+      if (!entry.accepted) {
+        expect((await f.post('approve', { requirementsVersion: 1, planVersion: 1 }))!.status).toBe(409);
+        expect((await f.post('execute'))!.status).toBe(409);
+        expect((await f.post('acknowledge', { kind: 'execution', attemptId: execution.attemptId }))!.status).toBe(200);
+        expect((await f.post('review', { attemptId: execution.attemptId }))!.status).toBe(409);
+      }
+      const events = await (await f.get('/api/tasks/1/workflow/events'))!.json();
+      expect(events.review).toHaveLength(entry.accepted ? 1 : 0);
+      if (entry.accepted) expect((await response!.json()).status).toBe('completed');
+    } finally { f.close(); }
+  }
+});
+
+test('review rejects previously persisted successful results with unknown or malformed outcome flags', async () => {
+  for (const value of [true, null, 'false', 0, {}]) {
+    let reviewCalls = 0;
+    const f = fixture({
+      plan: { generate: async () => ({ content: 'plan' }) },
+      execution: { execute: async () => ({ output: 'done', evidence: ['evidence'] }) },
+      review: { review: async () => { reviewCalls++; return { passed: true, feedback: 'checked' }; } },
+    });
+    const db = new Database(f.path);
+    try {
+      expect((await f.post('plan', { requestKey: 'p' }))!.status).toBe(200);
+      expect((await f.post('approve', { requirementsVersion: 1, planVersion: 1 }))!.status).toBe(200);
+      const execution = await (await f.post('execute'))!.json();
+      expect(execution.status).toBe('succeeded');
+      const event = db.query("SELECT id,payload FROM workflow_events WHERE kind='execution_result' AND task_id=1").get() as { id: number; payload: string };
+      const payload = JSON.parse(event.payload);
+      payload.result.outcomeUnknown = value;
+      db.query('UPDATE workflow_events SET payload=? WHERE id=?').run(JSON.stringify(payload), event.id);
+      const response = await f.post('review', { attemptId: execution.attemptId });
+      expect(response!.status).toBe(409);
+      expect(reviewCalls).toBe(0);
+      expect((await (await f.get('/api/tasks/1/workflow/events'))!.json()).review).toHaveLength(0);
+    } finally { db.close(); f.close(); }
+  }
+});
+
 test('live review cannot be recovered, and review retry remains unavailable', async () => {
   let release!: (decision: { passed: boolean; feedback: string }) => void;
   let started!: () => void;

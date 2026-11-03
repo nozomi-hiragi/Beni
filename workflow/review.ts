@@ -1,4 +1,5 @@
 import { Database } from 'bun:sqlite';
+import { outcomeState } from './outcome';
 
 export interface ReviewSnapshot {
   taskId: number;
@@ -47,6 +48,9 @@ export class ExecutionReview {
     if (!requested || !result || attempt?.status !== 'succeeded' || latest?.id !== attemptId || result.payload.status !== 'succeeded' || result.payload.stale !== false) throw Error('Current successful execution required');
     const execution = result.payload.result;
     if (!nonempty(execution?.output) || !Array.isArray(execution.evidence) || !execution.evidence.length || !execution.evidence.every(nonempty)) throw Error('Saved evidence required');
+    // Unknown execution outcomes cannot be turned into an approved result by
+    // reviewing their apparent output. Reject malformed flags as well.
+    if (outcomeState(execution) !== 'known') throw Error('Execution outcome must be confirmed');
     const approval = events.filter(e => e.kind === 'approval').at(-1);
     const document = (kind: string) => this.db.query('SELECT version,content FROM documents WHERE task_id=? AND kind=? ORDER BY version DESC LIMIT 1').get(taskId, kind) as {version:number;content:string} | null;
     const requirements = document('requirements'), plan = document('plan');
