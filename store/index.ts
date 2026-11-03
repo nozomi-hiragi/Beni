@@ -11,7 +11,20 @@ export class Store {
  task(id:number){return this.db.query('SELECT * FROM tasks WHERE id=?').get(id)}
  createTask(projectId:number,name:string){return this.db.transaction(()=>{const task=this.db.query('INSERT INTO tasks(project_id,name) VALUES (?,?) RETURNING *').get(projectId,this.text(name)) as {id:number,name:string};this.db.query('INSERT INTO documents(task_id,kind,version,content) VALUES (?,?,?,?)').run(task.id,'requirements',1,'# '+task.name+'\n');return task}).immediate()}
  messages(projectId:number,taskId:number|null){return this.db.query('SELECT * FROM messages WHERE project_id=? AND task_id IS ? ORDER BY id').all(projectId,taskId)}
- addMessage(projectId:number,taskId:number|null,role:string,content:string){if(!['user','assistant','system'].includes(role))throw Error('Invalid role');if(taskId!==null&&!this.db.query('SELECT 1 FROM tasks WHERE id=? AND project_id=?').get(taskId,projectId))throw Error('Task project mismatch');return this.db.query('INSERT INTO messages(project_id,task_id,role,content) VALUES (?,?,?,?) RETURNING *').get(projectId,taskId,role,this.raw(content))}
+ addMessage(projectId:number,taskId:number|null,role:string,content:string){
+  if(!['user','assistant','system'].includes(role))throw Error('Invalid role');
+  const original=this.raw(content);
+  return this.db.transaction(()=>{
+   if(taskId!==null&&!this.db.query('SELECT 1 FROM tasks WHERE id=? AND project_id=?').get(taskId,projectId))throw Error('Task project mismatch');
+   const message=this.db.query('INSERT INTO messages(project_id,task_id,role,content) VALUES (?,?,?,?) RETURNING *').get(projectId,taskId,role,original) as {id:number};
+   // The combined application creates workflow_events at startup. Keep the
+   // original chat message and its workflow record in one transaction.
+   if(role==='user'&&taskId!==null&&this.db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='workflow_events'").get()){
+    this.db.query("INSERT INTO workflow_events(task_id,kind,payload) VALUES (?,'instruction',?)").run(taskId,JSON.stringify({messageId:message.id,original}));
+   }
+   return message;
+  }).immediate();
+ }
  documents(taskId:number){return this.db.query('SELECT * FROM documents WHERE task_id=? ORDER BY id').all(taskId)}
  saveDocument(taskId:number,kind:string,content:string,expectedVersion:number){return this.db.transaction(()=>{const k=this.text(kind);const last=this.db.query('SELECT COALESCE(MAX(version),0) AS version FROM documents WHERE task_id=? AND kind=?').get(taskId,k) as {version:number};if(!Number.isSafeInteger(expectedVersion)||last.version!==expectedVersion)throw Error('Document revision conflict');return this.db.query('INSERT INTO documents(task_id,kind,version,content) VALUES (?,?,?,?) RETURNING *').get(taskId,k,last.version+1,this.raw(content))}).immediate()}
 }
