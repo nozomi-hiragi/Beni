@@ -1,6 +1,8 @@
-import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from 'solid-js';
+import { createEffect, createMemo, createSignal, onCleanup, onMount, Show } from 'solid-js';
 import { api } from './api';
-import FolderPicker from './FolderPicker';
+import TaskCreate from './TaskCreate';
+import TaskList, { type SortKey } from './TaskList';
+import ProjectCreateDialog from './ProjectCreateDialog';
 import type { AppState, Project, Task } from './types';
 
 export interface HomeProps {
@@ -8,14 +10,6 @@ export interface HomeProps {
   onOpenProject?: (project: Project) => void;
   onOpenTask: (task: Task, project: Project, created: boolean) => void;
 }
-
-type SortKey = 'id' | 'name' | 'phase' | 'status';
-const columns: { key: SortKey; label: string }[] = [
-  { key: 'id', label: 'ID' },
-  { key: 'name', label: 'タスク名' },
-  { key: 'phase', label: 'フェーズ' },
-  { key: 'status', label: '状態' },
-];
 
 /** A stable secondary order is the order immediately before the latest header click. */
 function compare(left: Task, right: Task, key: SortKey): number {
@@ -49,6 +43,7 @@ export default function Home(props: HomeProps) {
   const [folderPickerOpen, setFolderPickerOpen] = createSignal(false);
   const [sortKey, setSortKey] = createSignal<SortKey>('id');
   const [sortDirection, setSortDirection] = createSignal<1 | -1>(-1);
+  const sortDirections = new Map<SortKey, 1 | -1>([['id', -1]]);
   let dialog: HTMLDialogElement | undefined;
   let projectSelect: HTMLSelectElement | undefined;
   let projectSelectVersion = 0;
@@ -111,7 +106,8 @@ export default function Home(props: HomeProps) {
   });
 
   function sort(key: SortKey) {
-    const direction: 1 | -1 = sortKey() === key && sortDirection() === 1 ? -1 : 1;
+    const direction: 1 | -1 = sortDirections.get(key) === 1 ? -1 : 1;
+    sortDirections.set(key, direction);
     setTasks(previous => previous.map((task, index) => ({ task, index }))
       .sort((left, right) => direction * compare(left.task, right.task, key) || left.index - right.index)
       .map(item => item.task));
@@ -200,79 +196,31 @@ export default function Home(props: HomeProps) {
 
   return <section class="home-surface mx-auto max-w-6xl">
     <Show when={error() || actionError()}><p role="alert" class="alert alert-error mb-4">{error() || actionError()}</p></Show>
-    <div class="create-card">
-      <form class="create" onSubmit={createTask}>
-        <input
-          class="input input-bordered task-name"
-          aria-label="タスク名"
-          placeholder="タスク名"
-          required
-          value={taskName()}
-          onInput={event => { interactionVersion++; taskNameEditVersion++; setTaskName(event.currentTarget.value); }}
-        />
-        <select
-          ref={projectSelect}
-          class="select select-bordered project-select"
-          aria-label="プロジェクト"
-          value={projectId()}
-          onChange={event => chooseProject(event.currentTarget.value)}
-        >
-          <option value="">プロジェクト</option>
-          <For each={projects()}>{project => <option value={String(project.id)}>{project.name}</option>}</For>
-          <option value="new" disabled={creatingProject()}>＋ 新規プロジェクト作成</option>
-        </select>
-        <Show when={props.onOpenProject}>
-          <button class="btn btn-outline" type="button" disabled={!selectedProject()} onClick={() => {
-            const project = selectedProject();
-            if (project) props.onOpenProject?.(project);
-          }}>プロジェクトを開く</button>
-        </Show>
-        <button class="btn btn-primary" type="submit" disabled={!canCreate()}>タスク作成</button>
-      </form>
-    </div>
-    <div class="task-list">
-      <div class="task-list-heading"><h2>タスク一覧</h2><span class="task-count">{filteredTasks().length} 件</span></div>
-      <div class="table-scroll">
-        <table class="table">
-          <thead><tr><For each={columns}>{column =>
-            <th aria-sort={sortKey() === column.key ? (sortDirection() === 1 ? 'ascending' : 'descending') : 'none'}>
-              <button type="button" class="sort-control" onClick={() => sort(column.key)}>
-                {column.label}<span aria-hidden="true"> ↕</span>
-              </button>
-            </th>
-          }</For></tr></thead>
-          <tbody><For each={filteredTasks()}>{task =>
-            <tr data-id={task.id} tabIndex={0} onClick={() => openTask(task)} onKeyDown={event => {
-              if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openTask(task); }
-            }}>
-              <td class="task-id">#{task.id}</td><td class="task-title">{task.name}</td><td>{task.phase}</td><td><span class="status-chip">{task.status}</span></td>
-            </tr>
-          }</For></tbody>
-        </table>
-        <Show when={loading()}><p class="empty-state">読み込み中</p></Show>
-        <Show when={!loading() && !filteredTasks().length}><p class="empty-state">表示するタスクはありません</p></Show>
-      </div>
-    </div>
-    <dialog ref={dialog} class="modal" aria-labelledby="projectDialogTitle" onClose={() => setFolderPickerOpen(false)} onCancel={event => { if (creatingProject()) event.preventDefault(); }}>
-      <form class="modal-box flex max-w-lg flex-col gap-5" onSubmit={createProject}>
-        <h2 id="projectDialogTitle" class="text-lg font-semibold">プロジェクトを作成</h2>
-        <Show when={projectError()}><p role="alert" class="alert alert-error">{projectError()}</p></Show>
-        <label class="form-control flex flex-col gap-2 text-sm font-medium">プロジェクト名
-          <input name="name" class="input input-bordered w-full font-normal" required disabled={creatingProject()} value={projectName()} onInput={event => setProjectName(event.currentTarget.value)} />
-        </label>
-        <div class="flex flex-col gap-2 text-sm font-medium">
-          <label for="project-folder">フォルダ</label>
-          <div class="flex gap-2">
-            <input id="project-folder" name="folder" class="input input-bordered w-full font-normal" required disabled={creatingProject()} value={folder()} onInput={event => setFolder(event.currentTarget.value)} />
-            <button type="button" class="btn" disabled={creatingProject()} onClick={() => setFolderPickerOpen(true)}>参照</button>
-          </div>
-        </div>
-        <Show when={folderPickerOpen()}><FolderPicker onSelect={path => { setFolder(path); setFolderPickerOpen(false); }} onCancel={() => setFolderPickerOpen(false)} /></Show>
-        <footer class="modal-action mt-1">
-          <button type="button" class="btn btn-ghost" disabled={creatingProject()} onClick={() => dialog?.close()}>キャンセル</button>
-          <button type="submit" class="btn btn-primary" disabled={creatingProject() || !projectName().trim() || !folder().trim()}>作成</button>
-        </footer>
-      </form>
-    </dialog>
+    <TaskCreate
+      taskName={taskName()}
+      projectId={projectId()}
+      projects={projects()}
+      creatingProject={creatingProject()}
+      canCreate={canCreate()}
+      selectedProject={selectedProject()}
+      projectSelectRef={element => { projectSelect = element; }}
+      onTaskName={value => { interactionVersion++; taskNameEditVersion++; setTaskName(value); }}
+      onChooseProject={chooseProject}
+      onCreateTask={createTask}
+      onOpenProject={props.onOpenProject}
+    />
+    <TaskList tasks={filteredTasks()} loading={loading()} sortKey={sortKey()} sortDirection={sortDirection()} onSort={sort} onOpenTask={openTask} />
+    <ProjectCreateDialog
+      dialogRef={element => { dialog = element; }}
+      creating={creatingProject()}
+      error={projectError()}
+      name={projectName()}
+      folder={folder()}
+      folderPickerOpen={folderPickerOpen()}
+      onCreate={createProject}
+      onName={setProjectName}
+      onFolder={setFolder}
+      onFolderPickerOpen={setFolderPickerOpen}
+    />
   </section>;
 }

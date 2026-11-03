@@ -1,5 +1,8 @@
-import { createEffect, createSignal, For, onCleanup, Show } from 'solid-js';
+import { createEffect, createSignal, onCleanup, Show } from 'solid-js';
 import { api } from './api';
+import ChatContent from './ChatContent';
+import ChatComposer from './ChatComposer';
+import TabBar from './TabBar';
 import type { TaskDetail } from './types';
 
 export interface WorkspaceProps {
@@ -129,22 +132,13 @@ export default function Workspace(props: WorkspaceProps) {
           <section class="card flex min-h-[24rem] min-w-0 flex-col overflow-hidden border border-base-300 bg-base-100 shadow-sm" aria-label="タスクチャット">
             <div class="border-b border-base-300 px-5 py-3"><h2 class="text-sm font-semibold">チャット</h2></div>
             <p class="border-b border-base-300 bg-base-200/50 px-5 py-3 text-xs leading-relaxed text-base-content/70">LLM は未接続です。送信内容は保存しますが、AI の返答・指示書の自動更新は行いません。</p>
-            <div class="min-h-0 flex-1 space-y-3 overflow-y-auto p-5" aria-live="polite">
-              <Show when={data().messages.length > 0} fallback={<p class="text-sm text-base-content/50">希望や回答を入力してください。</p>}>
-                <For each={data().messages}>{message => <article class="rounded-xl bg-base-200 px-4 py-3"><p class="mb-1 text-xs font-medium text-base-content/55">{message.role === 'user' ? 'あなた' : message.role === 'assistant' ? 'アシスタント' : message.role}</p><p class="whitespace-pre-wrap break-words text-sm leading-relaxed">{message.content}</p></article>}</For>
-              </Show>
-            </div>
+            <ChatContent messages={data().messages} />
             <Show when={sendError()}><p role="alert" class="mx-4 mb-2 text-sm text-error">{sendError()}</p></Show>
-            <form class="border-t border-base-300 p-4" onSubmit={send}>
-              <textarea class="textarea textarea-bordered min-h-24 w-full resize-y" aria-label="希望や回答を入力" placeholder="希望や回答を入力" required value={draftText()} onInput={event => updateDraft(event.currentTarget.value)} />
-              <div class="mt-2 flex items-center justify-end gap-2"><select class="select select-bordered select-sm" aria-label="モデル" disabled><option>未接続</option></select><button class="btn btn-primary btn-sm" type="submit" disabled={sending() || !draftText().trim()}>{sending() ? '送信中...' : '送信'}</button></div>
-            </form>
+            <ChatComposer text={draftText()} sending={sending()} onInput={updateDraft} onSubmit={send} />
             <div class="border-t border-base-300 bg-base-200/40 px-5 py-3 text-xs text-base-content/60">ターミナル：未接続</div>
           </section>
           <section class="card flex min-h-[24rem] min-w-0 flex-col overflow-hidden border border-base-300 bg-base-100 shadow-sm" aria-label="文書プレビュー">
-            <div class="flex min-h-12 overflow-x-auto border-b border-base-300" role="tablist" aria-label="文書">
-              <For each={data().documents}>{(document, index) => <button type="button" role="tab" class="shrink-0 border-b-2 px-4 py-3 text-sm" classList={{ 'border-primary font-semibold': documentIndex() === index(), 'border-transparent text-base-content/60': documentIndex() !== index() }} aria-selected={documentIndex() === index()} onClick={() => setDocumentIndex(index())}>{document.name}</button>}</For>
-            </div>
+            <TabBar label="文書" tabs={data().documents.map((document, index) => ({ id: String(index), label: document.name }))} activeId={String(documentIndex())} onSelect={id => setDocumentIndex(Number(id))} />
             <Show when={data().documents[documentIndex()]} fallback={<p class="p-5 text-sm text-base-content/50">表示できる文書はありません。</p>}>
               {document => <pre class="min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-words p-5 font-mono text-sm leading-relaxed">{document().content}</pre>}
             </Show>

@@ -137,3 +137,29 @@ describe('project selection and cancellation', () => {
     expect(request.mock.calls.filter(([path]) => path === '/api/projects')).toHaveLength(1);
   });
 });
+
+describe('task list sorting', () => {
+  it('remembers each column direction and keeps the previous ordering for equal values', async () => {
+    const tasks = [
+      { id: 1, projectId: 1, name: 'A', phase: 'requirements', status: 'x' },
+      { id: 2, projectId: 1, name: 'A', phase: 'requirements', status: 'y' },
+      { id: 3, projectId: 1, name: 'B', phase: 'requirements', status: 'x' },
+      { id: 4, projectId: 1, name: 'B', phase: 'requirements', status: 'y' },
+    ];
+    vi.stubGlobal('fetch', vi.fn(async (path: string) => {
+      if (path === '/api/state') return json({ projects: [{ id: 1, name: '架空', folder: '/tmp/example' }], tasks });
+      throw new Error(`Unexpected request: ${path}`);
+    }));
+    const view = render(() => <Home query="" onOpenTask={vi.fn()} />);
+    await screen.findByRole('cell', { name: '#4' });
+    const ids = () => [...view.container.querySelectorAll('tbody tr')].map(row => row.getAttribute('data-id'));
+    fireEvent.click(screen.getByRole('button', { name: 'タスク名' }));
+    expect(ids()).toEqual(['2', '1', '4', '3']);
+    fireEvent.click(screen.getByRole('button', { name: '状態' }));
+    expect(ids()).toEqual(['1', '3', '2', '4']);
+    fireEvent.click(screen.getByRole('button', { name: 'タスク名' }));
+    expect(ids()).toEqual(['3', '4', '1', '2']);
+    fireEvent.click(screen.getByRole('button', { name: 'タスク名' }));
+    expect(ids()).toEqual(['1', '2', '3', '4']);
+  });
+});
