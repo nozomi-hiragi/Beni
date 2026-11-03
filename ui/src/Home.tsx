@@ -1,5 +1,6 @@
 import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from 'solid-js';
 import { api } from './api';
+import FolderPicker from './FolderPicker';
 import type { AppState, Project, Task } from './types';
 
 export interface HomeProps {
@@ -45,6 +46,7 @@ export default function Home(props: HomeProps) {
   const [error, setError] = createSignal('');
   const [projectError, setProjectError] = createSignal('');
   const [loading, setLoading] = createSignal(true);
+  const [folderPickerOpen, setFolderPickerOpen] = createSignal(false);
   const [sortKey, setSortKey] = createSignal<SortKey>('id');
   const [sortDirection, setSortDirection] = createSignal<1 | -1>(-1);
   let dialog: HTMLDialogElement | undefined;
@@ -121,8 +123,14 @@ export default function Home(props: HomeProps) {
     interactionVersion++;
     projectChoiceVersion++;
     if (value === 'new') {
-      if (creatingProject()) return;
+      if (creatingProject()) {
+        if (projectSelect) projectSelect.value = projectId();
+        return;
+      }
       setProjectId('');
+      // A signal already set to '' does not update the DOM when the user has
+      // selected the special "new" option. Reset it even in that case.
+      if (projectSelect) projectSelect.value = '';
       setProjectError('');
       dialog?.showModal();
       return;
@@ -191,11 +199,6 @@ export default function Home(props: HomeProps) {
   }
 
   return <section class="home-surface mx-auto max-w-6xl">
-    <div class="home-intro">
-      <p class="eyebrow">WORKSPACE</p>
-      <h1>タスク</h1>
-      <p>プロジェクトを選んで、新しいタスクを始めましょう。</p>
-    </div>
     <Show when={error() || actionError()}><p role="alert" class="alert alert-error mb-4">{error() || actionError()}</p></Show>
     <div class="create-card">
       <form class="create" onSubmit={createTask}>
@@ -250,16 +253,21 @@ export default function Home(props: HomeProps) {
         <Show when={!loading() && !filteredTasks().length}><p class="empty-state">表示するタスクはありません</p></Show>
       </div>
     </div>
-    <dialog ref={dialog} class="modal" aria-labelledby="projectDialogTitle" onCancel={event => { if (creatingProject()) event.preventDefault(); }}>
+    <dialog ref={dialog} class="modal" aria-labelledby="projectDialogTitle" onClose={() => setFolderPickerOpen(false)} onCancel={event => { if (creatingProject()) event.preventDefault(); }}>
       <form class="modal-box flex max-w-lg flex-col gap-5" onSubmit={createProject}>
         <h2 id="projectDialogTitle" class="text-lg font-semibold">プロジェクトを作成</h2>
         <Show when={projectError()}><p role="alert" class="alert alert-error">{projectError()}</p></Show>
         <label class="form-control flex flex-col gap-2 text-sm font-medium">プロジェクト名
           <input name="name" class="input input-bordered w-full font-normal" required disabled={creatingProject()} value={projectName()} onInput={event => setProjectName(event.currentTarget.value)} />
         </label>
-        <label class="form-control flex flex-col gap-2 text-sm font-medium">フォルダ
-          <input name="folder" class="input input-bordered w-full font-normal" required disabled={creatingProject()} value={folder()} onInput={event => setFolder(event.currentTarget.value)} />
-        </label>
+        <div class="flex flex-col gap-2 text-sm font-medium">
+          <label for="project-folder">フォルダ</label>
+          <div class="flex gap-2">
+            <input id="project-folder" name="folder" class="input input-bordered w-full font-normal" required disabled={creatingProject()} value={folder()} onInput={event => setFolder(event.currentTarget.value)} />
+            <button type="button" class="btn" disabled={creatingProject()} onClick={() => setFolderPickerOpen(true)}>参照</button>
+          </div>
+        </div>
+        <Show when={folderPickerOpen()}><FolderPicker onSelect={path => { setFolder(path); setFolderPickerOpen(false); }} onCancel={() => setFolderPickerOpen(false)} /></Show>
         <footer class="modal-action mt-1">
           <button type="button" class="btn btn-ghost" disabled={creatingProject()} onClick={() => dialog?.close()}>キャンセル</button>
           <button type="submit" class="btn btn-primary" disabled={creatingProject() || !projectName().trim() || !folder().trim()}>作成</button>

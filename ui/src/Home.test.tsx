@@ -82,3 +82,58 @@ describe('Home creation across navigation', () => {
     expect(onOpenTask).not.toHaveBeenCalled();
   });
 });
+
+describe('project selection and cancellation', () => {
+  it('returns the select to its placeholder when new project creation is cancelled, including repeated cancellation', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (path: string) => {
+      if (path === '/api/state') return json({ projects: [{ id: 1, name: 'プロジェクト A', folder: '/tmp/example' }], tasks: [] });
+      throw new Error(`Unexpected request: ${path}`);
+    }));
+    render(() => <Home query="" onOpenTask={vi.fn()} />);
+    await screen.findByRole('option', { name: 'プロジェクト A' });
+    const select = screen.getByRole('combobox', { name: 'プロジェクト' }) as HTMLSelectElement;
+    fireEvent.input(screen.getByRole('textbox', { name: 'タスク名' }), { target: { value: '作業' } });
+    fireEvent.change(select, { target: { value: '1' } });
+    expect((screen.getByRole('button', { name: 'タスク作成' }) as HTMLButtonElement).disabled).toBe(false);
+
+    for (let i = 0; i < 2; i++) {
+      fireEvent.change(select, { target: { value: 'new' } });
+      expect(screen.getByRole('dialog', { name: 'プロジェクトを作成' })).toBeTruthy();
+      fireEvent.click(screen.getByRole('button', { name: 'キャンセル' }));
+      expect(select.value).toBe('');
+      expect((screen.getByRole('button', { name: 'タスク作成' }) as HTMLButtonElement).disabled).toBe(true);
+    }
+    fireEvent.change(select, { target: { value: '1' } });
+    expect(select.value).toBe('1');
+    expect((screen.getByRole('button', { name: 'タスク作成' }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('uses a folder selected via the browser panel when creating the project', async () => {
+    const request = vi.fn((path: string, init?: RequestInit) => {
+      if (path === '/api/state') return Promise.resolve(json({ projects: [], tasks: [] }));
+      if (path === '/api/folders/list') {
+        const body = JSON.parse(String(init?.body));
+        if (!body.path) return Promise.resolve(json({ path: '/tmp/demo', parent: '/tmp', directories: [{ name: 'Project', path: '/tmp/demo/Project' }], truncated: false }));
+        if (body.path === '/tmp/demo/Project') return Promise.resolve(json({ path: body.path, parent: '/tmp/demo', directories: [], truncated: false }));
+      }
+      if (path === '/api/projects') {
+        expect(JSON.parse(String(init?.body))).toEqual({ name: '新しいプロジェクト', folder: '/tmp/demo/Project' });
+        return Promise.resolve(json({ id: 10, name: '新しいプロジェクト', folder: '/tmp/demo/Project' }));
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal('fetch', request);
+    render(() => <Home query="" onOpenTask={vi.fn()} />);
+    fireEvent.change(screen.getByRole('combobox', { name: 'プロジェクト' }), { target: { value: 'new' } });
+    fireEvent.input(screen.getByRole('textbox', { name: 'プロジェクト名' }), { target: { value: '新しいプロジェクト' } });
+    fireEvent.click(screen.getByRole('button', { name: '参照' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Project' }));
+    await screen.findByText('/tmp/demo/Project');
+    fireEvent.click(screen.getByRole('button', { name: 'このフォルダを選択' }));
+    expect((screen.getByRole('textbox', { name: 'フォルダ' }) as HTMLInputElement).value).toBe('/tmp/demo/Project');
+    fireEvent.click(screen.getByRole('button', { name: '作成' }));
+    await screen.findByRole('option', { name: '新しいプロジェクト' });
+    await waitFor(() => expect((screen.getByRole('combobox', { name: 'プロジェクト' }) as HTMLSelectElement).value).toBe('10'));
+    expect(request.mock.calls.filter(([path]) => path === '/api/projects')).toHaveLength(1);
+  });
+});
