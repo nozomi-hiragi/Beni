@@ -1,7 +1,7 @@
 import { batch, createEffect, createMemo, createSignal, onCleanup, onMount, Show } from 'solid-js';
+import { createStore, reconcile } from 'solid-js/store';
 import { api } from './api';
-import ChatContent from './components/ChatContent';
-import ChatComposer from './components/ChatComposer';
+import ChatPanel from './components/ChatPanel';
 import PhaseIndicator from './components/PhaseIndicator';
 import TabBar from './components/TabBar';
 import TreeView from './components/TreeView';
@@ -14,33 +14,15 @@ export interface WorkspaceProps {
   onHome: () => void;
 }
 
-interface DraftState {
-  text: string;
-  editVersion: number;
-  sending: boolean;
-  error: string;
-  listeners: Set<(saved: boolean) => void>;
-}
-const drafts = new Map<number, DraftState>();
-function draftFor(id: number): DraftState {
-  let draft = drafts.get(id);
-  if (!draft) {
-    draft = { text: '', editVersion: 0, sending: false, error: '', listeners: new Set() };
-    drafts.set(id, draft);
-  }
-  return draft;
-}
-function publish(draft: DraftState, saved = false) {
-  for (const listener of draft.listeners) listener(saved);
-}
-
 const phaseLabel = (phase: string) => phase === 'requirements' ? 'タスク内容' : phase;
 const statusLabel = (status: string) => status === 'idle' ? '入力待ち' : status;
-const documentId = (document: Document) => JSON.stringify([document.name, document.version]);
+const documentId = (document: Document) => document.path ?? JSON.stringify([document.name, document.version]);
 type DocumentTabs = { known: string[]; open: string[]; selected?: string };
 
 export default function Workspace(props: WorkspaceProps) {
-  const [detail, setDetail] = createSignal<TaskDetail>();
+  const [detailState,setDetailState]=createStore<{value?:TaskDetail}>({});
+  const detail=()=>detailState.value;
+  const setDetail=(value:TaskDetail|undefined)=>setDetailState('value',value===undefined?undefined:reconcile(value,{key:'id'}));
   const [activeTask, setActiveTask] = createSignal<number | undefined>(props.taskId);
   const [openTasks, setOpenTasks] = createSignal<number[]>(props.taskId === undefined ? [] : [props.taskId]);
   const [projectId, setProjectId] = createSignal<number | undefined>(props.projectId);
@@ -50,9 +32,6 @@ export default function Workspace(props: WorkspaceProps) {
   const [documentTreeOpen, setDocumentTreeOpen] = createSignal(false);
   const [loading, setLoading] = createSignal(true);
   const [loadError, setLoadError] = createSignal('');
-  const [draftText, setDraftText] = createSignal('');
-  const [sending, setSending] = createSignal(false);
-  const [sendError, setSendError] = createSignal('');
   const [openDocuments, setOpenDocuments] = createSignal<string[]>([]);
   const [activeDocument, setActiveDocument] = createSignal<string>();
   const documentTabs = new Map<number, DocumentTabs>();
@@ -127,7 +106,7 @@ export default function Workspace(props: WorkspaceProps) {
     const open = previous
       ? [...previous.open.filter(id => available.includes(id)), ...available.filter(id => !previous.known.includes(id))]
       : available;
-    const initialName = values.some(document => document.name === '指示書.md') ? '指示書.md' : values[0]?.name;
+    const initialName = values.some(document => document.name === 'requirements.md') ? 'requirements.md' : values.some(document => document.name === '指示書.md') ? '指示書.md' : values[0]?.name;
     const newest = values.filter(document => document.name === initialName).reduce<Document | undefined>(
       (latest, document) => !latest || document.version > latest.version ? document : latest, undefined,
     );
@@ -138,15 +117,17 @@ export default function Workspace(props: WorkspaceProps) {
   createEffect(() => {
     const taskId = activeTask();
     if (taskId === undefined) { setLoading(false); return; }
-    const draft = draftFor(taskId);
     let active = true;
-    let sequence = 0;
+    let sequence = 0,fetching=false,reload=false;
+    let events: EventSource | undefined;
     if (documentOwner !== taskId) {
       batch(() => { setDetail(undefined); restoreDocumentTabs(taskId); });
     }
     setLoading(true);
     setLoadError('');
     const load = async () => {
+      if(fetching){reload=true;return}fetching=true;
+      do {reload=false;
       const request = ++sequence;
       try {
         const data = await api<TaskDetail>(`/api/tasks/${taskId}`);
@@ -157,27 +138,20 @@ export default function Workspace(props: WorkspaceProps) {
           adoptDocuments(taskId, data.documents);
           setLoadError('');
         });
+        if(!events && typeof EventSource !== 'undefined'){
+          events=new EventSource(`/api/tasks/${taskId}/documents/events?projectId=${data.task.projectId}`);
+          events.addEventListener('change',()=>{if(active)void load()});
+          events.onerror=()=>{if(active)setLoadError('文書の更新接続を再試行しています')};
+        }
       } catch (error) {
         if (active && request === sequence) setLoadError(error instanceof Error ? error.message : 'タスクを取得できませんでした');
       } finally {
         if (active && request === sequence) setLoading(false);
       }
+      }while(reload&&active);fetching=false;
     };
-    const update = (saved: boolean) => {
-      if (!active) return;
-      setDraftText(draft.text);
-      setSending(draft.sending);
-      setSendError(draft.error);
-      if (saved) void load();
-    };
-    draft.listeners.add(update);
-    update(false);
     void load();
-    onCleanup(() => {
-      active = false;
-      sequence++;
-      draft.listeners.delete(update);
-    });
+    onCleanup(() => { active = false; sequence++; events?.close(); });
   });
 
   function openTask(id: number) {
@@ -207,60 +181,27 @@ export default function Workspace(props: WorkspaceProps) {
     saveDocumentTabs(documentOwner, remaining, selected);
   }
 
-  function updateDraft(value: string) {
-    const taskId = activeTask();
-    if (taskId === undefined) return;
-    const draft = draftFor(taskId);
-    draft.text = value;
-    draft.editVersion++;
-    publish(draft);
-  }
-  async function send(event: SubmitEvent) {
-    event.preventDefault();
-    const taskId = activeTask();
-    if (taskId === undefined || detail()?.task.id !== taskId) return;
-    const draft = draftFor(taskId);
-    const content = draft.text;
-    if (draft.sending || !content.trim()) return;
-    const editVersion = draft.editVersion;
-    draft.sending = true;
-    draft.error = '';
-    publish(draft);
-    try {
-      await api(`/api/tasks/${taskId}/messages`, { content });
-      if (draft.editVersion === editVersion) draft.text = '';
-      publish(draft, true);
-    } catch (error) {
-      draft.error = error instanceof Error ? error.message : '送信できませんでした';
-      publish(draft);
-    } finally {
-      draft.sending = false;
-      publish(draft);
-    }
-  }
   const toggle = (label: string, expanded: boolean, controls: string, onClick: () => void, setRef: (element: HTMLButtonElement) => void) =>
     <button ref={setRef} type="button" class="btn btn-ghost btn-square btn-sm m-1" aria-label={label} aria-expanded={expanded} aria-controls={controls} onClick={onClick}>☰</button>;
 
   return <section class="mx-auto grid h-auto min-h-[34rem] min-w-0 max-w-7xl gap-4 px-4 pb-5 pt-4 lg:h-[calc(100vh-7rem)] lg:grid-cols-2">
     <div class="flex min-h-0 min-w-0 flex-col gap-4">
       <section class="card flex min-h-[20rem] min-w-0 flex-1 flex-col overflow-hidden border border-base-300 bg-base-100 shadow-sm" aria-label="タスクチャット">
-        <TabBar label="チャット" tabs={openTasks().map(id => ({ id: String(id), label: taskName(id) }))} activeId={activeTask() === undefined ? undefined : String(activeTask())} onSelect={id => openTask(Number(id))} onClose={id => closeTask(Number(id))} left={toggle('タスクツリーを開閉', taskTreeOpen(), 'task-tree', () => setTaskTreeOpen(value => !value), element => { taskTreeToggle = element; })} />
+        <TabBar label="チャット" tabs={[{ id: 'general', label: 'ジェネラル', closable: false }, ...openTasks().map(id => ({ id: String(id), label: taskName(id) }))]} activeId={activeTask() === undefined ? 'general' : String(activeTask())} onSelect={id => id === 'general' ? (setActiveTask(undefined), props.onTaskChange?.(undefined)) : openTask(Number(id))} onClose={id => { if (id !== 'general') closeTask(Number(id)); }} left={toggle('タスクツリーを開閉', taskTreeOpen(), 'task-tree', () => setTaskTreeOpen(value => !value), element => { taskTreeToggle = element; })} />
         <div class="relative flex min-h-0 flex-1 flex-col">
-          <Show when={taskTreeOpen()}><TreeView id="task-tree" label="タスク" nodes={[...taskOptions().map(task => ({id:String(task.id), label:taskLabel(task)})), ...(props.taskId !== undefined && !taskOptions().some(task => task.id === props.taskId) ? [{id:String(props.taskId),label:taskName(props.taskId)}] : [])]} onSelect={id => { openTask(Number(id)); setTaskTreeOpen(false); }} /></Show>
+          <Show when={taskTreeOpen()}><TreeView id="task-tree" label="タスク" nodes={[{id:'general', label:'ジェネラル'}, ...taskOptions().map(task => ({id:String(task.id), label:taskLabel(task)})), ...(props.taskId !== undefined && !taskOptions().some(task => task.id === props.taskId) ? [{id:String(props.taskId),label:taskName(props.taskId)}] : [])]} onSelect={id => { if (id === 'general') { setActiveTask(undefined); props.onTaskChange?.(undefined); } else openTask(Number(id)); setTaskTreeOpen(false); }} /></Show>
           <Show when={taskTreeOpen() && treeError()}><p role="alert" class="relative z-20 m-2 text-sm text-error">{treeError()}</p></Show>
-          <Show when={activeTask() === undefined}><p class="p-4 text-sm text-base-content/60">ツリーからタスクを選択してください。</p></Show>
+          <Show when={activeTask() === undefined && projectId() !== undefined}><ChatPanel projectId={projectId()!} /></Show>
           <Show when={activeTask() !== undefined}>
             <Show when={loadError()}><div role="alert" class="alert alert-error text-sm">{loadError()}</div></Show>
             <Show when={loading() && !detail()}><p class="p-4 text-sm text-base-content/60">読み込み中...</p></Show>
             <Show when={detail() && detail()?.task.id === activeTask()}>
               <PhaseIndicator phase={detail()!.task.phase} onRequirements={() => {
-                const document = documents().filter(item => item.name === '指示書.md').reduce<Document | undefined>((latest, item) => !latest || item.version > latest.version ? item : latest, undefined);
+                const document = documents().filter(item => (item.name === 'requirements.md' || item.name === '指示書.md')).reduce<Document | undefined>((latest, item) => !latest || item.version > latest.version ? item : latest, undefined);
                 if (document) openDocument(documentId(document));
               }} />
-              <p class="border-b border-base-300 bg-base-200/50 px-5 py-3 text-xs leading-relaxed text-base-content/70">現在: {phaseLabel(detail()!.task.phase)} · {statusLabel(detail()!.task.status)}。LLM は未接続です。送信内容は保存しますが、AI の返答・指示書の自動更新は行いません。</p>
-              <ChatContent messages={detail()!.messages} />
-              <Show when={sendError()}><p role="alert" class="mx-4 mb-2 text-sm text-error">{sendError()}</p></Show>
-              <ChatComposer text={draftText()} sending={sending()} onInput={updateDraft} onSubmit={send} />
+              <p class="border-b border-base-300 bg-base-200/50 px-5 py-3 text-xs leading-relaxed text-base-content/70">現在: {phaseLabel(detail()!.task.phase)} · {statusLabel(detail()!.task.status)}。タスクの会話から requirements.md と implementation-plan.md を更新します。</p>
+              <ChatPanel projectId={detail()!.task.projectId} taskId={activeTask()} legacyMessages={detail()!.messages} />
             </Show>
           </Show>
         </div>

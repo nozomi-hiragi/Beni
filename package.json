@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "start": "bun run build && bun server.ts",
-    "test": "bun run build && bun test server.test.ts store/index.test.ts && bun run test:ui",
+    "test": "bun run build && bun test server.test.ts store/index.test.ts chat.test.ts && bun run test:ui",
     "build:css": "tailwindcss -i ./ui/tailwind.css -o ./ui/generated.css --minify",
     "typecheck:ui": "tsc -p tsconfig.ui.json",
     "build:ui": "bun run typecheck:ui && vite build",

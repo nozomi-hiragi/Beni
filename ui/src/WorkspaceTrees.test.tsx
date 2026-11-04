@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-library';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import Workspace from './Workspace';
+import {FakeEventSource} from './test-events';
 
 type Deferred<T> = { promise: Promise<T>; resolve(value: T): void };
 function deferred<T>(): Deferred<T> {
@@ -126,7 +127,7 @@ describe('Workspace task and document tabs', () => {
     // Closing the last chat empties the pane; tree remains available to reopen.
     fireEvent.click(screen.getByRole('button', { name: '#1 設計 を閉じる' }));
     expect(screen.queryByRole('tab', { name: '#1 設計' })).toBeNull();
-    expect(screen.queryByRole('textbox', { name: '希望や回答を入力' })).toBeNull();
+    expect(screen.getByRole('tab', { name: 'ジェネラル' }).getAttribute('aria-selected')).toBe('true');
     fireEvent.click(screen.getByRole('button', { name: 'タスクツリーを開閉' }));
     fireEvent.click(screen.getByRole('button', { name: '#1 設計' }));
     await screen.findByRole('tab', { name: '#1 設計' });
@@ -134,19 +135,23 @@ describe('Workspace task and document tabs', () => {
   });
 
   it('retains a draft and prevents duplicate sends after closing and reopening a sending task', async () => {
+    FakeEventSource.instances=[];vi.stubGlobal('EventSource',FakeEventSource);
     const task = { id: 11, projectId: 8, name: '入力', phase: 'requirements', status: 'idle' };
     const post = deferred<Response>();
     const messages: { id: number; role: string; content: string }[] = [];
     let posts = 0;
     vi.stubGlobal('fetch', vi.fn((path: string, init?: RequestInit) => {
       if (path === '/api/state' && !init) return Promise.resolve(json({ projects: [], tasks: [task] }));
-      if (path === '/api/tasks/11' && !init) return Promise.resolve(json({ task, messages: [...messages], documents: [] }));
-      if (path === '/api/tasks/11/messages' && init?.method === 'POST') { posts++; return post.promise; }
+      if (path === '/api/tasks/11' && !init) return Promise.resolve(json({ task, messages: [], documents: [] }));
+      if (path === '/api/codex/status') return Promise.resolve(json({installed:true,auth:'chatgpt',models:[{id:'test',name:'Test'}],usage:'unknown'}));
+      if (path.startsWith('/api/chat?')) return Promise.resolve(json({id:'c',projectId:8,taskId:11,threadId:null,messages:[...messages]}));
+      if (path === '/api/chat/send' && init?.method === 'POST') { posts++; return post.promise; }
       throw new Error(`Unexpected request: ${path}`);
     }));
     render(() => <Workspace taskId={11} onHome={() => {}} />);
     const textbox = await screen.findByRole('textbox', { name: '希望や回答を入力' });
     fireEvent.input(textbox, { target: { value: '最初の依頼' } });
+    await waitFor(() => expect((screen.getByRole('button', { name: '送信' }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByRole('button', { name: '送信' }));
     fireEvent.input(textbox, { target: { value: '次の依頼' } });
     fireEvent.click(screen.getByRole('button', { name: '#11 入力 を閉じる' }));
@@ -154,12 +159,13 @@ describe('Workspace task and document tabs', () => {
     fireEvent.click(await screen.findByRole('button', { name: '#11 入力' }));
     const reopened = await screen.findByRole('textbox', { name: '希望や回答を入力' });
     expect((reopened as HTMLTextAreaElement).value).toBe('次の依頼');
-    const sending = screen.getByRole('button', { name: '送信中...' }) as HTMLButtonElement;
+    const sending = screen.getByRole('button', { name: '応答中...' }) as HTMLButtonElement;
     expect(sending.disabled).toBe(true);
     fireEvent.submit(sending.closest('form')!);
     expect(posts).toBe(1);
-    messages.push({ id: 1, role: 'user', content: '最初の依頼' });
+    messages.push({ id: 1, role: 'user', content: '最初の依頼', provider: 'codex', model: 'test', status: 'completed' } as any);
     post.resolve(json({ id: 1 }));
+    FakeEventSource.instances.filter(event=>!event.closed&&event.url.startsWith('/api/chat/events')).forEach(event=>event.change());
     await screen.findByText('最初の依頼');
     expect((screen.getByRole('textbox', { name: '希望や回答を入力' }) as HTMLTextAreaElement).value).toBe('次の依頼');
     await waitFor(() => expect((screen.getByRole('button', { name: '送信' }) as HTMLButtonElement).disabled).toBe(false));
@@ -193,26 +199,33 @@ describe('Workspace task and document tabs', () => {
   });
 
   it('shows the saved result once when sending finishes while the task tab is closed', async () => {
+    FakeEventSource.instances=[];vi.stubGlobal('EventSource',FakeEventSource);
     const task = { id: 31, projectId: 14, name: '閉じた後', phase: 'requirements', status: 'idle' };
     const post = deferred<Response>();
     const messages: { id: number; role: string; content: string }[] = [];
     vi.stubGlobal('fetch', vi.fn((path: string, init?: RequestInit) => {
       if (path === '/api/state' && !init) return Promise.resolve(json({ projects: [], tasks: [task] }));
-      if (path === '/api/tasks/31' && !init) return Promise.resolve(json({ task, messages: [...messages], documents: [] }));
-      if (path === '/api/tasks/31/messages' && init?.method === 'POST') return post.promise;
+      if (path === '/api/tasks/31' && !init) return Promise.resolve(json({ task, messages: [], documents: [] }));
+      if (path === '/api/codex/status') return Promise.resolve(json({installed:true,auth:'chatgpt',models:[{id:'test',name:'Test'}],usage:'unknown'}));
+      if (path.startsWith('/api/chat?')) return Promise.resolve(json({id:'c',projectId:14,taskId:31,threadId:null,messages:[...messages]}));
+      if (path === '/api/chat/send' && init?.method === 'POST') return post.promise;
       throw new Error(`Unexpected request: ${path}`);
     }));
     render(() => <Workspace taskId={31} onHome={() => {}} />);
     const textbox = await screen.findByRole('textbox', { name: '希望や回答を入力' });
     fireEvent.input(textbox, { target: { value: '保存する依頼' } });
+    await waitFor(() => expect((screen.getByRole('button', { name: '送信' }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByRole('button', { name: '送信' }));
     fireEvent.input(textbox, { target: { value: '次の下書き' } });
     fireEvent.click(screen.getByRole('button', { name: '#31 閉じた後 を閉じる' }));
-    messages.push({ id: 1, role: 'user', content: '保存する依頼' });
+    messages.push({ id: 1, role: 'user', content: '保存する依頼', provider: 'codex', model: 'test', status: 'completed' } as any);
     post.resolve(json({ id: 1 }));
+    FakeEventSource.instances.filter(event=>!event.closed&&event.url.startsWith('/api/chat/events')).forEach(event=>event.change());
     await post.promise;
     fireEvent.click(screen.getByRole('button', { name: 'タスクツリーを開閉' }));
     fireEvent.click(await screen.findByRole('button', { name: '#31 閉じた後' }));
+    await screen.findByRole('textbox',{name:'希望や回答を入力'});
+    FakeEventSource.instances.filter(event=>!event.closed&&event.url.startsWith('/api/chat/events')).forEach(event=>event.change());
     await screen.findByText('保存する依頼', { exact: true });
     expect(screen.getAllByText('保存する依頼', { exact: true })).toHaveLength(1);
     expect((screen.getByRole('textbox', { name: '希望や回答を入力' }) as HTMLTextAreaElement).value).toBe('次の下書き');
