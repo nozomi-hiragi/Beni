@@ -1,5 +1,6 @@
 import { Store } from './store/index';
 import { ChatService } from './chat';
+import { TerminalService, TerminalError } from './terminal';
 import { communicationSocket, type SocketData } from './events';
 import type { Server } from 'bun';
 import { validId } from '../shared/communication';
@@ -52,7 +53,7 @@ const projectForScope = (store:Store,projectId:unknown,taskId:unknown) => {
   if (taskId!==null) {const task=store.task(Number(taskId));if(!task || row(task).project_id!==projectId)return null}
   return project;
  };
-export function createHandler(store: Store, initialFolder = homedir(), chat = new ChatService(dataPaths().chatDirectory), publicOrigin?: string) {
+export function createHandler(store: Store, initialFolder = homedir(), chat = new ChatService(dataPaths().chatDirectory), publicOrigin?: string, terminals = new TerminalService()) {
  const access=requestAccess(publicOrigin);
  const scope=(p:unknown,t:unknown)=>projectForScope(store,p,t);
  return async (request: Request): Promise<Response> => {
@@ -60,10 +61,11 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
   if (!access(request).allowed) return new Response('Forbidden',{status:403});
   const json = (value: unknown, status = 200) => Response.json(value,{status,headers:{'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}});
   if (request.method === 'GET') {
-   if (url.pathname === '/' || url.pathname === '/settings' || /^\/project\/[1-9]\d*$/.test(url.pathname) || ['/ui/index.html','/ui/build/app.js','/ui/generated.css'].includes(url.pathname)) {
-    const file = url.pathname === '/ui/build/app.js' ? '../../dist/frontend/app.js' : url.pathname === '/ui/generated.css' ? '../../dist/frontend/generated.css' : '../frontend/index.html';
-    return new Response(Bun.file(new URL(file,import.meta.url)),{headers:{'Content-Security-Policy':"default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'",'X-Content-Type-Options':'nosniff','Cache-Control':'no-store'}});
+   if (url.pathname === '/' || url.pathname === '/settings' || /^\/project\/[1-9]\d*$/.test(url.pathname) || ['/ui/index.html','/ui/build/app.js','/ui/generated.css','/ui/style.css'].includes(url.pathname)) {
+    const file = url.pathname === '/ui/build/app.js' ? '../../dist/frontend/app.js' : url.pathname === '/ui/style.css' ? '../../dist/frontend/beni.css' : url.pathname === '/ui/generated.css' ? '../../dist/frontend/generated.css' : '../frontend/index.html';
+    return new Response(Bun.file(new URL(file,import.meta.url)),{headers:{'Content-Security-Policy':"default-src 'self'; img-src 'self' data:; style-src 'self'; style-src-elem 'self' 'unsafe-inline'; style-src-attr 'unsafe-inline'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'",'X-Content-Type-Options':'nosniff','Cache-Control':'no-store'}});
    }
+   if (url.pathname === '/api/terminals') {const p=Number(url.searchParams.get('projectId'));if(!scope(p,null))return json({error:'プロジェクトが見つかりません'},404);return json(terminals.list(p))}
    if (url.pathname === '/api/codex/status') return json(await chat.status());
    const packMatch=url.pathname.match(/^\/api\/chat\/packs(?:\/([^/]+))?$/);
    if(packMatch){const p=Number(url.searchParams.get('projectId'));const raw=url.searchParams.get('taskId');const t=raw===null?null:Number(raw);if(!scope(p,t))return json({error:'会話が見つかりません'},404);try{const id=packMatch[1]===undefined?undefined:decodePackId(packMatch[1]);if(id!==undefined&&!validId(id))return json({error:'入力を確認してください'},400);const after=url.searchParams.get('afterPackId');if(after!==null&&!validId(after))return json({error:'入力を確認してください'},400);return json(id?await chat.pack(p,t,id):await chat.packs(p,t,url.searchParams.get('afterPackId')??undefined))}catch(error){const m=error instanceof Error?error.message:'';return json({error:m==='not found'?'パックが見つかりません':m==='not closed'?'生成中のパックです':'パックを読み込めませんでした'},m==='not found'?404:m==='not closed'?409:500)}}
@@ -80,6 +82,12 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
    if (new TextEncoder().encode(body).byteLength > 65536) return json({error:'入力が長すぎます'},413);
    const input = JSON.parse(body) as Record<string,unknown>;
    if (!input || typeof input !== 'object' || Array.isArray(input)) return json({error:'入力を確認してください'},400);
+   if(url.pathname==='/api/terminals'||/^\/api\/terminals\/[^/]+\/close$/.test(url.pathname)){
+    const project=scope(input.projectId,null);if(!project)return json({error:'プロジェクトが見つかりません'},404);
+    try {if(url.pathname==='/api/terminals'){if(!validId(input.requestId))return json({error:'作成 ID を確認してください'},400);return json(terminals.create(Number(input.projectId),project.folder,input.requestId),201)}
+     const id=decodePackId(url.pathname.split('/')[3]);if(!validId(id)||!validId(input.controlToken))return json({error:'操作権を確認してください'},400);await terminals.close(Number(input.projectId),id,input.controlToken);return json({ok:true});
+    }catch(error){return error instanceof TerminalError?json({error:error.message},error.status):json({error:'ターミナルを操作できませんでした'},500)}
+   }
    const ackMatch=url.pathname.match(/^\/api\/chat\/packs\/([^/]+)\/ack$/);
    if(ackMatch){const p=input.projectId,t=input.taskId;if(!scope(p,t))return json({error:'会話が見つかりません'},404);const id=decodePackId(ackMatch[1]);if(!validId(id)||typeof input.hash!=='string'||! /^[a-f0-9]{64}$/.test(input.hash))return json({error:'入力を確認してください'},400);try{return json(await chat.ack(Number(p),t as number|null,id,input.hash))}catch(error){const m=error instanceof Error?error.message:'';return json({error:m==='not found'?'パックが見つかりません':m==='not closed'?'生成中のパックです':'パックを読み込めませんでした'},m==='not found'?404:m==='not closed'?409:500)}}
    if (url.pathname === '/api/chat/send' || url.pathname === '/api/chat/interrupt') {
@@ -103,14 +111,15 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
   } catch {return json({error:'入力または保存先を確認してください'},400)}
  };
 }
-export function createServerOptions(store:Store,initialFolder=homedir(),chat=new ChatService(dataPaths().chatDirectory),publicOrigin?:string) {
+export function createServerOptions(store:Store,initialFolder=homedir(),chat=new ChatService(dataPaths().chatDirectory),publicOrigin?:string, terminals=new TerminalService()) {
  const access=requestAccess(publicOrigin);
  const scope=(p:number,t:number|null)=>projectForScope(store,p,t);
  const websocket=communicationSocket({
-  chat:{validate:s=>!!scope(s.projectId,s.taskId),subscribe:(s,event)=>chat.subscribe(s.projectId,s.taskId,event)},
-  documents:{validate:s=>s.taskId!==null&&!!scope(s.projectId,s.taskId),subscribe:(s,event,failed)=>{const project=scope(s.projectId,s.taskId)!;const path=documentFolder(store,project,projectTask(store.task(s.taskId!)));let timer:ReturnType<typeof setTimeout>|undefined;const stop=watchTaskDocuments(path,()=>{if(timer===undefined)timer=setTimeout(()=>{timer=undefined;event({name:'documents.changed',data:{}})},80)},failed);return ()=>{clearTimeout(timer);stop()}}},
+  terminal:{validate:s=>s.taskId===null&&!!scope(s.projectId,null)&&(s.terminalId===undefined||terminals.has(s.projectId,s.terminalId)),subscribe:(s,event)=>terminals.subscribe(s,event)},
+  chat:{validate:s=>s.terminalId===undefined&&!!scope(s.projectId,s.taskId),subscribe:(s,event)=>chat.subscribe(s.projectId,s.taskId,event)},
+  documents:{validate:s=>s.terminalId===undefined&&s.taskId!==null&&!!scope(s.projectId,s.taskId),subscribe:(s,event,failed)=>{const project=scope(s.projectId,s.taskId)!;const path=documentFolder(store,project,projectTask(store.task(s.taskId!)));let timer:ReturnType<typeof setTimeout>|undefined;const stop=watchTaskDocuments(path,()=>{if(timer===undefined)timer=setTimeout(()=>{timer=undefined;event({name:'documents.changed',data:{}})},80)},failed);return ()=>{clearTimeout(timer);stop()}}},
  });
- const handle=createHandler(store,initialFolder,chat,publicOrigin);
+ const handle=createHandler(store,initialFolder,chat,publicOrigin,terminals);
  return {websocket,fetch(request:Request,server:Server<SocketData>){const url=new URL(request.url);if(url.pathname!=='/api/ws')return handle(request);if(request.method!=='GET'||!access(request).allowed||!access(request).sameOrigin||request.headers.get('sec-fetch-site')==='cross-site')return new Response('Forbidden',{status:403});if(!server.upgrade(request,{data:{ready:false,used:new Set(),subscriptions:new Map()}}))return new Response('WebSocket upgrade required',{status:400});return undefined}};
 }
 export function dataPaths(environment: Record<string,string|undefined> = process.env, cwd = process.cwd()) {
@@ -124,8 +133,10 @@ if (import.meta.main) {
  await mkdir(dirname(resolve(database)),{recursive:true,mode:0o700});
  const store = new Store(database);
  const chat = new ChatService(chatDirectory);
+ const terminals = new TerminalService();
  const port = Number(process.env.BENI_PORT ?? 3210);
  const publicOrigin = process.env.BENI_PUBLIC_ORIGIN;
- const server = Bun.serve({hostname:'127.0.0.1',port,maxRequestBodySize:65536,...createServerOptions(store,homedir(),chat,publicOrigin)});
+ const server = Bun.serve({hostname:'127.0.0.1',port,maxRequestBodySize:65536,...createServerOptions(store,homedir(),chat,publicOrigin,terminals)});
+ let stopping=false;const shutdown=async()=>{if(stopping)return;stopping=true;await terminals.dispose();await server.stop(true);store.close();process.exit(0)};process.once('SIGTERM',shutdown);process.once('SIGINT',shutdown);
  console.log(`Beni: http://127.0.0.1:${server.port}/`);
 }

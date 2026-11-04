@@ -16,3 +16,4 @@
 - 機能
   - [LLM チャット連携](features/llm-chat.md)
   - [タスク検索](features/task-search.md)
+  - [プロジェクト内ターミナル](features/terminal.md)

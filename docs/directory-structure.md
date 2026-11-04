@@ -13,6 +13,8 @@ Beni/
 │   │   ├── chat.ts                   Codex 通信、会話の保存・再開・受信・中断
 │   │   ├── chat.test.ts              会話の保存・再開・中断・分離、接続エラーのテスト
 │   │   ├── documents.ts              タスク用 Markdown の作成・読み取り・変更監視
+│   │   ├── terminal.ts               PTY・端末画面・操作権・終了処理
+│   │   ├── terminal.test.ts          シェルの存続・排他・画面復元・HTTP/WSのテスト
 │   │   ├── events.ts                 共通 WS の接続・購読・送信上限と解放処理
 │   │   ├── store/                    データベースへのアクセス
 │   │   │   ├── index.ts              SQLite にプロジェクト・タスク・メッセージ・文書の版を保存
@@ -31,11 +33,14 @@ Beni/
 │       ├── communication.ts          共通 WS、購読の共有、再接続
 │       ├── chat-sync.ts              チャットのパック照合・順序付き確定・再同期
 │       ├── chat-scroll.ts            最下部にいる間のスクロール追従
+│       ├── assets.d.ts               CSS importの型宣言
 │       ├── types.ts                  プロジェクト・タスク・文書・会話などの型
 │       ├── tailwind.css              Tailwind CSS の探索対象、daisyUI のテーマ、共通スタイル
 │       ├── *.test.tsx                画面の表示・操作のテスト
 │       ├── test-events.ts            WS とパックを模擬するテスト補助
 │       └── components/               画面を構成する部品
+│           ├── ResizeHandle.tsx      作業領域の左右・上下比率を調整するハンドル
+│           ├── TerminalPanel.tsx     ターミナルタブ・描画・操作権・再接続
 │           ├── MarkdownPreview.tsx   Markdown の変換・サニタイズ・装飾表示
 │           ├── Menu.tsx              ホーム・設定への移動と検索のメニュー
 │           ├── TaskCreate.tsx        プロジェクトを選び、タスクを作成するフォーム
@@ -55,6 +60,7 @@ Beni/
 │   │   └── communication.ts          パック・WS メッセージの型、受信検証、ハッシュ
 │   └── frontend/                     フロントエンドの生成物
 │       ├── app.js                    Vite が生成する JavaScript
+│       ├── beni.css                  xterm.js のスタイル
 │       └── generated.css             Tailwind CSS・daisyUI が生成する CSS
 ├── docs/                             仕様書、画面モック、構成の説明
 │   ├── README.md                     ドキュメントの目次
@@ -63,6 +69,7 @@ Beni/
 │   │   ├── README.md                 方針と文書の目次
 │   │   ├── http-api.md               HTTP API とパック同期の契約
 │   │   ├── websocket.md              WS の接続・購読・メッセージ仕様
+│   │   ├── terminal.md               ターミナルの操作権・画面復元・入出力
 │   │   └── chat-sync.md              チャットのパック確定・再接続時の同期
 │   ├── next-agent-plan.md            アプリ全体の目的、利用の流れ、構想
 │   ├── screens/                      画面ごとの仕様
@@ -72,6 +79,7 @@ Beni/
 │   │   └── settings.md               設定画面
 │   ├── features/                     機能ごとの仕様
 │   │   ├── llm-chat.md               LLM チャット連携
+│   │   ├── terminal.md               ターミナルの機能仕様
 │   │   └── task-search.md            タスク検索
 │   └── mockups/                      画面・部品の見た目を検討する HTML と CSS
 │       └── components/               部品ごとのモック

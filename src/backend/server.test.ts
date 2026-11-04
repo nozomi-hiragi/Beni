@@ -29,7 +29,7 @@ test('serves the compiled Solid app and locally generated stylesheet', async () 
  try {
   const handle = createHandler(store);
   const page = await handle(new Request('http://127.0.0.1:3210/'));
-  expect(page.headers.get('Content-Security-Policy')).toBe("default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'");
+  expect(page.headers.get('Content-Security-Policy')).toBe("default-src 'self'; img-src 'self' data:; style-src 'self'; style-src-elem 'self' 'unsafe-inline'; style-src-attr 'unsafe-inline'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'");
   expect(await page.text()).toContain('/ui/build/app.js');
   const js = await handle(new Request('http://127.0.0.1:3210/ui/build/app.js'));
   expect(js.status).toBe(200);
@@ -187,7 +187,7 @@ test('shared WebSocket validates handshake/scopes, streams document changes and 
   ws.send(JSON.stringify({type:'subscribe',subscriptionId:'doc',topic:'documents',scope:{projectId:project.id,taskId:task.id}}));expect(await inbox.next()).toMatchObject({code:'SUBSCRIPTION_CONFLICT'});
   await writeFile(join(path,'requirements.md'),'# Disconnected');await Bun.sleep(120);expect(inbox.messages).toHaveLength(0);
   const detail=await (await fetch(origin+`/api/tasks/${task.id}`)).json();expect(detail.documents.find((d:any)=>d.name==='requirements.md').content).toBe('# Disconnected');
-  ws.send(JSON.stringify({type:'subscribe',subscriptionId:'unknown',topic:'terminal',scope:{projectId:project.id,taskId:null}}));expect(await inbox.next()).toMatchObject({code:'UNKNOWN_TOPIC'});
+  ws.send(JSON.stringify({type:'subscribe',subscriptionId:'unknown',topic:'unknown-topic',scope:{projectId:project.id,taskId:null}}));expect(await inbox.next()).toMatchObject({code:'UNKNOWN_TOPIC'});
   ws.send(JSON.stringify({type:'subscribe',subscriptionId:'general-documents',topic:'documents',scope:{projectId:project.id,taskId:null}}));expect(await inbox.next()).toMatchObject({code:'NOT_FOUND',subscriptionId:'general-documents'});
  }finally{ws.close();server.stop(true);store.close();await rm(folder,{recursive:true,force:true})}
 });

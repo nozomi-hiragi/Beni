@@ -8,6 +8,7 @@ HTTP による取得・操作と、チャットのパック同期の契約を定
 - URL のホスト名が `127.0.0.1` でも、URL の host（ポートを含む）が指定した公開 origin と完全一致するものでもなければ 403。WebSocket も同じ制限。通常の GET に共通の Origin 検査はない。
 - POST は `Origin` がローカル要求 URL の origin、または公開 host に対しては設定した HTTPS origin と一致し、`Content-Type` が厳密に `application/json` であること。転送ヘッダーは判定に使わない。違反は 403。
 - POST の本文は JSON オブジェクト。配列・null・不正 JSON は 400。本文上限は 65,536 バイトで、超過は 413。
+- HTMLのCSPはスクリプトを同一originに制限する。xterm.jsが生成するスタイル要素・属性のため、CSSのインライン適用は許可する。MarkdownプレビューのHTMLサニタイズは維持する。
 - JSON 応答には `Cache-Control: no-store` と `X-Content-Type-Options: nosniff` を付ける。
 - API のエラー本文は原則 `{ "error": "表示用メッセージ" }`。ホスト拒否の本文は JSON ではなく `Forbidden`。機械判定用の共通エラーコードは設けない。
 - 下表のエラーのほか、POST の解析・保存先処理などの例外は共通処理で 400 になる。GET のすべての例外が JSON エラーに統一されているわけではない。
@@ -122,3 +123,19 @@ status/state は生成状態を表し、本文のハッシュには含めませ�
 ## 静的配信
 
 `/`、`/settings`、`/project/:id`（正の整数）、`/ui/index.html` は同じ HTML を返す。`/ui/build/app.js` と `/ui/generated.css` は dist の生成物を返す。HTML と生成物には CSP、nosniff、no-store を設定する。画像は同一 origin と data URL を許可し、daisyUI の吹き出しが使う埋め込み SVG を表示する。スクリプト・スタイル・通信先は同一 origin に限定する。この配信は HTTP のまま。
+
+## ターミナル管理
+
+セッション情報とWSによる画面同期は [ターミナル通信](terminal.md) を参照してください。いずれも登録済みプロジェクトを対象とし、シェルの実行場所をブラウザーから直接指定しません。
+
+| メソッド・パス | 入力 | 成功 | 個別の主なエラー |
+| --- | --- | --- | --- |
+| `GET /api/terminals` | query: `projectId` | 200 `TerminalSession[]` | 404 プロジェクトなし |
+| `POST /api/terminals` | `{projectId, requestId}` | 201 `TerminalSession` | 400 入力不正、404 プロジェクトなし、409 上限・削除済み要求、503 サーバー終了中 |
+| `POST /api/terminals/:id/close` | `{projectId, controlToken}` | 200 `{ok: true}` | 400 入力不正、403 操作権なし、404 対象なし、500 終了処理失敗 |
+
+作成時の端末サイズは80列・24行です。購読成立と画面復元後、操作権を持つ画面がリサイズします。起動に失敗したセッションは `failed` として一覧に残し、画面で失敗を表示します。
+
+`requestId` は1〜128文字の文字列で、同じプロジェクトと要求IDの組み合わせでは新しいシェルを重複作成しません。作成の応答を受け取れなかった場合は一覧で照合し、明示的な再試行にも同じIDを使います。セッションを削除した後に同じ要求IDを再利用しても、新しいシェルは起動しません。要求IDの保持はサーバーが起動している間です。
+
+終了時の `controlToken` は個別シェルの `terminal.state` が現在の所有者へ返した値です。バックエンドは現在の所有者のトークンを照合し、権限を失効させてから終了処理を待ちます。終了済みセッションを一覧から削除する場合も操作権が必要です。

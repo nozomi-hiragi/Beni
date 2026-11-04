@@ -7,6 +7,21 @@
 
 :root { --fx-noise: none; }
 
+.workspace-resize { display: none; }
+@media (min-width: 1024px) {
+  .workspace { grid-template-columns: minmax(0, var(--left-ratio)) 12px minmax(0, var(--right-ratio)); column-gap: 0; }
+  .workspace-left { grid-template-rows: minmax(0, 1fr); gap: 0; }
+  .workspace-left-terminal { grid-template-rows: minmax(0, var(--chat-ratio)) 12px minmax(0, var(--terminal-ratio)); }
+  .workspace-resize { display: flex; align-items: center; justify-content: center; min-width: 0; min-height: 0; touch-action: none; user-select: none; border-radius: 4px; }
+  .workspace-resize::after { content: ''; border-radius: 2px; background: var(--color-base-300); }
+  .workspace-resize-vertical { cursor: col-resize; }
+  .workspace-resize-vertical::after { width: 4px; height: 32px; }
+  .workspace-resize-horizontal { cursor: row-resize; }
+  .workspace-resize-horizontal::after { height: 4px; width: 32px; }
+  .workspace-resize:hover::after, .workspace-resize-active::after, .workspace-resize:focus-visible::after { background: var(--color-primary); }
+  .workspace-resize:focus-visible { outline: 2px solid var(--color-primary); outline-offset: -2px; }
+}
+
 
 .markdown-preview { overflow-wrap: anywhere; }
 .markdown-preview > :first-child { margin-top: 0; }

@@ -6,7 +6,7 @@ WS の接続、購読、イベント、エラーの契約を定義します。
 
 同一 origin の `/api/ws` にブラウザーのタブごとに一本接続します。HTTP Upgrade 時にホストと Origin を検査します。ローカル接続は `127.0.0.1` と同一 Origin、Tailscale Serve 経由は `BENI_PUBLIC_ORIGIN` の host と HTTPS Origin の一致が必要です。ホストの制限は HTTP と共通で、転送ヘッダーは判定に使いません。接続後も購読対象のプロジェクト・タスクの対応を検証します。
 
-通常の作成・取得・変更は HTTP です。WS は購読管理、リアルタイム通知、将来のターミナル入出力を扱います。任意の HTTP 操作を呼ぶ RPC は用意しません。
+通常の作成・取得・変更は HTTP です。WS は購読管理、リアルタイム通知、ターミナル入出力を扱います。任意の HTTP 操作を呼ぶ RPC は用意しません。
 
 ## 接続の状態
 
@@ -34,6 +34,7 @@ WS の接続、購読、イベント、エラーの契約を定義します。
 | `unsubscribed` | BE → FE | `subscriptionId`。購読解除済み |
 | `event` | BE → FE | `subscriptionId`, `name`, `data` |
 | `error` | BE → FE | `code`, `message`。対象を特定できる場合は `subscriptionId` |
+| `terminal.input` / `terminal.resize` / `terminal.takeover` | FE → BE | 個別シェルの `subscriptionId` と権限の `generation`。詳細は [ターミナル通信](terminal.md) |
 
 `subscriptionId` は FE が作る接続内で一意な文字列。パック ID とは別です。同じ対象を複数の画面部品が使う場合、FE の共通層で購読を共有します。
 
@@ -51,8 +52,9 @@ WS の接続、購読、イベント、エラーの契約を定義します。
 | --- | --- | --- |
 | `chat` | `{projectId: number, taskId: number \| null}` | `chat.pack.delta`, `chat.pack.closed`, `chat.changed` |
 | `documents` | `{projectId: number, taskId: number}` | `documents.changed` |
+| `terminal` | `{projectId: number, taskId: null, terminalId?: string}` | `terminal.changed`, `terminal.state`, 画面同期・入出力イベント |
 
-チャットの一般会話は taskId を null にします。文書は具体的なタスクが必須です。プロジェクト全体の状態通知やターミナルの topic は、その機能を実装するときに追加します。
+チャットの一般会話は taskId を null にします。文書は具体的なタスクが必須です。ターミナルは terminalId を省略すると一覧、指定すると個別シェルを購読します。操作メッセージとイベントの詳細は [ターミナル通信](terminal.md) を参照してください。
 
 ```json
 {"type":"subscribe","subscriptionId":"s1","topic":"chat","scope":{"projectId":1,"taskId":2}}
@@ -62,7 +64,7 @@ WS の接続、購読、イベント、エラーの契約を定義します。
 {"type":"subscribed","subscriptionId":"s1"}
 ```
 
-BE は購読を登録してから subscribed を送り、その後にその購読のイベントを送ります。購読時の過去差分の送信はありません。初期状態は HTTP で取得します。
+BE は購読を登録してから subscribed を送り、その後にその購読のイベントを送ります。チャット・文書は購読時の過去差分の送信がなく、初期状態をHTTPで取得します。ターミナルは購読成立後に一覧または端末画面の復元データを送ります。
 
 接続内で使用済みの subscriptionId に対する subscribe は拒否し、対象の上書きには使いません。解除済み ID はその接続内で再利用しません。未知・解除済み ID への unsubscribe は解除済みとして応答します。
 
@@ -117,6 +119,7 @@ FE は HTTP の ack でハッシュ照合を行います。未受信のパック
 | `UNKNOWN_TOPIC` | 未対応の購読を拒否する |
 | `SUBSCRIPTION_CONFLICT` | 使用済み購読 ID を拒否する |
 | `NOT_FOUND` | 対象なし・プロジェクトとの対応不正を拒否する |
+| `FORBIDDEN` | ターミナルの操作権がない要求を拒否する |
 | `LIMIT_EXCEEDED` | 購読などの上限超過を拒否する |
 | `INTERNAL_ERROR` | 内部情報を含まないメッセージで失敗を伝える |
 
@@ -128,7 +131,7 @@ FE は HTTP の ack でハッシュ照合を行います。未受信のパック
 
 機能ごとに topic、scope の検証、イベント名、data の型と検証、購読開始・解除処理を定義します。共通層はその登録情報で振り分けます。HTTP で取得すべき初期状態・切断後の回復方法もセットで定めます。
 
-ターミナルには FE → BE の入力・リサイズ用メッセージが必要です。チャットの購読だけで代用せず、ターミナル実装時にこの仕様へ追加します。
+ターミナルの FE → BE 操作は `terminal.input`・`terminal.resize`・`terminal.takeover` です。詳細は [ターミナル通信](terminal.md) に定義します。
 
 ## 上限とタイムアウト
 
@@ -146,7 +149,7 @@ FE は HTTP の ack でハッシュ照合を行います。未受信のパック
 
 本文差分は最大4,096 UTF-16コード単位ごとに分割し、サロゲートペアの途中では切りません。差分を結合すると元の文字列になります。
 
-明示的に閉じるコードは、非対応版が1002、バイナリ受信が1003、hello タイムアウトが1008、送信フレーム超過が1009、送信待ち超過・購読 ID の更新が1013です。切断後に失われた内容は、通知の再送ではなく HTTP 同期で回復します。
+明示的に閉じるコードは、非対応版が1002、バイナリ受信が1003、hello タイムアウトが1008、送信フレーム超過が1009、送信待ち超過・購読 ID の更新が1013です。切断後はチャット・文書をHTTPで同期し、ターミナルは再購読して端末画面を復元します。
 
 FE は不正な応答または INTERNAL_ERROR を受けたときに接続をやり直します。安定した購読が30秒続かないままこれらの失敗が3回重なった場合は自動再試行を止め、ページ再読み込みを案内します。30秒以上の安定稼働後は失敗回数をリセットします。通常のネットワーク切断はこの回数制限に含めません。
 

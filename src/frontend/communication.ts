@@ -1,4 +1,4 @@
-import { eventTopics, validServerMessage, type ClientMessage, type Scope, type Topic, type TopicEvent } from '../shared/communication';
+import { eventTopics, validServerMessage, type ClientMessage, type Scope, type Topic, type TopicEvent, type TerminalAction } from '../shared/communication';
 
 type Listener = { subscribed(): void; event(event: TopicEvent): void; error(message: string): void };
 type Subscription = { id: string; topic: Topic; scope: Scope; listeners: Set<Listener>; ready: boolean; timer?: ReturnType<typeof setTimeout> };
@@ -19,7 +19,7 @@ export class Communication {
   private handshake?: ReturnType<typeof setTimeout>;
 
   subscribe(topic: Topic, scope: Scope, listener: Listener) {
-    const key = JSON.stringify([topic, scope.projectId, scope.taskId]);
+    const key = JSON.stringify([topic, scope.projectId, scope.taskId, scope.terminalId ?? null]);
     let subscription = this.subscriptions.get(key);
     if (!subscription) {
       if (this.subscriptions.size >= 32) { listener.error('購読数が上限に達しました'); return () => {}; }
@@ -41,6 +41,12 @@ export class Communication {
       if (this.ready) this.send({ type: 'unsubscribe', subscriptionId: subscription!.id });
       if (!this.subscriptions.size) { clearTimeout(this.retry); this.retry = undefined; this.disconnect(); }
     };
+  }
+
+  terminal(scope: Scope, action: TerminalAction): boolean {
+    const sub = this.subscriptions.get(JSON.stringify(['terminal', scope.projectId, scope.taskId, scope.terminalId ?? null]));
+    if (!this.ready || !sub?.ready) return false;
+    return this.send({ ...action, subscriptionId: sub.id });
   }
 
   private notify(message: string) { for (const sub of this.subscriptions.values()) for (const listener of sub.listeners) listener.error(message); }
@@ -69,10 +75,10 @@ export class Communication {
     this.reconnect(stop ? '更新接続で不正な応答を受信しました。画面を再読み込みしてください' : '更新接続で不正な応答を受信しました', stop);
   }
   private send(message: ClientMessage) {
-    if (!this.socket || this.socket.readyState !== 1) return;
-    if (this.socket.bufferedAmount > MAX_BUFFER) { this.reconnect('更新接続が混雑しています'); return; }
-    try { this.socket.send(JSON.stringify(message)); }
-    catch { this.reconnect('更新接続を再試行しています'); }
+    if (!this.socket || this.socket.readyState !== 1) return false;
+    if (this.socket.bufferedAmount > MAX_BUFFER) { this.reconnect('更新接続が混雑しています'); return false; }
+    try { this.socket.send(JSON.stringify(message)); return true; }
+    catch { this.reconnect('更新接続を再試行しています'); return false; }
   }
   private start(sub: Subscription) {
     if (!this.ready) return;
@@ -105,7 +111,7 @@ export class Communication {
           this.reconnect(stop ? '更新接続を復旧できませんでした。画面を再読み込みしてください' : '更新接続を再試行しています', stop); return;
         }
         const sub = [...this.subscriptions.values()].find(sub => sub.id === value.subscriptionId);
-        if (sub) { clearTimeout(sub.timer); sub.ready = false; for (const listener of sub.listeners) listener.error(value.message); }
+        if (sub) { clearTimeout(sub.timer); if (sub.topic !== 'terminal' || !sub.ready) sub.ready = false; for (const listener of sub.listeners) listener.error(value.message); }
         else this.protocolError();
         return;
       }
