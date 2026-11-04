@@ -22,7 +22,7 @@ function freeze<T>(value: T): T {
 /** Review records are durable. Reopening never invokes a reviewer or repeats a review. */
 export class ExecutionReview {
   private db: Database;
-  constructor(path: string) {
+  constructor(path: string, private sync: (taskId: number) => void = () => {}) {
     this.db = new Database(path);
     this.db.exec(`PRAGMA foreign_keys=ON;
       CREATE TABLE IF NOT EXISTS execution_reviews(id INTEGER PRIMARY KEY,task_id INTEGER NOT NULL REFERENCES tasks(id),attempt_id INTEGER NOT NULL UNIQUE REFERENCES execution_attempts(id),status TEXT NOT NULL,snapshot TEXT NOT NULL,result TEXT);
@@ -60,6 +60,7 @@ export class ExecutionReview {
   }
   async review(taskId: number, attemptId: number, reviewer: Reviewer | undefined, signal = new AbortController().signal) {
     if (!reviewer) throw Error('Reviewer not connected');
+    this.sync(taskId);
     let snapshot!: ReviewSnapshot;
     const id = this.db.transaction(() => {
       snapshot = this.snapshot(taskId, attemptId);
@@ -75,6 +76,7 @@ export class ExecutionReview {
       decision = { passed: result.passed, feedback: result.feedback };
     } catch { reason = signal.aborted ? 'cancelled' : 'review_failed'; }
     finally { signal.removeEventListener('abort', abort); }
+    this.sync(taskId);
     return this.db.transaction(() => {
       const row = this.db.query('SELECT status,snapshot FROM execution_reviews WHERE id=?').get(id) as any;
       if (row.status !== 'running') throw Error('Review already settled');

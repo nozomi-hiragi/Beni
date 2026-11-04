@@ -9,6 +9,7 @@
   - [プロジェクト設定・作成](screens/project-settings.md)
   - [設定画面](screens/settings.md)
 - 機能
+  - [LLM チャット連携](features/llm-chat.md)
   - [タスク検索](features/task-search.md)
 
 ## 旧版

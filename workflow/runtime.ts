@@ -1,9 +1,12 @@
 import { Database } from 'bun:sqlite';
 import { Store } from '../store';
-import { createHandler } from '../server';
+import { createHandler, chatDataDirectory } from '../server';
+import { ChatService } from '../chat';
 import { createWorkflowHandler, type WorkflowAdapters } from './http';
 import { databasePath } from './database';
 import { outcomeState } from './outcome';
+import { syncChat } from './chat-sync';
+import { syncDocuments } from './document-sync';
 
 type Task = { id: number; phase: string; status: string; [key: string]: unknown };
 type Event = { id: number; kind: string; payload: any };
@@ -90,27 +93,34 @@ export function createAppHandler(path: string, adapters: WorkflowAdapters = {}) 
   path = databasePath(path);
   const store = new Store(path);
   let workflow: ReturnType<typeof createWorkflowHandler>;
-  try { workflow = createWorkflowHandler(path, adapters); }
+  const chatDirectory = chatDataDirectory(path, process.env.BENI_CHAT_DIR);
+  try { workflow = createWorkflowHandler(path, adapters, chatDirectory); }
   catch (error) { store.close(); throw error; }
   let projection: Database;
   try { projection = new Database(path); }
   catch (error) { try { workflow.close(); } finally { store.close(); } throw error; }
-  const application = createHandler(store);
+  const application = createHandler(store, undefined, new ChatService(chatDirectory));
   let closed = false;
   return {
     async fetch(request: Request): Promise<Response> {
       if (closed) return Response.json({ error: '終了しています' }, { status: 503 });
       const workflowResponse = await workflow.fetch(request);
       if (workflowResponse) return workflowResponse;
-      const response = await application(request);
       const url = new URL(request.url);
       const isState = url.pathname === '/api/state';
       const isDetail = /^\/api\/tasks\/\d+$/.test(url.pathname);
+      const failed = new Set<number>();
+      if (request.method === 'GET' && (isState || isDetail) && url.hostname === '127.0.0.1' && (!request.headers.get('origin') || request.headers.get('origin') === url.origin) && request.headers.get('sec-fetch-site') !== 'cross-site') {
+        const ids = isState ? (projection.query('SELECT id FROM tasks').all() as {id:number}[]).map(t => t.id) : [Number(url.pathname.split('/')[3])];
+        for (const id of ids) try { syncChat(projection, id, chatDirectory); syncDocuments(projection, id); } catch (error) { if (error instanceof Error && error.name === 'SQLiteError') throw error; failed.add(id); }
+      }
+      const response = await application(request);
       if (request.method !== 'GET' || (!isState && !isDetail) || response.status !== 200) return response;
       const data = await response.json() as { tasks?: Task[]; task?: Task; [key: string]: unknown };
       const projected = projection.transaction(() => {
         const tables = new Set((projection.query("SELECT name FROM sqlite_master WHERE type='table'").all() as { name: string }[]).map(r => r.name));
         const project = (task: Task) => {
+          if (failed.has(task.id)) return { ...task, phase: '確認が必要', status: '会話・文書の確認が必要' };
           try { return projectTask(projection, task, tables); }
           catch (error) {
             if (error instanceof CorruptHistory) return { ...task, phase: '確認が必要', status: '履歴の確認が必要' };

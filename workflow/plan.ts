@@ -20,7 +20,7 @@ const nonempty = (value: string) => {
 /** Reopening does not resume external work; unknown outcomes require acknowledgement. */
 export class PlanGeneration {
   private db: Database;
-  constructor(path: string) {
+  constructor(path: string, private sync: (taskId: number) => void = () => {}, private publish: (taskId: number, expected: string, content: string) => void = () => {}) {
     this.db = new Database(path);
     this.db.exec(`PRAGMA foreign_keys=ON;
       CREATE TABLE IF NOT EXISTS workflow_events(id INTEGER PRIMARY KEY,task_id INTEGER NOT NULL REFERENCES tasks(id),kind TEXT NOT NULL,payload TEXT NOT NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP);
@@ -58,6 +58,7 @@ export class PlanGeneration {
   }
   async generate(taskId: number, requestKey: string, adapter: PlanAdapter | undefined, signal = new AbortController().signal) {
     nonempty(requestKey);
+    this.sync(taskId);
     if (!adapter) throw Error('Plan adapter not connected');
     let snapshot!: PlanSnapshot;
     const id = this.db.transaction(() => {
@@ -89,6 +90,7 @@ export class PlanGeneration {
     return this.finish(taskId, id, snapshot, result, false);
   }
   private finish(taskId: number, id: number, snapshot: PlanSnapshot, result?: { content: string }, unknown = false, reason?: string) {
+    this.sync(taskId);
     return this.db.transaction(() => {
       const row = this.db.query('SELECT status FROM plan_generations WHERE id=? AND task_id=?').get(id, taskId) as { status: string } | null;
       if (!row || row.status !== 'running') throw Error('Generation already settled');
@@ -96,6 +98,7 @@ export class PlanGeneration {
       const status = result ? (stale ? 'stale' : 'adopted') : (unknown ? 'unknown' : 'failed');
       let version: number | undefined;
       if (result && !stale) {
+        if (snapshot.previousPlan) this.publish(taskId, snapshot.previousPlan.content, result.content);
         version = (snapshot.previousPlan?.version ?? 0) + 1;
         this.db.query("INSERT INTO documents(task_id,kind,version,content) VALUES (?,'plan',?,?)").run(taskId, version, result.content);
         const messageId = snapshot.instructions.at(-1)?.id ?? 0;

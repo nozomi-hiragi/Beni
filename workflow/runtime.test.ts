@@ -12,7 +12,7 @@ function fixture(adapters: WorkflowAdapters = {}) {
   const app = createAppHandler(path, adapters);
   const get = (path: string) => app.fetch(new Request(`http://127.0.0.1:3210${path}`));
   const post = (path: string, data: unknown = {}) => app.fetch(new Request(`http://127.0.0.1:3210${path}`, { method: 'POST', headers: { origin: 'http://127.0.0.1:3210', 'content-type': 'application/json' }, body: JSON.stringify(data) }));
-  return { app, path, get, post, close() { app.close(); rmSync(dir, { recursive: true, force: true }); } };
+  return { app, path, dir, get, post, close() { app.close(); rmSync(dir, { recursive: true, force: true }); } };
 }
 
 test('application routes support instructions through separately approved execution and review with fake adapters', async () => {
@@ -25,13 +25,13 @@ test('application routes support instructions through separately approved execut
   });
   try {
     expect((await f.get('/')).status).toBe(200);
-    expect((await f.post('/api/projects', { name: 'Demo', folder: '/tmp/demo' })).status).toBe(201);
+    expect((await f.post('/api/projects', { name: 'Demo', folder: f.dir })).status).toBe(201);
     expect((await f.post('/api/tasks', { projectId: 1, name: 'Task' })).status).toBe(201);
     expect((await f.post('/api/tasks/1/messages', { content: ' raw instruction ' })).status).toBe(201);
     expect((await (await f.post('/api/tasks/1/workflow/requirements', { requestKey: 'r1' })).json()).status).toBe('adopted');
     expect((await (await f.post('/api/tasks/1/workflow/plan', { requestKey: 'p1' })).json()).status).toBe('adopted');
     expect((await f.post('/api/tasks/1/workflow/execute')).status).toBe(409);
-    expect((await f.post('/api/tasks/1/workflow/approve', { requirementsVersion: 2, planVersion: 1 })).status).toBe(200);
+    expect((await f.post('/api/tasks/1/workflow/approve', { requirementsVersion: 2, planVersion: 2 })).status).toBe(200);
     expect(executed).toBe(0);
     const execution = await (await f.post('/api/tasks/1/workflow/execute')).json();
     expect(execution.status).toBe('succeeded');
@@ -52,7 +52,7 @@ test('application routes support instructions through separately approved execut
 test('default application is unconnected and closing is idempotent', async () => {
   const f = fixture();
   try {
-    await f.post('/api/projects', { name: 'Demo', folder: '/tmp/demo' });
+    await f.post('/api/projects', { name: 'Demo', folder: f.dir });
     await f.post('/api/tasks', { projectId: 1, name: 'Task' });
     expect(await (await f.get('/api/workflow/capabilities')).json()).toEqual({ requirements: false, plan: false, execution: false, review: false });
     for (const action of ['requirements', 'plan', 'execute']) expect((await f.post(`/api/tasks/1/workflow/${action}`, { requestKey: 'key' })).status).toBe(503);
@@ -73,7 +73,7 @@ test('application serves current UI routes and records user instructions atomica
       expect(await response.text()).toContain('/ui/build/app.js');
     }
     expect((await f.get('/api/missing')).status).toBe(404);
-    await f.post('/api/projects', { name: 'Demo', folder: '/tmp/demo' });
+    await f.post('/api/projects', { name: 'Demo', folder: f.dir });
     await f.post('/api/tasks', { projectId: 1, name: 'Task' });
     const message = await (await f.post('/api/tasks/1/messages', { content: '  original request  ' })).json();
     const history = await (await f.get('/api/tasks/1/workflow/events')).json();
@@ -103,7 +103,7 @@ test('same-process symlink aliases cannot recover a live operation', async () =>
   try {
     symlinkSync(f.path, alias);
     second = createAppHandler(alias);
-    await f.post('/api/projects', { name: 'Demo', folder: '/tmp/demo' });
+    await f.post('/api/projects', { name: 'Demo', folder: f.dir });
     await f.post('/api/tasks', { projectId: 1, name: 'Task' });
     const running = f.post('/api/tasks/1/workflow/requirements', { requestKey: 'req' });
     await entered;
@@ -145,7 +145,7 @@ test('home projects durable task states across generation, review, rework, new i
   const f = fixture(adapters);
   let reopened: ReturnType<typeof createAppHandler> | undefined;
   try {
-    await f.post('/api/projects', { name: 'Demo', folder: '/tmp/demo' });
+    await f.post('/api/projects', { name: 'Demo', folder: f.dir });
     await f.post('/api/tasks', { projectId: 1, name: 'first' });
     await f.post('/api/tasks', { projectId: 1, name: 'second' });
     const state = async () => (await (await f.get('/api/state')).json()).tasks as any[];
@@ -159,7 +159,7 @@ test('home projects durable task states across generation, review, rework, new i
     expect(await task(1)).toMatchObject({ phase: '実装フロー', status: '計画を作成中' });
     release({ content: 'plan' }); await p; holdPlan = false;
     expect(await task(1)).toMatchObject({ phase: '実装フロー', status: '計画の確認待ち' });
-    await f.post('/api/tasks/1/workflow/approve', { requirementsVersion: 2, planVersion: 1 });
+    await f.post('/api/tasks/1/workflow/approve', { requirementsVersion: 2, planVersion: 2 });
     expect((await task(1)).status).toBe('実行指示待ち');
     waitForStart(); const e = f.post('/api/tasks/1/workflow/execute'); await entered!;
     expect(await task(1)).toMatchObject({ phase: '実装中', status: '実行中' });
@@ -171,7 +171,7 @@ test('home projects durable task states across generation, review, rework, new i
     expect(await task(1)).toMatchObject({ phase: '実装フロー', status: '手直しが必要' });
     await f.post('/api/tasks/1/workflow/plan', { requestKey: 'p2' });
     expect((await task(1)).status).toBe('計画の確認待ち');
-    await f.post('/api/tasks/1/workflow/approve', { requirementsVersion: 2, planVersion: 2 });
+    await f.post('/api/tasks/1/workflow/approve', { requirementsVersion: 2, planVersion: 3 });
     const fixed = await (await f.post('/api/tasks/1/workflow/execute')).json();
     passReview = true;
     await f.post('/api/tasks/1/workflow/review', { attemptId: fixed.attemptId });
@@ -193,7 +193,7 @@ test('home projects durable task states across generation, review, rework, new i
 test('missing optional tables are tolerated, corrupt task histories are isolated, unexpected database errors propagate', async () => {
   const f = fixture(); const db = new Database(f.path);
   try {
-    await f.post('/api/projects', { name: 'Demo', folder: '/tmp/demo' });
+    await f.post('/api/projects', { name: 'Demo', folder: f.dir });
     await f.post('/api/tasks', { projectId: 1, name: 'Task' });
     await f.post('/api/tasks', { projectId: 1, name: 'Other' });
     db.exec('DROP TABLE plan_generations');
@@ -228,11 +228,11 @@ test('completed status requires intact persisted evidence, execution, and review
     });
     const db = new Database(f.path);
     try {
-      await f.post('/api/projects', { name: 'Demo', folder: '/tmp/demo' });
+      await f.post('/api/projects', { name: 'Demo', folder: f.dir });
       await f.post('/api/tasks', { projectId: 1, name: 'first' });
       await f.post('/api/tasks', { projectId: 1, name: 'second' });
       await f.post('/api/tasks/1/workflow/plan', { requestKey: 'p' });
-      await f.post('/api/tasks/1/workflow/approve', { requirementsVersion: 1, planVersion: 1 });
+      await f.post('/api/tasks/1/workflow/approve', { requirementsVersion: 1, planVersion: 2 });
       const run = await (await f.post('/api/tasks/1/workflow/execute')).json();
       await f.post('/api/tasks/1/workflow/review', { attemptId: run.attemptId });
       expect((await (await f.get('/api/state')).json()).tasks.find((t: any) => t.id === 1).status).toBe('完了（監修済み）');

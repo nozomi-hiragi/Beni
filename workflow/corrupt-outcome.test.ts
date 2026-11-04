@@ -20,13 +20,13 @@ for (const kind of ['null', 'zero', 'empty', 'unknown', 'false', 'absent'] as co
       method: 'POST', headers: { origin: 'http://127.0.0.1:3210', 'content-type': 'application/json' }, body: JSON.stringify(data),
     }));
     try {
-      expect((await post('/api/projects', { name: 'example', folder: '/tmp/example' })).status).toBe(201);
+      expect((await post('/api/projects', { name: 'example', folder: dir })).status).toBe(201);
       expect((await post('/api/tasks', { projectId: 1, name: 'task' })).status).toBe(201);
       expect((await post('/api/tasks/1/workflow/plan', { requestKey: 'plan' })).status).toBe(200);
-      expect((await post('/api/tasks/1/workflow/approve', { requirementsVersion: 1, planVersion: 1 })).status).toBe(200);
+      expect((await post('/api/tasks/1/workflow/approve', { requirementsVersion: 1, planVersion: 2 })).status).toBe(200);
       expect((await (await post('/api/tasks/1/workflow/execute')).json() as any).status).toBe('succeeded');
       // A fresh approval ensures the following execute could run if malformed history were ignored.
-      expect((await post('/api/tasks/1/workflow/approve', { requirementsVersion: 1, planVersion: 1 })).status).toBe(200);
+      expect((await post('/api/tasks/1/workflow/approve', { requirementsVersion: 1, planVersion: 2 })).status).toBe(200);
       const stored = db.query("SELECT id,payload FROM workflow_events WHERE task_id=1 AND kind='execution_result'").get() as { id: number; payload: string };
       const payload = JSON.parse(stored.payload);
       if (kind === 'absent') delete payload.result.outcomeUnknown;
@@ -46,7 +46,7 @@ for (const kind of ['null', 'zero', 'empty', 'unknown', 'false', 'absent'] as co
         expect(detail.task.status).toBe('実行指示待ち');
       }
 
-      const approval = await post('/api/tasks/1/workflow/approve', { requirementsVersion: 1, planVersion: 1 });
+      const approval = await post('/api/tasks/1/workflow/approve', { requirementsVersion: 1, planVersion: 2 });
       const execution = await post('/api/tasks/1/workflow/execute');
       if (kind === 'false' || kind === 'absent') {
         expect(approval.status).toBe(200);
@@ -81,10 +81,10 @@ for (const kind of ['null', 'zero', 'empty', 'unknown', 'false', 'absent'] as co
       method: 'POST', headers: { origin: 'http://127.0.0.1:3210', 'content-type': 'application/json' }, body: JSON.stringify(data),
     }));
     try {
-      expect((await post('/api/projects', { name: 'example', folder: '/tmp/example' })).status).toBe(201);
+      expect((await post('/api/projects', { name: 'example', folder: dir })).status).toBe(201);
       expect((await post('/api/tasks', { projectId: 1, name: 'task' })).status).toBe(201);
       expect((await post('/api/tasks/1/workflow/plan', { requestKey: 'plan' })).status).toBe(200);
-      expect((await post('/api/tasks/1/workflow/approve', { requirementsVersion: 1, planVersion: 1 })).status).toBe(200);
+      expect((await post('/api/tasks/1/workflow/approve', { requirementsVersion: 1, planVersion: 2 })).status).toBe(200);
       const execution = await (await post('/api/tasks/1/workflow/execute')).json() as { attemptId: number; status: string };
       expect(execution.status).toBe('succeeded');
       expect((await (await post('/api/tasks/1/workflow/review', { attemptId: execution.attemptId })).json() as any).status).toBe('completed');

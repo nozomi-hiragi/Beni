@@ -5,6 +5,8 @@ import { RequirementsGeneration, type RequirementsAdapter } from './requirements
 import { PlanGeneration, type PlanAdapter } from './plan';
 import { ExecutionReview, type Reviewer } from './review';
 import { databasePath } from './database';
+import { syncDocuments, adoptDocument } from './document-sync';
+import { syncChat } from './chat-sync';
 
 export interface WorkflowAdapters {
   requirements?: RequirementsAdapter;
@@ -25,7 +27,7 @@ async function tracked<T>(key: string, run: () => Promise<T>): Promise<T> {
 }
 
 /** Returns null for unrelated routes. Mount before the server's fallback 404. */
-export function createWorkflowHandler(path: string, adapters: WorkflowAdapters = {}) {
+export function createWorkflowHandler(path: string, adapters: WorkflowAdapters = {}, chatDirectory?: string) {
   path = databasePath(path);
   const db = new Database(path);
   // A database may be opened through a symlink or another path. Key live
@@ -38,10 +40,13 @@ export function createWorkflowHandler(path: string, adapters: WorkflowAdapters =
     db.close();
     throw error;
   }
-  const workflow = new Workflow(path);
-  const requirements = new RequirementsGeneration(path);
-  const plan = new PlanGeneration(path);
-  const review = new ExecutionReview(path);
+  const folders = new Map<number, string>();
+  const sync = (taskId: number) => { if (chatDirectory !== undefined) { syncChat(db, taskId, chatDirectory); folders.set(taskId, syncDocuments(db, taskId).folder); } };
+  const publish = (kind: 'requirements' | 'plan') => (taskId: number, expected: string, content: string) => { if (chatDirectory !== undefined) { const folder = folders.get(taskId); if (!folder) throw Error('Documents not synchronized'); adoptDocument(folder, kind, expected, content); } };
+  const workflow = new Workflow(path, sync);
+  const requirements = new RequirementsGeneration(path, sync, publish('requirements'));
+  const plan = new PlanGeneration(path, sync, publish('plan'));
+  const review = new ExecutionReview(path, sync);
   const capabilities = { requirements: !!adapters.requirements, plan: !!adapters.plan, execution: !!adapters.execution, review: !!adapters.review };
   const key = (taskId: number, kind: string) => JSON.stringify([dbKey, taskId, kind]);
   return {
@@ -58,6 +63,7 @@ export function createWorkflowHandler(path: string, adapters: WorkflowAdapters =
       if (!db.query('SELECT 1 FROM tasks WHERE id=?').get(taskId)) return json({ error: 'タスクが見つかりません' }, 404);
       const action = match![2];
       if (action === 'events' && request.method === 'GET') {
+        try { sync(taskId); } catch { return json({ error: '会話または文書を同期できませんでした' }, 409); }
         return json({ workflow: workflow.events(taskId), requirements: requirements.history(taskId), plan: plan.history(taskId), review: review.history(taskId) });
       }
       if (request.method !== 'POST' || request.headers.get('origin') !== url.origin || request.headers.get('content-type') !== 'application/json') return json({ error: 'アクセスできません' }, 403);
@@ -108,6 +114,7 @@ export function createWorkflowHandler(path: string, adapters: WorkflowAdapters =
           }, request.signal)));
         }
         if (action === 'recover' || action === 'acknowledge') {
+          sync(taskId);
           if (!['requirements', 'plan', 'execution', 'review'].includes(input.kind)) return json({ error: '入力を確認してください' }, 400);
           if (live.has(key(taskId, input.kind))) return json({ error: '処理中のため復旧できません。結果を確認してください' }, 409);
           if (action === 'recover') {

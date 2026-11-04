@@ -96,14 +96,14 @@ test('HTTP refuses the same plan after a failed review and allows a newly approv
     method: 'POST', headers: { origin: 'http://127.0.0.1:3210', 'content-type': 'application/json' }, body: JSON.stringify(data),
   }));
   try {
-    expect((await post('/api/projects', { name: 'example', folder: '/tmp/example' })).status).toBe(201);
+    expect((await post('/api/projects', { name: 'example', folder: dir })).status).toBe(201);
     expect((await post('/api/tasks', { projectId: 1, name: 'task' })).status).toBe(201);
     expect((await post('/api/tasks/1/workflow/plan', { requestKey: 'first' })).status).toBe(200);
-    expect((await post('/api/tasks/1/workflow/approve', { requirementsVersion: 1, planVersion: 1 })).status).toBe(200);
+    expect((await post('/api/tasks/1/workflow/approve', { requirementsVersion: 1, planVersion: 2 })).status).toBe(200);
     const first = await (await post('/api/tasks/1/workflow/execute')).json() as { attemptId: number };
     const failed = await (await post('/api/tasks/1/workflow/review', { attemptId: first.attemptId })).json() as { status: string; reviewId: number };
     expect(failed.status).toBe('failed');
-    expect((await post('/api/tasks/1/workflow/approve', { requirementsVersion: 1, planVersion: 1 })).status).toBe(409);
+    expect((await post('/api/tasks/1/workflow/approve', { requirementsVersion: 1, planVersion: 2 })).status).toBe(409);
     expect((await post('/api/tasks/1/workflow/execute')).status).toBe(409);
     expect(executionCalls).toBe(1);
     expect((await post('/api/tasks/1/messages', { content: 'Investigate the review failure' })).status).toBe(201);
@@ -112,7 +112,7 @@ test('HTTP refuses the same plan after a failed review and allows a newly approv
     expect(issues).toHaveLength(1);
     expect(issues[0]).toEqual({ eventId: expect.any(Number), reviewId: failed.reviewId, attemptId: first.attemptId, status: 'failed' });
     expect((await post('/api/tasks/1/workflow/execute')).status).toBe(409);
-    expect((await post('/api/tasks/1/workflow/approve', { requirementsVersion: 1, planVersion: 2 })).status).toBe(200);
+    expect((await post('/api/tasks/1/workflow/approve', { requirementsVersion: 1, planVersion: 3 })).status).toBe(200);
     expect((await post('/api/tasks/1/workflow/execute')).status).toBe(200);
     expect(executionCalls).toBe(2);
   } finally {

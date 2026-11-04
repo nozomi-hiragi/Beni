@@ -23,14 +23,14 @@ function fixture(executionResult: ExecutionResult) {
   const post = (route: string, data: unknown = {}) => app.fetch(new Request(`http://127.0.0.1:3210${route}`, {
     method: 'POST', headers: { origin: 'http://127.0.0.1:3210', 'content-type': 'application/json' }, body: JSON.stringify(data),
   }));
-  return { app, get, post, executions: () => executions, reviews: () => reviews, close() { app.close(); rmSync(dir, { recursive: true, force: true }); } };
+  return { app, dir, get, post, executions: () => executions, reviews: () => reviews, close() { app.close(); rmSync(dir, { recursive: true, force: true }); } };
 }
 
 async function prepare(f: ReturnType<typeof fixture>) {
-  expect((await f.post('/api/projects', { name: 'example', folder: '/tmp/example' })).status).toBe(201);
+  expect((await f.post('/api/projects', { name: 'example', folder: f.dir })).status).toBe(201);
   expect((await f.post('/api/tasks', { projectId: 1, name: 'task' })).status).toBe(201);
   expect((await f.post('/api/tasks/1/workflow/plan', { requestKey: 'plan' })).status).toBe(200);
-  expect((await f.post('/api/tasks/1/workflow/approve', { requirementsVersion: 1, planVersion: 1 })).status).toBe(200);
+  expect((await f.post('/api/tasks/1/workflow/approve', { requirementsVersion: 1, planVersion: 2 })).status).toBe(200);
 }
 
 test('HTTP adopts only one detached snapshot of a mutable getter result', async () => {
@@ -78,7 +78,7 @@ for (const invalid of ['output', 'evidence', 'unknown'] as const) {
       expect(saved.payload.status).toBe('failed');
       expect(saved.payload.result.outcomeUnknown).toBe(true);
       expect((await f.post('/api/tasks/1/workflow/review', { attemptId: execution.attemptId })).status).toBe(409);
-      expect((await f.post('/api/tasks/1/workflow/approve', { requirementsVersion: 1, planVersion: 1 })).status).toBe(409);
+      expect((await f.post('/api/tasks/1/workflow/approve', { requirementsVersion: 1, planVersion: 2 })).status).toBe(409);
       expect(f.executions()).toBe(1);
       expect(f.reviews()).toBe(0);
     } finally { f.close(); }
@@ -96,7 +96,7 @@ test('HTTP rejects an execution result inheriting outcomeUnknown from its protot
     expect(execution.status).toBe('failed');
     expect(execution.result.outcomeUnknown).toBe(true);
     expect((await f.post('/api/tasks/1/workflow/review', { attemptId: execution.attemptId })).status).toBe(409);
-    expect((await f.post('/api/tasks/1/workflow/approve', { requirementsVersion: 1, planVersion: 1 })).status).toBe(409);
+    expect((await f.post('/api/tasks/1/workflow/approve', { requirementsVersion: 1, planVersion: 2 })).status).toBe(409);
     expect(f.executions()).toBe(1);
     expect(f.reviews()).toBe(0);
   } finally { f.close(); }

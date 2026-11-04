@@ -12,7 +12,7 @@ function fixture() {
   const dir = mkdtempSync(join(tmpdir(), 'beni-plan-'));
   const path = join(dir, 'db');
   const store = new Store(path);
-  store.createProject('p', '/tmp/p');
+  store.createProject('p', dir);
   store.createTask(1, 'task title');
   const workflow = new Workflow(path);
   const generation = new PlanGeneration(path);
