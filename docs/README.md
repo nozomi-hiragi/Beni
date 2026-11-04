@@ -1,5 +1,9 @@
 # Beni のドキュメント
 
+## 開発
+
+- [ディレクトリ構成](directory-structure.md)
+
 ## 次期版の仕様
 
 - [全体仕様](next-agent-plan.md)

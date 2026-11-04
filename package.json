@@ -3,12 +3,12 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "bun run build && bun server.ts",
-    "test": "bun run build && bun test server.test.ts store/index.test.ts chat.test.ts && bun run test:ui",
-    "build:css": "tailwindcss -i ./ui/tailwind.css -o ./ui/generated.css --minify",
-    "typecheck:ui": "tsc -p tsconfig.ui.json",
-    "build:ui": "bun run typecheck:ui && vite build",
-    "build": "bun run build:css && bun run build:ui",
+    "start": "bun run build && bun src/backend/server.ts",
+    "test": "bun run build && bun test src/backend/server.test.ts src/backend/store/index.test.ts src/backend/chat.test.ts && bun run test:ui",
+    "build:css": "tailwindcss -i ./src/frontend/tailwind.css -o ./dist/frontend/generated.css --minify",
+    "typecheck": "tsc -p tsconfig.json",
+    "build:ui": "bun run typecheck && vite build",
+    "build": "bun run build:ui && bun run build:css",
     "test:ui": "bun --conditions=browser ./node_modules/vitest/vitest.mjs run --config vitest.config.ts"
   },
   "dependencies": {
@@ -17,6 +17,7 @@
   "devDependencies": {
     "@solidjs/testing-library": "^0.8.10",
     "@tailwindcss/cli": "^4.3.4",
+    "@types/bun": "1.4.2",
     "daisyui": "^5.7.50",
     "happy-dom": "^21.0.4",
     "tailwindcss": "^4.3.4",

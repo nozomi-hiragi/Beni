@@ -3,5 +3,5 @@ import solid from "vite-plugin-solid";
 
 export default defineConfig({
   plugins: [solid()],
-  test: { environment: "happy-dom", include: ["ui/src/**/*.test.tsx"] },
+  test: { environment: "happy-dom", include: ["src/frontend/**/*.test.tsx"] },
 });

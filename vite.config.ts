@@ -5,8 +5,8 @@ export default defineConfig({
   plugins: [solid()],
   build: {
     target: 'esnext',
-    outDir: 'ui/build',
+    outDir: 'dist/frontend',
     emptyOutDir: true,
-    lib: { entry: 'ui/src/main.tsx', formats: ['es'], fileName: () => 'app.js' },
+    lib: { entry: 'src/frontend/main.tsx', formats: ['es'], fileName: () => 'app.js' },
   },
 });

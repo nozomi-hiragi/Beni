@@ -4,7 +4,8 @@ import { changeEvents } from './events';
 import { projectDocuments, taskDocuments, readTaskDocuments, watchTaskDocuments } from './documents';
 import { isAbsolute, dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
-import { opendir, realpath } from 'node:fs/promises';
+import { mkdir, opendir, realpath } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
 
 const maxListedFolders = 500;
 
@@ -26,7 +27,7 @@ async function listFolders(path: string) {
 
 const row = (value: unknown): Record<string, any> => value as Record<string, any>;
 const projectTask = (value: unknown) => { const t = row(value); return {id:t.id, projectId:t.project_id, name:t.name, phase:t.phase, status:t.status}; };
-export function createHandler(store: Store, initialFolder = homedir(), chat = new ChatService()) {
+export function createHandler(store: Store, initialFolder = homedir(), chat = new ChatService(dataPaths().chatDirectory)) {
  const documentFolder = (project:any, task:any) => {
   const stored=store.documents(task.id).map(row);
   const latest=(kind:string)=>stored.filter(d=>d.kind===kind).sort((a,b)=>b.version-a.version)[0]?.content;
@@ -45,8 +46,8 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
   const json = (value: unknown, status = 200) => Response.json(value,{status,headers:{'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}});
   if (request.method === 'GET') {
    if (url.pathname === '/' || url.pathname === '/settings' || /^\/project\/[1-9]\d*$/.test(url.pathname) || ['/ui/index.html','/ui/build/app.js','/ui/generated.css'].includes(url.pathname)) {
-    const file = url.pathname.startsWith('/ui/') ? url.pathname.slice('/ui/'.length) : 'index.html';
-    return new Response(Bun.file(new URL(`./ui/${file}`,import.meta.url)),{headers:{'Content-Security-Policy':"default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'",'X-Content-Type-Options':'nosniff','Cache-Control':'no-store'}});
+    const file = url.pathname === '/ui/build/app.js' ? '../../dist/frontend/app.js' : url.pathname === '/ui/generated.css' ? '../../dist/frontend/generated.css' : '../frontend/index.html';
+    return new Response(Bun.file(new URL(file,import.meta.url)),{headers:{'Content-Security-Policy':"default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'",'X-Content-Type-Options':'nosniff','Cache-Control':'no-store'}});
    }
    if(url.pathname.endsWith('/events') && ((request.headers.get('origin') && request.headers.get('origin')!==url.origin)||request.headers.get('sec-fetch-site')==='cross-site'))return json({error:'アクセスできません'},403);
    if(url.pathname==='/api/chat/events'){const p=Number(url.searchParams.get('projectId'));const raw=url.searchParams.get('taskId');const t=raw===null?null:Number(raw);if(!scope(p,t))return json({error:'会話が見つかりません'},404);return changeEvents(request,changed=>chat.subscribe(p,t,changed))}
@@ -87,14 +88,16 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
   } catch {return json({error:'入力または保存先を確認してください'},400)}
  };
 }
-export function chatDataDirectory(database: string | undefined, override: string | undefined, cwd = process.cwd()) {
- if (override) return override;
- return `${resolve(cwd,database ?? 'beni.sqlite')}.chat`;
+export function dataPaths(environment: Record<string,string|undefined> = process.env, cwd = process.cwd()) {
+ const dataDirectory = environment.BENI_DATA_DIR ? resolve(cwd,environment.BENI_DATA_DIR) : fileURLToPath(new URL('../../data',import.meta.url));
+ const database = join(dataDirectory,'beni.sqlite');
+ const chatDirectory = join(dataDirectory,'chat');
+ return {dataDirectory,database,chatDirectory};
 }
 if (import.meta.main) {
- const database = process.env.BENI_DB ?? 'beni.sqlite';
+ const {database,chatDirectory} = dataPaths();
+ await mkdir(dirname(resolve(database)),{recursive:true,mode:0o700});
  const store = new Store(database);
- const chatDirectory = chatDataDirectory(process.env.BENI_DB,process.env.BENI_CHAT_DIR);
  const chat = new ChatService(chatDirectory);
  const port = Number(process.env.BENI_PORT ?? 3210);
  const server = Bun.serve({hostname:'127.0.0.1',port,maxRequestBodySize:65536,fetch:createHandler(store,homedir(),chat)});

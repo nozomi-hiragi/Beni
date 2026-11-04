@@ -143,9 +143,6 @@ vite.config.ts.timestamp-*
 .vite/
 
 # Local Beni data
+/data/
 /beni.sqlite*
 *.chat/
-
-# Built frontend
-/ui/generated.css
-/ui/build/
