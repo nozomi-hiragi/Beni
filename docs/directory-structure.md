@@ -1,0 +1,84 @@
+# ディレクトリ構成
+
+Beni は一つのアプリケーションとして管理し、サーバー側を `src/backend/`、ブラウザー側を `src/frontend/` に分けています。設定ファイルはルート、テストは対象コードの近くに置きます。
+
+`[生成]` と `[データ]` は Git 管理の対象外です。テストファイルは一部を `*.test.tsx` としてまとめています。
+
+```text
+Beni/
+├── src/                              アプリケーションのコード
+│   ├── backend/                      Bun で動くサーバー側の処理
+│   │   ├── server.ts                 サーバー起動、API、フロントエンド配信、保存先設定
+│   │   ├── server.test.ts            API・配信・文書管理・変更通知・保存先のテスト
+│   │   ├── chat.ts                   Codex 通信、会話の保存・再開・受信・中断
+│   │   ├── chat.test.ts              会話の保存・再開・中断・分離、接続エラーのテスト
+│   │   ├── documents.ts              タスク用 Markdown の作成・読み取り・変更監視
+│   │   ├── events.ts                 文書・会話の変更をブラウザーへ通知する SSE
+│   │   ├── store/                    データベースへのアクセス
+│   │   │   ├── index.ts              SQLite にプロジェクト・タスク・メッセージ・文書の版を保存
+│   │   │   └── index.test.ts         永続化・会話の分離・文書の版管理のテスト
+│   │   └── test/                     バックエンドのテスト補助
+│   │       └── fake-codex.ts          実サービスを使わず Codex 通信を模擬する実行ファイル
+│   └── frontend/                     ブラウザーで動く SolidJS の画面
+│       ├── index.html                アプリの表示先と JavaScript・CSS の読み込み
+│       ├── main.tsx                  SolidJS のアプリを HTML に取り付ける入口
+│       ├── App.tsx                   URL に応じたホーム・設定・プロジェクト画面の切り替え
+│       ├── Home.tsx                  プロジェクト・タスク作成、タスク一覧の検索・並べ替え
+│       ├── Workspace.tsx             チャット・タスク・文書の表示とタブ管理
+│       ├── api.ts                    バックエンドへの JSON リクエストとエラー処理
+│       ├── types.ts                  プロジェクト・タスク・文書・会話などの型
+│       ├── tailwind.css              Tailwind CSS の探索対象、daisyUI のテーマ、共通スタイル
+│       ├── *.test.tsx                画面の表示・操作のテスト
+│       ├── test-events.ts            変更通知を模擬するテスト用 EventSource
+│       └── components/               画面を構成する部品
+│           ├── Menu.tsx              ホーム・設定への移動と検索のメニュー
+│           ├── TaskCreate.tsx        プロジェクトを選び、タスクを作成するフォーム
+│           ├── TaskList.tsx          タスク一覧と並べ替え操作
+│           ├── ProjectCreateDialog.tsx  プロジェクトの名前・フォルダーを指定するダイアログ
+│           ├── FolderPicker.tsx      バックエンドが動く環境のフォルダー選択
+│           ├── ChatPanel.tsx         Codex との会話、モデル選択、送信・中断、過去の履歴表示
+│           ├── CodexSettings.tsx     Codex のインストール・認証・モデルなどの状態確認
+│           ├── ChatComposer.tsx      テキスト入力と送信フォーム
+│           ├── ChatContent.tsx       メッセージ一覧の表示
+│           ├── PhaseIndicator.tsx    フェーズ表示。現状は「タスク内容」の操作に対応
+│           ├── TabBar.tsx            タブの選択と閉じる操作
+│           ├── TreeView.tsx          項目の階層表示と選択
+│           └── *.test.tsx            部品の表示・操作のテスト
+├── dist/                             [生成] ビルド出力
+│   └── frontend/                     フロントエンドの生成物
+│       ├── app.js                    Vite が生成する JavaScript
+│       └── generated.css             Tailwind CSS・daisyUI が生成する CSS
+├── docs/                             仕様書、画面モック、構成の説明
+│   ├── README.md                     ドキュメントの目次
+│   ├── directory-structure.md        この文書
+│   ├── next-agent-plan.md            アプリ全体の目的、利用の流れ、構想
+│   ├── screens/                      画面ごとの仕様
+│   │   ├── home.md                   ホーム画面
+│   │   ├── project-detail.md         プロジェクト詳細画面
+│   │   ├── project-settings.md       プロジェクト設定・作成
+│   │   └── settings.md               設定画面
+│   ├── features/                     機能ごとの仕様
+│   │   ├── llm-chat.md               LLM チャット連携
+│   │   └── task-search.md            タスク検索
+│   └── mockups/                      画面・部品の見た目を検討する HTML と CSS
+│       └── components/               部品ごとのモック
+├── data/                             [データ] Beni 自身の既定保存先。実行時に作成
+│   ├── beni.sqlite                   SQLite データベース（関連ファイルも同じ場所）
+│   └── chat/                         会話 JSON
+├── node_modules/                     [生成] インストールした依存パッケージ
+├── README.md                         概要、起動方法、保存先、機能、テスト方法
+├── AGENTS.md                         このリポジトリで作業するエージェント向けの指示
+├── package.json                      依存パッケージと起動・ビルド・テストのコマンド
+├── bun.lock                          Bun が解決した依存パッケージのバージョン
+├── tsconfig.json                     バックエンド・フロントエンド共通の型チェック設定
+├── vite.config.ts                    SolidJS のフロントエンドのビルド設定
+├── vitest.config.ts                  ブラウザー環境を模擬するフロントエンドのテスト設定
+├── .gitignore                        生成物・ローカルデータなどの Git 除外設定
+└── LICENSE                           Apache License 2.0 のライセンス本文
+```
+
+仕様書には未実装の構想も含まれます。画面モックもアプリ本体とは別に管理しているため、現在の動作は実装とテストで確認してください。
+
+保存先の変更と以前のデータの扱いは [README のデータの保存先](../README.md#データの保存先) を参照してください。
+
+ソースの配置と公開 URL は別です。JavaScript・CSS は引き続き `/ui/build/app.js` と `/ui/generated.css` から配信します。

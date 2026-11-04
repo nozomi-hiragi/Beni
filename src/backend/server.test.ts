@@ -1,8 +1,9 @@
 import { test, expect } from 'bun:test';
 import { Store } from './store/index';
-import { createHandler } from './server';
-import { mkdtemp, mkdir, realpath, rm, symlink, writeFile, readFile, rename } from 'node:fs/promises';
+import { createHandler, dataPaths } from './server';
+import { mkdtemp, mkdir, realpath, rm, symlink, writeFile, readFile, rename, stat } from 'node:fs/promises';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 
 test('project, task, chat and initial document flow', async () => {
@@ -206,3 +207,35 @@ test('SSE keepalive outlives the default HTTP idle timeout',async()=>{
  for(let i=0;i<20&&!released;i++)await Bun.sleep(10);
  expect(released).toBe(true);
 },20000);
+
+
+test('uses app-root data storage independently of the working directory',()=>{
+ const dataDirectory=fileURLToPath(new URL('../../data',import.meta.url));
+ const expected={dataDirectory,database:join(dataDirectory,'beni.sqlite'),chatDirectory:join(dataDirectory,'chat')};
+ expect(dataPaths({},'/tmp/one')).toEqual(expected);
+ expect(dataPaths({},'/tmp/two')).toEqual(expected);
+ expect(dataPaths({BENI_DATA_DIR:''},'/tmp/one')).toEqual(expected);
+});
+
+test('resolves configured data directories with a shared data root',()=>{
+ expect(dataPaths({BENI_DATA_DIR:'/tmp/another-data'},'/tmp/one')).toEqual({dataDirectory:'/tmp/another-data',database:'/tmp/another-data/beni.sqlite',chatDirectory:'/tmp/another-data/chat'});
+ expect(dataPaths({BENI_DATA_DIR:'local-data'},'/tmp/one')).toEqual({dataDirectory:'/tmp/one/local-data',database:'/tmp/one/local-data/beni.sqlite',chatDirectory:'/tmp/one/local-data/chat'});
+ expect(dataPaths({BENI_DATA_DIR:'/tmp/beni-data'},'/tmp/one')).toEqual({dataDirectory:'/tmp/beni-data',database:'/tmp/beni-data/beni.sqlite',chatDirectory:'/tmp/beni-data/chat'});
+});
+
+test('server initializes an empty data directory before opening the database',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'beni-data-start-'));
+ const dataDirectory=join(root,'nested','data');
+ const env:Record<string,string|undefined>={...process.env,BENI_DATA_DIR:dataDirectory,BENI_PORT:'0'};
+ const child=Bun.spawn([process.execPath,fileURLToPath(new URL('./server.ts',import.meta.url))],{cwd:root,env,stdout:'pipe',stderr:'pipe'});
+ const reader=child.stdout.getReader();let timer:ReturnType<typeof setTimeout>|undefined;
+ try{
+  const output=await Promise.race([reader.read(),new Promise<never>((_,reject)=>{timer=setTimeout(()=>reject(Error('Server did not start')),5000)})]);
+  const address=new TextDecoder().decode(output.value).match(/http:\/\/127\.0\.0\.1:\d+/)?.[0];
+  expect(address).toBeDefined();
+  expect((await stat(join(dataDirectory,'beni.sqlite'))).isFile()).toBe(true);
+  expect((await stat(dataDirectory)).mode & 0o777).toBe(0o700);
+  const response=await fetch(`${address}/api/state`);
+  expect(response.status).toBe(200);expect(await response.json()).toEqual({projects:[],tasks:[]});
+ }finally{clearTimeout(timer);child.kill();await child.exited;reader.releaseLock();await rm(root,{recursive:true,force:true})}
+});

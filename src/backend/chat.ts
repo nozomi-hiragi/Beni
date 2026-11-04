@@ -2,7 +2,6 @@ import { spawn, execFile, type ChildProcessWithoutNullStreams } from 'node:child
 import { createInterface } from 'node:readline';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 
 type State = 'pending'|'streaming'|'completed'|'failed'|'interrupted'|'unknown';
@@ -46,7 +45,7 @@ export class ChatService {
  subscribe(p:number,t:number|null,changed:()=>void){const k=key(p,t);let listeners=this.listeners.get(k);if(!listeners){listeners=new Set();this.listeners.set(k,listeners)}listeners.add(changed);return ()=>{listeners!.delete(changed);if(!listeners!.size)this.listeners.delete(k)}}
  private locks=new Map<string,Promise<unknown>>();
  private active=new Map<string,{rpc:Rpc;threadId:string|null;turnId:string|null}>();
- constructor(private directory=join(homedir(),'.local','share','beni','chat'),private executable=()=>Bun.which('codex')) {}
+ constructor(private directory:string,private executable=()=>Bun.which('codex')) {}
  private async locked<T>(k:string,fn:()=>Promise<T>):Promise<T>{const prior=this.locks.get(k)??Promise.resolve();const job=prior.catch(()=>{}).then(fn);this.locks.set(k,job);try{return await job}finally{if(this.locks.get(k)===job)this.locks.delete(k)}}
  private path(p:number,t:number|null){return join(this.directory,`${key(p,t)}.json`)}
  private async save(c:Conversation){await mkdir(this.directory,{recursive:true,mode:0o700});const path=this.path(c.projectId,c.taskId),tmp=path+'.'+randomUUID()+'.tmp';await writeFile(tmp,JSON.stringify(c,null,2)+'\n',{mode:0o600});await rename(tmp,path);for(const listener of this.listeners.get(key(c.projectId,c.taskId))??[])listener()}

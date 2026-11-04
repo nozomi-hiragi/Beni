@@ -2,7 +2,7 @@
   "compilerOptions": {
     "target": "ESNext", "module": "ESNext", "moduleResolution": "Bundler",
     "lib": ["ESNext", "DOM", "DOM.Iterable"], "jsx": "preserve", "jsxImportSource": "solid-js",
-    "strict": true, "noEmit": true, "skipLibCheck": true
+    "strict": true, "noEmit": true, "skipLibCheck": true, "types": ["bun"]
   },
-  "include": ["ui/src/**/*.ts", "ui/src/**/*.tsx"]
+  "include": ["src/backend/**/*.ts", "src/frontend/**/*.ts", "src/frontend/**/*.tsx"]
 }

@@ -37,11 +37,6 @@ test('rejects server requests with string IDs',async()=>{
  const dir=await mkdtemp(join(tmpdir(),'beni-chat-'));try{const chat=new ChatService(dir,()=>fake);await chat.send(1,null,'approval',null,'/tmp');await waitFor(async()=>(await chat.get(1,null)).messages[1].status==='completed');expect((await chat.get(1,null)).messages[1].content).toContain('denied')}finally{await rm(dir,{recursive:true,force:true})}
 });
 
-test('isolates explicitly configured database chat storage',async()=>{
- const {chatDataDirectory}=await import('./server');expect(chatDataDirectory(undefined,undefined,'/tmp/one')).not.toBe(chatDataDirectory(undefined,undefined,'/tmp/two'));expect(chatDataDirectory(undefined,undefined,'/tmp/one')).toBe(chatDataDirectory('beni.sqlite',undefined,'/tmp/one'));  expect(chatDataDirectory('/tmp/one.sqlite',undefined)).toBe('/tmp/one.sqlite.chat');expect(chatDataDirectory('/tmp/one.sqlite','/tmp/explicit')).toBe('/tmp/explicit');
-});
-
-
 test('task conversations write and resume in their document sandbox; general stays read-only',async()=>{
  const root=await mkdtemp(join(tmpdir(),'beni-task-chat-'));
  const {taskDocuments}=await import('./documents');
