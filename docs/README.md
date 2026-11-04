@@ -11,7 +11,3 @@
 - 機能
   - [LLM チャット連携](features/llm-chat.md)
   - [タスク検索](features/task-search.md)
-
-## 旧版
-
-- [旧版のアプリケーション動作フロー](../legacy/docs/application-workflow.md)

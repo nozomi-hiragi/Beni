@@ -4,7 +4,9 @@
 
 Beni helps users direct, plan, and supervise coding tasks with multiple agents through a Web UI.
 
-The current specifications are in `docs/`. Earlier application files are preserved under `legacy/`.
+The current specifications are in `docs/`; some describe planned behavior. Check the implementation before assuming a feature is available.
+
+The Bun server starts in `server.ts`. The Web UI is in `ui/src/`, Codex chat integration is in `chat.ts`, task document handling is in `documents.ts`, and database access is in `store/`.
 
 Keep implementations focused on this purpose. Do not introduce features or infrastructure based only on hypothetical future needs.
 
@@ -93,6 +95,8 @@ Do not begin implementation until the proposal has been explicitly approved.
 - Do not suppress type errors or static-analysis warnings without a concrete reason.
 
 ## Verification
+
+Use `bun run test` for the standard checks: frontend type checking and build, backend tests, and UI tests. Chat tests use `test/fake-codex.ts`; they do not require a live Codex account.
 
 - Use the smallest reasonable verification relevant to the changes made.
 - Do not perform unrelated, destructive, expensive, or externally stateful operations merely for additional verification.

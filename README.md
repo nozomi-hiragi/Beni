@@ -28,4 +28,3 @@ bun run test
 ```
 
 - [仕様書](docs/README.md)
-- [旧版のファイル](legacy/)
