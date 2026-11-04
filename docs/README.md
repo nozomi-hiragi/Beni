@@ -4,6 +4,7 @@
 
 - [ディレクトリ構成](directory-structure.md)
 - [通信仕様・API](communication/README.md)
+- [ターミナルの実装計画](features/terminal-implementation.md)
 
 ## 次期版の仕様
 
@@ -16,3 +17,4 @@
 - 機能
   - [LLM チャット連携](features/llm-chat.md)
   - [タスク検索](features/task-search.md)
+  - [プロジェクト内ターミナル](features/terminal.md)

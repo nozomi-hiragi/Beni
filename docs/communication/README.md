@@ -36,6 +36,8 @@ HTML・JavaScript・CSS も HTTP で配信します。バックエンドと Code
 
 ## ターミナルを追加するとき
 
+動作は [プロジェクト内ターミナル](../features/terminal.md)、未決定事項と契約案は [実装計画](../features/terminal-implementation.md) を参照してください。
+
 ターミナルの入力・出力・リサイズ・終了通知は共通 WebSocket を使います。作成・終了などの管理操作の具体的な API は、ターミナル実装時に定めます。
 
 - プロジェクト内のターミナルタブとシェルを一対一で対応させます。
