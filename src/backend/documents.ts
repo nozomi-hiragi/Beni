@@ -1,5 +1,6 @@
 import { mkdirSync, lstatSync, realpathSync, readFileSync, writeFileSync, readdirSync, mkdtempSync, renameSync, rmSync, watch } from 'node:fs';
 import { join } from 'node:path';
+import { validTaskId } from '../shared/ids';
 
 // Reject symlinks in managed paths: document writes must remain inside this project.
 function directory(path: string) {
@@ -17,8 +18,8 @@ function regularFile(path: string) {
  if(!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) throw Error('Invalid document file');
  return stat;
 }
-export function taskDocuments(folder: string, taskId: number, seeds: {requirements: string; plan?: string}, newTask=false) {
- if(!Number.isSafeInteger(taskId)||taskId<=0) throw Error('Invalid task');
+export function taskDocuments(folder: string, taskId: string, seeds: {requirements: string; plan?: string}, newTask=false) {
+ if(!validTaskId(taskId)) throw Error('Invalid task');
  const root=projectDocuments(folder), path=join(root,String(taskId));
  if(newTask) { // A directory left by an interrupted creation must not be silently reused.
   try { lstatSync(path); throw Error('Task document directory already exists'); } catch(error:any) { if(error.code!=='ENOENT') throw error; }

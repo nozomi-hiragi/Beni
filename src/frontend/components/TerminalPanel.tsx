@@ -12,7 +12,7 @@ const disconnected = (): Control => ({owner:false,connected:false,token:null});
 const message = (error: unknown) => error instanceof Error ? error.message : 'ターミナルを操作できませんでした';
 const statusLabel = (status: TerminalSession['status']) => status === 'running' ? '実行中' : status === 'exited' ? '終了済み' : 'エラー';
 
-export default function TerminalPanel(props: { projectId: number }) {
+export default function TerminalPanel(props: { projectId: string }) {
   const [sessions, setSessions] = createSignal<TerminalSession[]>([]);
   const [selected, setSelected] = createSignal<string>();
   const [error, setError] = createSignal('');
@@ -98,7 +98,7 @@ export default function TerminalPanel(props: { projectId: number }) {
   </section>;
 }
 
-function TerminalView(props: { projectId: number; session: TerminalSession; active: boolean; onControl(control: Control): void }) {
+function TerminalView(props: { projectId: string; session: TerminalSession; active: boolean; onControl(control: Control): void }) {
   const [connected, setConnected] = createSignal(false);
   const [synced, setSynced] = createSignal(false);
   const [owner, setOwner] = createSignal(false);

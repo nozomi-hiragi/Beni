@@ -3,6 +3,7 @@ import { SerializeAddon } from '@xterm/addon-serialize';
 import type { Subprocess } from 'bun';
 import type { Scope, TerminalAction, TerminalSession, TopicEvent } from '../shared/communication';
 import type { Subscription } from './events';
+import { validProjectId } from '../shared/ids';
 
 const MAX_SESSIONS = 64, MAX_PROJECT_SESSIONS = 8, MAX_QUEUE = 2 * 1024 * 1024;
 const CHUNK = 4096;
@@ -13,14 +14,15 @@ export class TerminalError extends Error {constructor(public status:number,messa
 /** Shells outlive subscriptions. No terminal data is written to disk or logs. */
 export class TerminalService {
  private sessions = new Map<string,Session>();
- private changes = new Map<number,Set<(event:TopicEvent)=>void>>();
+ private changes = new Map<string,Set<(event:TopicEvent)=>void>>();
  private requests = new Map<string,string>();
  private shuttingDown = false;
  constructor(private shell=process.env.SHELL || '/bin/sh') {}
- list(projectId:number) {return [...this.sessions.values()].filter(s=>s.info.projectId===projectId).map(s=>({...s.info}))}
- has(projectId:number,id:string) {return this.sessions.get(id)?.info.projectId===projectId}
- private changed(projectId:number) {const event:TopicEvent={name:'terminal.changed',data:{sessions:this.list(projectId)}};for(const emit of this.changes.get(projectId)??[])emit(event)}
- create(projectId:number,folder:string,requestId:string):TerminalSession {
+ list(projectId:string) {return [...this.sessions.values()].filter(s=>s.info.projectId===projectId).map(s=>({...s.info}))}
+ has(projectId:string,id:string) {return this.sessions.get(id)?.info.projectId===projectId}
+ private changed(projectId:string) {const event:TopicEvent={name:'terminal.changed',data:{sessions:this.list(projectId)}};for(const emit of this.changes.get(projectId)??[])emit(event)}
+ create(projectId:string,folder:string,requestId:string):TerminalSession {
+  if(!validProjectId(projectId))throw new TerminalError(400,'不正なプロジェクトIDです');
   const key=JSON.stringify([projectId,requestId]);const existing=this.requests.get(key);
   if(existing){const s=this.sessions.get(existing);if(!s)throw new TerminalError(409,'この作成依頼のターミナルは終了済みです');return {...s.info}}
   if(this.shuttingDown)throw new TerminalError(503,'サーバーを終了しています');
@@ -86,7 +88,7 @@ export class TerminalService {
    }
   }};
  }
- async close(projectId:number,id:string,token:string) {
+ async close(projectId:string,id:string,token:string) {
   const session=this.sessions.get(id);if(!session||session.info.projectId!==projectId)throw new TerminalError(404,'ターミナルが見つかりません');
   if(!session.owner||session.token!==token)throw new TerminalError(403,'操作権がありません');
   // Revoke synchronously before awaiting signals; takeover cannot race closing.

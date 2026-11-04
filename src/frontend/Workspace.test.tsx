@@ -27,8 +27,8 @@ afterEach(() => {
 describe('Workspace message submission across navigation', () => {
   it('retains the newer draft and the sending lock across remount, then displays the saved message once', async () => {
     FakeWebSocket.instances=[];vi.stubGlobal('WebSocket',FakeWebSocket);
-    const taskId = 73;
-    const task = { id: taskId, projectId: 1, name: 'サンプル', phase: 'requirements', status: 'idle' };
+    const taskId = '019a0000-0000-7100-8000-000000000049';
+    const task = { id: taskId, projectId:'019a0000-0000-7000-8000-000000000001', name: 'サンプル', phase: 'requirements', status: 'idle' };
     const documents = [{ name: '指示書.md', content: '# サンプル\n', version: 1 }];
     const messages: { id: number; role: string; content: string }[] = [];
     const post = deferred<Response>();
@@ -42,11 +42,11 @@ describe('Workspace message submission across navigation', () => {
         return Promise.resolve(json({ task, messages: [...messages], documents }));
       }
       if (path === '/api/codex/status') return Promise.resolve(json({installed:true,auth:'chatgpt',models:[{id:'test',name:'Test'}],usage:'unknown'}));
-      if (path.startsWith('/api/chat?')) return Promise.resolve(json({id:'c',projectId:1,taskId,threadId:null,messages:[...messages]}));
+      if (path.startsWith('/api/chat?')) return Promise.resolve(json({id:'c',projectId:'019a0000-0000-7000-8000-000000000001',taskId,threadId:null,messages:[...messages]}));
       const pack = packResponse(path, messages); if (pack) return Promise.resolve(pack);
       if (path === '/api/chat/send' && init?.method === 'POST') {
         postCount++;
-        expect(JSON.parse(String(init.body))).toEqual({ projectId:1, taskId, content: '最初の希望', model:'test' });
+        expect(JSON.parse(String(init.body))).toEqual({ projectId:'019a0000-0000-7000-8000-000000000001', taskId, content: '最初の希望', model:'test' });
         return post.promise;
       }
       throw new Error(`Unexpected request: ${path}`);
@@ -92,17 +92,17 @@ describe('Workspace message submission across navigation', () => {
 
 it('refreshes real Markdown content without duplicating tabs and selects requirements from its phase',async()=>{
  FakeWebSocket.instances=[];vi.stubGlobal('WebSocket',FakeWebSocket);
- const task={id:901,projectId:1,name:'Documents',phase:'requirements',status:'idle'};
+ const task={id:'019a0000-0000-7100-8000-000000000385',projectId:'019a0000-0000-7000-8000-000000000001',name:'Documents',phase:'requirements',status:'idle'};
  let content='# Initial',version=1;
  vi.stubGlobal('fetch',vi.fn((path:string)=>{
   if(path==='/api/state')return Promise.resolve(json({projects:[],tasks:[task]}));
-  if(path==='/api/tasks/901')return Promise.resolve(json({task,messages:[],documents:[{path:'requirements.md',name:'requirements.md',content,version},{path:'implementation-plan.md',name:'implementation-plan.md',content:'# Plan',version:1}]}));
+  if(path==='/api/tasks/019a0000-0000-7100-8000-000000000385')return Promise.resolve(json({task,messages:[],documents:[{path:'requirements.md',name:'requirements.md',content,version},{path:'implementation-plan.md',name:'implementation-plan.md',content:'# Plan',version:1}]}));
   if(path==='/api/codex/status')return Promise.resolve(json({installed:false,auth:'none',models:[],usage:'unknown'}));
   if(path.startsWith('/api/chat/packs'))return Promise.resolve(json({packs:[]}));
   if(path.startsWith('/api/chat?'))return Promise.resolve(json({id:'document-test',messages:[]}));
   throw Error(path);
  }));
- render(()=><Workspace projectId={1} taskId={901} onHome={()=>{}}/>);
+ render(()=><Workspace projectId={'019a0000-0000-7000-8000-000000000001'} taskId={'019a0000-0000-7100-8000-000000000385'} onHome={()=>{}}/>);
  const heading=await screen.findByRole('heading',{name:'Initial',level:1});
  const preview=heading.closest('article')!;
  const tab=screen.getByRole('tab',{name:'requirements.md'});

@@ -12,16 +12,20 @@ Beni/
 │   │   ├── server.test.ts            API・配信・文書管理・変更通知・保存先のテスト
 │   │   ├── chat.ts                   Codex 通信、会話の保存・再開・受信・中断
 │   │   ├── chat.test.ts              会話の保存・再開・中断・分離、接続エラーのテスト
+│   │   ├── data.ts                   メタデータ検証・保存と文書だけ残ったタスクの復元
+│   │   ├── migration.ts              旧データの移行・照合・バックアップと.beniの複製
+│   │   ├── data-cli.ts               データ移行・複製コマンドの入口
 │   │   ├── documents.ts              タスク用 Markdown の作成・読み取り・変更監視
 │   │   ├── terminal.ts               PTY・端末画面・操作権・終了処理
 │   │   ├── terminal.test.ts          シェルの存続・排他・画面復元・HTTP/WSのテスト
 │   │   ├── events.ts                 共通 WS の接続・購読・送信上限と解放処理
 │   │   ├── store/                    データベースへのアクセス
-│   │   │   ├── index.ts              SQLite にプロジェクト・タスク・メッセージ・文書の版を保存
-│   │   │   └── index.test.ts         永続化・会話の分離・文書の版管理のテスト
+│   │   │   ├── index.ts              SQLiteの登録情報とプロジェクト内のタスク管理
+│   │   │   └── index.test.ts         メタデータ・復元・移行・複製のテスト
 │   │   └── test/                     バックエンドのテスト補助
 │   │       └── fake-codex.ts          実サービスを使わず Codex 通信を模擬する実行ファイル
 │   ├── shared/                       FE・BE 共通の通信定義
+│   │   ├── ids.ts                    プロジェクト・タスクIDの生成と種別検証
 │   │   └── communication.ts          パック・WS メッセージの型、受信検証、ハッシュ
 │   └── frontend/                     ブラウザーで動く SolidJS の画面
 │       ├── index.html                アプリの表示先と JavaScript・CSS の読み込み
@@ -50,7 +54,6 @@ Beni/
 │           ├── ChatPanel.tsx         Codex との会話、モデル選択、送信・中断、過去の履歴表示
 │           ├── CodexSettings.tsx     Codex のインストール・認証・モデルなどの状態確認
 │           ├── ChatComposer.tsx      テキスト入力と送信フォーム
-│           ├── ChatContent.tsx       メッセージ一覧の表示
 │           ├── PhaseIndicator.tsx    フェーズ表示。現状は「タスク内容」の操作に対応
 │           ├── TabBar.tsx            タブの選択と閉じる操作
 │           ├── TreeView.tsx          項目の階層表示と選択
@@ -94,8 +97,8 @@ Beni/
 │   └── mockups/                      画面・部品の見た目を検討する HTML と CSS
 │       └── components/               部品ごとのモック
 ├── data/                             [データ] Beni 自身の既定保存先。実行時に作成
-│   ├── beni.sqlite                   SQLite データベース（関連ファイルも同じ場所）
-│   └── chat/                         会話 JSON
+│   ├── beni.sqlite                   プロジェクトの登録情報（関連ファイルも同じ場所）
+│   └── migrations/                   旧データ移行のバックアップとID対応表
 ├── node_modules/                     [生成] インストールした依存パッケージ
 ├── README.md                         概要、起動方法、保存先、機能、テスト方法
 ├── AGENTS.md                         このリポジトリで作業するエージェント向けの指示

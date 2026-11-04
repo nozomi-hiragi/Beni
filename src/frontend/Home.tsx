@@ -91,12 +91,12 @@ export default function Home(props: HomeProps) {
       setProjects(previous => {
         const merged = new Map(loaded.projects.map(item => [item.id, item]));
         for (const item of previous) merged.set(item.id, item);
-        return [...merged.values()].sort((a, b) => b.id - a.id);
+        return [...merged.values()].sort((a, b) => b.id.localeCompare(a.id));
       });
       setTasks(previous => {
         const merged = new Map(loaded.tasks.map(item => [item.id, item]));
         for (const item of previous) merged.set(item.id, item);
-        return [...merged.values()].sort((a, b) => confirmationPriority(a) - confirmationPriority(b) || b.id - a.id);
+        return [...merged.values()].sort((a, b) => confirmationPriority(a) - confirmationPriority(b) || b.id.localeCompare(a.id));
       });
     } catch (cause) {
       if (alive) setError(cause instanceof Error ? cause.message : '一覧を取得できませんでした');

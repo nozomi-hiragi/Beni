@@ -1,3 +1,4 @@
+import { validProjectId, validTaskId } from '../shared/ids';
 import { createMemo, createSignal, onCleanup, onMount, Show } from 'solid-js';
 import Home from './Home';
 import Menu from './components/Menu';
@@ -6,24 +7,19 @@ import Workspace from './Workspace';
 import { api } from './api';
 import type { AppState, Task } from './types';
 
-type Route = { kind: 'home' } | { kind: 'settings' } | { kind: 'project'; id: number; task?: number; invalidTask: boolean } | { kind: 'not-found' };
-const positiveId = (value: string | null): number | undefined => {
-  if (!value || !/^[1-9]\d*$/.test(value)) return undefined;
-  const number = Number(value);
-  return Number.isSafeInteger(number) ? number : undefined;
-};
+type Route = { kind: 'home' } | { kind: 'settings' } | { kind: 'project'; id: string; task?: string; invalidTask: boolean } | { kind: 'not-found' };
 export function parseRoute(url: URL): Route {
   if (url.pathname === '/') return { kind: 'home' };
   if (url.pathname === '/settings') return { kind: 'settings' };
-  const match = /^\/project\/([1-9]\d*)$/.exec(url.pathname);
-  const id = positiveId(match?.[1] ?? null);
+  const match = /^\/project\/([^/]+)$/.exec(url.pathname);
+  const id = validProjectId(match?.[1]) ? match![1] : undefined;
   if (id === undefined) return { kind: 'not-found' };
   const tasks = url.searchParams.getAll('task');
-  const task = positiveId(tasks[0] ?? null);
+  const task = validTaskId(tasks[0]) ? tasks[0] : undefined;
   return { kind: 'project', id, task, invalidTask: tasks.length > 1 || (tasks.length === 1 && task === undefined) };
 }
 
-function ProjectScreen(props: { id: number; task?: number; invalidTask: boolean; onTaskChange: (id?: number) => void; onHome: () => void; onTitle: (title: string) => void }) {
+function ProjectScreen(props: { id: string; task?: string; invalidTask: boolean; onTaskChange: (id?: string) => void; onHome: () => void; onTitle: (title: string) => void }) {
   const [state, setState] = createSignal<AppState>();
   const [error, setError] = createSignal('');
   let active = true;
@@ -41,7 +37,7 @@ function ProjectScreen(props: { id: number; task?: number; invalidTask: boolean;
   onCleanup(() => { active = false; });
   const project = createMemo(() => state()?.projects.find(item => item.id === props.id));
   const validTask = createMemo(() => props.task === undefined || !!state()?.tasks.some(task => task.id === props.task && task.projectId === props.id));
-  function changeTask(id?: number, task?: Task) {
+  function changeTask(id?: string, task?: Task) {
     // The workspace can load a newer task list than this screen's first snapshot.
     // Carry the verified same-project task forward before updating the URL.
     if (id !== undefined && task?.id === id && task.projectId === props.id) {
@@ -64,7 +60,7 @@ function ProjectScreen(props: { id: number; task?: number; invalidTask: boolean;
 export default function App() {
   const [route, setRoute] = createSignal<Route>(parseRoute(new URL(window.location.href)));
   const [query, setQuery] = createSignal('');
-  const [projectTitle, setProjectTitle] = createSignal<{ id: number; name: string }>();
+  const [projectTitle, setProjectTitle] = createSignal<{ id: string; name: string }>();
   const projectId = createMemo(() => { const current = route(); return current.kind === 'project' ? current.id : undefined; });
   const projectRoute = () => { const current = route(); return current.kind === 'project' ? current : undefined; };
   const navigate = (path: string) => {
