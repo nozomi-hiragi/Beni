@@ -1,0 +1,124 @@
+# HTTP API
+
+HTTP による取得・操作と、チャットのパック同期の契約を定義します。
+
+## 共通規則
+
+- 接続先は `http://127.0.0.1:3210`。ポートは `BENI_PORT` で変更可能。Tailscale Serve の HTTPS 公開 URL は `BENI_PUBLIC_ORIGIN` に指定する（パスや末尾 `/` なし）。
+- URL のホスト名が `127.0.0.1` でも、URL の host（ポートを含む）が指定した公開 origin と完全一致するものでもなければ 403。WebSocket も同じ制限。通常の GET に共通の Origin 検査はない。
+- POST は `Origin` がローカル要求 URL の origin、または公開 host に対しては設定した HTTPS origin と一致し、`Content-Type` が厳密に `application/json` であること。転送ヘッダーは判定に使わない。違反は 403。
+- POST の本文は JSON オブジェクト。配列・null・不正 JSON は 400。本文上限は 65,536 バイトで、超過は 413。
+- JSON 応答には `Cache-Control: no-store` と `X-Content-Type-Options: nosniff` を付ける。
+- API のエラー本文は原則 `{ "error": "表示用メッセージ" }`。ホスト拒否の本文は JSON ではなく `Forbidden`。機械判定用の共通エラーコードは設けない。
+- 下表のエラーのほか、POST の解析・保存先処理などの例外は共通処理で 400 になる。GET のすべての例外が JSON エラーに統一されているわけではない。
+
+## API 一覧
+
+`projectId` は正の安全な整数。チャットの `taskId` は同じプロジェクトのタスク ID または null。GET の会話指定では `taskId` を省略すると一般会話、POST では null を明示する。
+
+| メソッド・パス | 入力 | 成功 | 個別の主なエラー |
+| --- | --- | --- | --- |
+| `GET /api/state` | なし | 200 `{projects: Project[], tasks: Task[]}` | — |
+| `POST /api/projects` | `{name: string, folder: string}`。名前は空白のみ不可、folder は絶対パス | 201 `Project` | 400 入力・保存先不正 |
+| `POST /api/tasks` | `{projectId: number, name: string}`。空白のみの名前は保存時に拒否 | 201 `Task` | 400 入力不正、404 プロジェクトなし |
+| `GET /api/tasks/:id` | パスのタスク ID | 200 `{task: Task, messages: StoredMessage[], documents: Document[]}` | 404 タスクなし、500 文書取得失敗 |
+| `POST /api/tasks/:id/messages` | `{content: string}`。空白のみは保存時に拒否 | 201 `StoredMessage` | 400 入力不正、404 タスクなし |
+| `POST /api/folders/list` | `{path?: string}`。指定時は絶対パス | 200 `FolderList` | 400 パス不正・開けない |
+| `GET /api/codex/status` | なし | 200 `CodexStatus` | 接続失敗時は一部の情報を unknown/null として返す |
+| `GET /api/chat` | query: `projectId`, 任意の `taskId` | 200 `Conversation` | 404 会話対象なし、500 履歴取得失敗 |
+| `POST /api/chat/send` | `{projectId, taskId, content, model}`。content は空白のみ不可、model は256文字以内の文字列か null | 202 `Conversation` | 409 送信中、400 Codex 利用不可・設定不適合、404 対象なし、500 保存・接続失敗 |
+| `POST /api/chat/interrupt` | `{projectId, taskId}` | 200 `{ok: true}` | 409 停止対象なし、404 対象なし、500 保存・接続失敗 |
+
+`chat/send` の 202 は受け付けであり、返答終了ではない。`tasks/:id/messages` は DB へ保存するだけで Codex に送信しない。パック同期 API とは別の入口である。
+
+プロジェクト・タスク作成は対応する文書ディレクトリも初期化する。タスク詳細取得でも必要な文書の初期化処理が走る。`GET /api/chat` は実行中でない pending/streaming メッセージを unknown に更新する場合がある。
+
+## データ形式
+
+以下はワイヤー上のデータを示す説明用の型。フロントエンドの型が一部の項目を省略していても、実際の応答には含まれる。
+
+```ts
+type Project = { id: number; name: string; folder: string };
+type Task = { id: number; projectId: number; name: string; phase: string; status: string };
+type StoredMessage = {
+  id: number; project_id: number; task_id: number | null;
+  role: string; content: string; created_at: string;
+};
+type Document = { name: string; path: string; content: string; version: number };
+type FolderList = {
+  path: string; parent: string | null;
+  directories: { name: string; path: string }[]; truncated: boolean;
+};
+type CodexStatus = {
+  installed: boolean; path: string | null; version: string | null; checkedAt: string;
+  auth: 'chatgpt' | 'apiKey' | 'other' | 'none' | 'unknown';
+  models: { id: string; name: string }[] | null; usage: 'unknown';
+};
+type ChatMessage = {
+  id: string; sendId: string; role: 'user' | 'assistant'; content: string;
+  provider: 'codex'; model: string | null; createdAt: string; updatedAt: string;
+  status: 'pending' | 'streaming' | 'completed' | 'failed' | 'interrupted' | 'unknown';
+  threadId: string | null; sessionId: string | null;
+};
+type Conversation = {
+  version: 1; id: string; projectId: number; taskId: number | null;
+  threadId: string | null; sessionId: string | null; messages: ChatMessage[];
+};
+```
+
+- 一覧のプロジェクト・タスクは ID 降順、DB メッセージは ID 昇順。
+- Document の path はファイル名。version はファイルの更新時刻 `mtimeMs` であり、DB 文書の版番号とは別。
+- フォルダー一覧は直下の実ディレクトリのみ、最大 500 件。シンボリックリンクは一覧対象外。省略時はサーバー起動時の初期フォルダー（通常はホーム）。
+
+## パック同期 API
+
+共通の会話指定は `{projectId: number, taskId: number | null}`。パック ID は不透明な文字列であり、文字列の大小で並べない。BE が会話内の順序を管理する。
+
+| メソッド・パス | 入力 | 成功応答 |
+| --- | --- | --- |
+| `GET /api/chat/packs` | query: projectId、任意の taskId、任意の afterPackId | 200 `{packs: [{packId, state}]}`。指定 ID より後を順序どおり返す。省略時は先頭から |
+| `GET /api/chat/packs/:packId` | query: projectId、任意の taskId | 200 `{pack: Pack}`。終了済みパック全文 |
+| `POST /api/chat/packs/:packId/ack` | 会話指定と `{hash: string}` | 200 `{matched: true}` または `{matched: false, pack: Pack}` |
+
+`state` は `streaming` または `closed`。closed は生成処理がそのパックを閉じた状態で、FE の受け取り確定や生成の正常終了とは別。
+
+- ack は FE が未確定内容を受け取り終えたときの照合。BE の生成や保存を進めるための承認ではない。同じ ack を再度送っても生成・保存内容を変更しない。
+- ハッシュ不一致は通信上の同期結果なので 200 で正しい全文を返す。
+- 未知のパック・会話に属さないパック・未知の afterPackId は 404 とし、勝手に空の一覧として扱わない。
+- 生成中パックへの全文取得・照合は 409。入力不正は 400、保存済み内容の読み込み失敗は 500。
+- 一覧は生成中パックも含む。FE は終了済みだけを全文取得し、生成中は WS の受信を続ける。
+
+## パックの形式とハッシュ
+
+```ts
+type Pack = {
+  packId: string; sequence: number; messageId: string; sendId: string;
+  role: 'user' | 'assistant'; kind: 'text' | 'tool'; content: string;
+  tool: {name: string; input: string; output: string} | null;
+  model: string | null; createdAt: string;
+  status: 'pending' | 'streaming' | 'completed' | 'failed' | 'interrupted' | 'unknown';
+  state: 'streaming' | 'closed';
+};
+type PackHeader = Omit<Pack, 'content' | 'tool'>;
+```
+
+sequence は会話内の生成順です。ユーザー発言も一つの終了済みパックとして記録します。一回の返信には複数の本文・ツールのパックが属し、sendId で送信と対応します。Conversation の messages は会話単位の履歴と実行状態を表します。パックは専用 API で取得し、バブル単位の表示・同期を担います。
+
+本文パックの tool は null です。ツールパックの input/output は文字列で、構造化された値は JSON として表します。ツールの実行中の出力を本文差分へ混ぜず、終了したツールパックを HTTP で取得します。
+
+ハッシュは次の配列を `JSON.stringify` し、UTF-8 バイト列へ変換した SHA-256 の小文字16進数64桁です。改行や空白を正規化しません。tool は `[name, input, output]` の配列へ変換するため、オブジェクトのキー順には依存しません。
+
+```ts
+[1, pack.packId, pack.sequence, pack.messageId, pack.sendId,
+ pack.role, pack.kind, pack.content,
+ pack.tool ? [pack.tool.name, pack.tool.input, pack.tool.output] : null,
+ pack.model, pack.createdAt]
+```
+
+status/state は生成状態を表し、本文のハッシュには含めません。FE は終了通知の header から終了状態を受け取り、復元したパックを照合します。本文が一致すれば全文の再取得は不要です。
+
+パック一覧は指定 ID より後を全件返します。ページングは行いません。HTTP の応答全体へ POST 本文の64 KiB制限は適用しません。
+
+## 静的配信
+
+`/`、`/settings`、`/project/:id`（正の整数）、`/ui/index.html` は同じ HTML を返す。`/ui/build/app.js` と `/ui/generated.css` は dist の生成物を返す。HTML と生成物には CSP、nosniff、no-store を設定する。画像は同一 origin と data URL を許可し、daisyUI の吹き出しが使う埋め込み SVG を表示する。スクリプト・スタイル・通信先は同一 origin に限定する。この配信は HTTP のまま。

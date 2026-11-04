@@ -15,6 +15,38 @@ bun run start
 
 ブラウザーで http://127.0.0.1:3210/ を開きます。ポートは `BENI_PORT` で変更できます。
 
+### Tailscale 経由で起動する
+
+サーバー側と閲覧する端末を Tailscale に接続します。チャットのハッシュ確認にブラウザーの暗号 API を使うため、Tailscale Serve の HTTPS URL で開きます。
+
+まずサーバー側で、HTTPS の443番から Beni の3210番への転送を有効にします。
+
+```sh
+tailscale serve --bg --https=443 http://127.0.0.1:3210
+```
+
+表示された HTTPS URL を `BENI_PUBLIC_ORIGIN` に指定し、Beni のディレクトリで起動します。以下のホスト名は架空のサンプルなので、実際に表示されたものへ置き換えてください。末尾の `/` やパスは付けません。すでに Beni を起動している場合は、停止してからこのコマンドで起動し直します。
+
+```sh
+BENI_PUBLIC_ORIGIN=https://example-node.example-tailnet.ts.net bun run start
+```
+
+閲覧する端末で `https://example-node.example-tailnet.ts.net` を開きます。HTTPS の標準ポート443を使うため、URLにポート番号は不要です。IPアドレスへのHTTP接続ではなく、このHTTPS URLを使ってください。
+
+`BENI_PUBLIC_ORIGIN` は起動したプロセスだけに適用される環境変数です。設定ファイルには保存されないため、次回も同じ指定で起動します。Beni 自体は `127.0.0.1:3210` で待ち受け、指定した公開ホストと Origin を許可します。`BENI_PORT` を変える場合は、Serve の転送先ポートも合わせます。
+
+Serve の設定は `--bg` によりバックグラウンドで維持されます。確認と解除は次のコマンドで行います。解除しても Beni 自体は停止しません。
+
+```sh
+# 転送設定を確認
+tailscale serve status
+
+# HTTPS の転送を解除
+tailscale serve --https=443 off
+```
+
+この手順は Tailscale 内向けの公開です。Beni 自体には認証機能がないため、接続できる端末は Tailscale のアクセス制御で管理します。
+
 ## データの保存先
 
 Beni 自身のデータは、起動した作業ディレクトリにかかわらず、Beni のルートにある `data/` へ保存します。このフォルダーは Git 管理の対象外です。
@@ -38,6 +70,8 @@ DB と会話は同じ保存先フォルダーにまとめます。個別の保�
 LLM、認証、利用枠、計画・実行、ターミナル、Gemma を使った検索は未接続です。検索は現在、タスク名と ID の簡易検索です。
 
 ## テスト
+
+Bun に加えて Node.js 22.22.2 以上の22系、24.15.0 以上の24系、または26以上が必要です。UI テストは Node.js 上で実行し、Markdown のサニタイズを検証するテストでは jsdom を使います。
 
 ```sh
 bun run test

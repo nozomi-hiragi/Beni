@@ -4,5 +4,5 @@
     "lib": ["ESNext", "DOM", "DOM.Iterable"], "jsx": "preserve", "jsxImportSource": "solid-js",
     "strict": true, "noEmit": true, "skipLibCheck": true, "types": ["bun"]
   },
-  "include": ["src/backend/**/*.ts", "src/frontend/**/*.ts", "src/frontend/**/*.tsx"]
+  "include": ["src/shared/**/*.ts", "src/backend/**/*.ts", "src/frontend/**/*.ts", "src/frontend/**/*.tsx"]
 }
