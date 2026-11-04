@@ -1,6 +1,7 @@
 import { createMemo, createSignal, onCleanup, onMount, Show } from 'solid-js';
 import Home from './Home';
 import Menu from './components/Menu';
+import CodexSettings from './components/CodexSettings';
 import Workspace from './Workspace';
 import { api } from './api';
 import type { AppState, Task } from './types';
@@ -82,7 +83,7 @@ export default function App() {
     <main class="mx-auto w-full max-w-screen-2xl px-4 py-6 sm:px-6">
       <Show when={route().kind === 'home'}><Home query={query()} onOpenProject={project => { setProjectTitle({id:project.id,name:project.name}); navigate(`/project/${project.id}`); }} onOpenTask={(task, project) => { setProjectTitle({id:project.id,name:project.name}); navigate(`/project/${project.id}?task=${task.id}`); }} /></Show>
       <Show when={projectId()} keyed>{id => <ProjectScreen id={id} task={projectRoute()?.task} invalidTask={projectRoute()?.invalidTask ?? false} onHome={home} onTitle={name => setProjectTitle({id,name})} onTaskChange={task => navigate(`/project/${id}${task === undefined ? '' : `?task=${task}`}`)} />}</Show>
-      <Show when={route().kind === 'settings'}><section class="mx-auto max-w-6xl py-[clamp(1rem,3vw,2.5rem)]"><h1 class="text-[clamp(1.65rem,3vw,2.25rem)] font-bold tracking-tight">設定</h1><div class="mt-6 rounded-2xl border border-base-300 bg-base-100 p-6 shadow-sm"><h2 class="mb-2 text-[.95rem] font-bold">LLM 接続</h2><p class="text-sm text-base-content/60">未接続</p></div></section></Show>
+      <Show when={route().kind === 'settings'}><CodexSettings /></Show>
       <Show when={route().kind === 'not-found'}><p role="alert">画面が見つかりません</p></Show>
     </main>
   </>;

@@ -50,7 +50,7 @@ it('validates direct projects and refuses missing or another project task', asyn
   pop('/project/2');
   await screen.findByRole('button',{name:'タスクツリーを開閉'});
   expect(screen.getByText('空プロジェクト')).toBeTruthy();
-  expect(screen.queryByRole('textbox',{name:'希望や回答を入力'})).toBeNull();
+  expect(screen.getByRole('textbox',{name:'希望や回答を入力'})).toBeTruthy();
   pop('/project/1?task=bad');
   expect((await screen.findByRole('alert')).textContent).toContain('このプロジェクトのタスクが見つかりません');
 });
@@ -114,7 +114,7 @@ it('opens a selected project even if it has no tasks', async () => {
   expect(location.pathname).toBe('/project/2');
   expect(location.search).toBe('');
   expect(await screen.findByRole('button',{name:'タスクツリーを開閉'})).toBeTruthy();
-  expect(screen.getByText('ツリーからタスクを選択してください。')).toBeTruthy();
+  expect(screen.getByRole('tab', {name:'ジェネラル'})).toBeTruthy();
 });
 
 it('keeps a newly loaded same-project task when the workspace list is newer than the project snapshot', async () => {
