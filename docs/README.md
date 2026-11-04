@@ -3,7 +3,7 @@
 ## 開発
 
 - [ディレクトリ構成](directory-structure.md)
-- [通信仕様・API・移行計画](communication/README.md)
+- [通信仕様・API](communication/README.md)
 
 ## 次期版の仕様
 

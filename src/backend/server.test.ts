@@ -1,6 +1,8 @@
 import { test, expect } from 'bun:test';
+// Bun supports headers in its client constructor; DOM types expose only protocols.
+const Socket = globalThis.WebSocket as unknown as {new(url:string,options:Bun.WebSocketOptions):WebSocket};
 import { Store } from './store/index';
-import { createHandler, dataPaths } from './server';
+import { createHandler, createServerOptions, dataPaths } from './server';
 import { mkdtemp, mkdir, realpath, rm, symlink, writeFile, readFile, rename, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -27,13 +29,18 @@ test('serves the compiled Solid app and locally generated stylesheet', async () 
  try {
   const handle = createHandler(store);
   const page = await handle(new Request('http://127.0.0.1:3210/'));
+  expect(page.headers.get('Content-Security-Policy')).toBe("default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'");
   expect(await page.text()).toContain('/ui/build/app.js');
   const js = await handle(new Request('http://127.0.0.1:3210/ui/build/app.js'));
   expect(js.status).toBe(200);
   expect((await js.text()).length).toBeGreaterThan(1000);
   const css = await handle(new Request('http://127.0.0.1:3210/ui/generated.css'));
   expect(css.status).toBe(200);
-  expect(await css.text()).toContain('.btn-primary');
+  const stylesheet = await css.text();
+  expect(stylesheet).toContain('.btn-primary');
+  expect(stylesheet).toContain('.chat-bubble');
+  expect(stylesheet).toContain('data:image/svg+xml');
+  expect(stylesheet).toContain('.aura');
  } finally { store.close(); }
 });
 
@@ -162,52 +169,32 @@ test('rolls back failed task creation and preserves existing documents on ID col
 });
 
 
-test('document SSE validates scope, detects atomic replacement, resyncs and closes on abort',async()=>{
- const folder=await mkdtemp(join(tmpdir(),'beni-events-'));const store=new Store(':memory:');const handle=createHandler(store);
- const project=store.createProject('Example',folder) as {id:number};const other=store.createProject('Other',folder) as {id:number};const task=store.createTask(project.id,'Task') as {id:number};
- const url=`http://127.0.0.1:3210/api/tasks/${task.id}/documents/events?projectId=${project.id}`;
- const abort=new AbortController();let reader:ReadableStreamDefaultReader<Uint8Array>|undefined;
+function socketMessages(ws:WebSocket){const messages:any[]=[];ws.addEventListener('message',event=>messages.push(JSON.parse(String(event.data))));return {messages,async next(){for(let i=0;i<150;i++){if(messages.length)return messages.shift();await Bun.sleep(10)}throw Error('Missing WebSocket message')}}}
+async function opened(ws:WebSocket){if(ws.readyState===1)return;await new Promise<void>((resolve,reject)=>{ws.addEventListener('open',()=>resolve(),{once:true});ws.addEventListener('error',()=>reject(Error('WebSocket failed')),{once:true})})}
+test('shared WebSocket validates handshake/scopes, streams document changes and releases subscriptions',async()=>{
+ const folder=await mkdtemp(join(tmpdir(),'beni-ws-'));const store=new Store(':memory:');const project=store.createProject('Example',folder) as {id:number};const other=store.createProject('Other',folder) as {id:number};const task=store.createTask(project.id,'Task') as {id:number};
+ const server=Bun.serve({hostname:'127.0.0.1',port:0,...createServerOptions(store)});const origin=`http://127.0.0.1:${server.port}`;const ws=new Socket(origin.replace('http:','ws:')+'/api/ws',{headers:{origin}});const inbox=socketMessages(ws);
  try{
-  expect((await handle(new Request(url.replace(`projectId=${project.id}`,`projectId=${other.id}`)))).status).toBe(404);
-  expect((await handle(new Request(url,{headers:{origin:'https://example.com'}}))).status).toBe(403);
-  const response=await handle(new Request(url,{signal:abort.signal}));expect(response.headers.get('content-type')).toBe('text/event-stream');reader=response.body!.getReader();
-  const decode=(value:Uint8Array|undefined)=>new TextDecoder().decode(value);
-  expect(decode((await reader.read()).value)).toContain('event: change');
+  expect((await fetch(origin+'/api/ws')).status).toBe(403);
+  await opened(ws);ws.send(JSON.stringify({type:'subscribe',subscriptionId:'before',topic:'chat',scope:{projectId:project.id,taskId:null}}));expect(await inbox.next()).toMatchObject({type:'error',code:'NOT_READY'});
+  ws.send('{');expect(await inbox.next()).toMatchObject({code:'INVALID_MESSAGE'});
+  ws.send(JSON.stringify({type:'hello',version:1}));expect(await inbox.next()).toEqual({type:'ready',version:1});
+  ws.send(JSON.stringify({type:'subscribe',subscriptionId:'bad',topic:'documents',scope:{projectId:other.id,taskId:task.id}}));expect(await inbox.next()).toMatchObject({code:'NOT_FOUND',subscriptionId:'bad'});
+  ws.send(JSON.stringify({type:'subscribe',subscriptionId:'doc',topic:'documents',scope:{projectId:project.id,taskId:task.id}}));expect(await inbox.next()).toEqual({type:'subscribed',subscriptionId:'doc'});
   const path=join(folder,'.beni','tasks',String(task.id));await writeFile(join(path,'replacement.tmp'),'# Atomic replacement');await rename(join(path,'replacement.tmp'),join(path,'requirements.md'));
-  const changed=await Promise.race([reader.read(),Bun.sleep(1500).then(()=>{throw Error('Missing file event')})]);expect(decode(changed.value)).toContain('event: change');
-  abort.abort();expect((await reader.read()).done).toBe(true);
-  await writeFile(join(path,'requirements.md'),'# While disconnected');
-  const reconnect=await handle(new Request(url));const again=reconnect.body!.getReader();expect(decode((await again.read()).value)).toContain('event: change');await again.cancel();
-  const detail=await (await handle(new Request(`http://127.0.0.1:3210/api/tasks/${task.id}`))).json();expect(detail.documents.find((d:any)=>d.name==='requirements.md').content).toBe('# While disconnected');
- }finally{abort.abort();store.close();await rm(folder,{recursive:true,force:true})}
+  expect(await inbox.next()).toMatchObject({type:'event',subscriptionId:'doc',name:'documents.changed',data:{}});
+  ws.send(JSON.stringify({type:'unsubscribe',subscriptionId:'doc'}));expect(await inbox.next()).toEqual({type:'unsubscribed',subscriptionId:'doc'});
+  ws.send(JSON.stringify({type:'subscribe',subscriptionId:'doc',topic:'documents',scope:{projectId:project.id,taskId:task.id}}));expect(await inbox.next()).toMatchObject({code:'SUBSCRIPTION_CONFLICT'});
+  await writeFile(join(path,'requirements.md'),'# Disconnected');await Bun.sleep(120);expect(inbox.messages).toHaveLength(0);
+  const detail=await (await fetch(origin+`/api/tasks/${task.id}`)).json();expect(detail.documents.find((d:any)=>d.name==='requirements.md').content).toBe('# Disconnected');
+  ws.send(JSON.stringify({type:'subscribe',subscriptionId:'unknown',topic:'terminal',scope:{projectId:project.id,taskId:null}}));expect(await inbox.next()).toMatchObject({code:'UNKNOWN_TOPIC'});
+  ws.send(JSON.stringify({type:'subscribe',subscriptionId:'general-documents',topic:'documents',scope:{projectId:project.id,taskId:null}}));expect(await inbox.next()).toMatchObject({code:'NOT_FOUND',subscriptionId:'general-documents'});
+ }finally{ws.close();server.stop(true);store.close();await rm(folder,{recursive:true,force:true})}
 });
-
-test('change streams coalesce continuous updates without starvation and release subscriptions',async()=>{
- const {changeEvents}=await import('./events');let changed=()=>{},closed=0;
- const abort=new AbortController();const response=changeEvents(new Request('http://127.0.0.1/events',{signal:abort.signal}),notify=>{changed=notify;return()=>{closed++}});
- const reader=response.body!.getReader();await reader.read();const timer=setInterval(changed,15);
- try{
-  for(let i=0;i<3;i++){const result=await Promise.race([reader.read(),Bun.sleep(600).then(()=>{throw Error('Continuous events starved')})]);expect(new TextDecoder().decode(result.value)).toContain('event: change')}
- }finally{clearInterval(timer);await reader.cancel()}
- expect(closed).toBe(1);abort.abort();expect(closed).toBe(1);
+test('unsupported WebSocket protocol reports error and closes',async()=>{
+ const store=new Store(':memory:');const server=Bun.serve({hostname:'127.0.0.1',port:0,...createServerOptions(store)});const origin=`http://127.0.0.1:${server.port}`;const ws=new Socket(origin.replace('http:','ws:')+'/api/ws',{headers:{origin}});const inbox=socketMessages(ws);
+ try{await opened(ws);const closed=new Promise<number>(resolve=>ws.addEventListener('close',event=>resolve(event.code),{once:true}));ws.send(JSON.stringify({type:'hello',version:2}));expect(await inbox.next()).toMatchObject({code:'UNSUPPORTED_VERSION'});expect(await closed).toBe(1002)}finally{ws.close();server.stop(true);store.close()}
 });
-
-
-test('SSE keepalive outlives the default HTTP idle timeout',async()=>{
- const {changeEvents}=await import('./events');let released=false;
- const server=Bun.serve({hostname:'127.0.0.1',port:0,fetch:request=>changeEvents(request,()=>()=>{released=true})});
- const abort=new AbortController();
- try{
-  const response=await fetch(`http://127.0.0.1:${server.port}`,{signal:abort.signal});const reader=response.body!.getReader();
-  expect(new TextDecoder().decode((await reader.read()).value)).toContain('event: change');
-  const started=Date.now();let heartbeats=0;
-  while(Date.now()-started<10500){const result=await reader.read();expect(result.done).toBe(false);if(new TextDecoder().decode(result.value).includes('keepalive'))heartbeats++}
-  expect(heartbeats).toBeGreaterThanOrEqual(2);await reader.cancel();
- }finally{abort.abort();server.stop(true)}
- for(let i=0;i<20&&!released;i++)await Bun.sleep(10);
- expect(released).toBe(true);
-},20000);
-
 
 test('uses app-root data storage independently of the working directory',()=>{
  const dataDirectory=fileURLToPath(new URL('../../data',import.meta.url));
@@ -238,4 +225,45 @@ test('server initializes an empty data directory before opening the database',as
   const response=await fetch(`${address}/api/state`);
   expect(response.status).toBe(200);expect(await response.json()).toEqual({projects:[],tasks:[]});
  }finally{clearTimeout(timer);child.kill();await child.exited;reader.releaseLock();await rm(root,{recursive:true,force:true})}
+});
+
+
+test('explicit HTTPS public origin permits proxy HTTP and WebSocket requests with matching host and origin',async()=>{
+ const store=new Store(':memory:');
+ const publicOrigin='https://example-node.example-tailnet.ts.net';
+ const proxyOrigin='http://example-node.example-tailnet.ts.net';
+ const options=createServerOptions(store,undefined,undefined,publicOrigin);
+ let upgraded=0;
+ const server={upgrade(){upgraded++;return true}} as unknown as Parameters<typeof options.fetch>[1];
+ const request=(origin:string,path:string,method='GET',headers:Record<string,string>={})=>new Request(origin+path,{method,headers:{...headers,...(method==='POST'?{'content-type':'application/json'}:{})},...(method==='POST'?{body:'{}'}:{})});
+ try{
+  expect((await options.fetch(request(proxyOrigin,'/api/state'),server))?.status).toBe(200);
+  // This operation needs no external API or filesystem access.
+  expect((await options.fetch(request(proxyOrigin,'/api/tasks','POST',{origin:publicOrigin}),server))?.status).toBe(400);
+  expect(await options.fetch(request(proxyOrigin,'/api/ws','GET',{origin:publicOrigin}),server)).toBeUndefined();
+  expect(upgraded).toBe(1);
+  for(const origin of ['https://other.example.com',proxyOrigin,'https://example-node.example-tailnet.ts.net:8443']){
+   expect((await options.fetch(request(proxyOrigin,'/api/tasks','POST',{origin}),server))?.status).toBe(403);
+   expect((await options.fetch(request(proxyOrigin,'/api/ws','GET',{origin}),server))?.status).toBe(403);
+  }
+  for(const host of ['http://other.example.com','http://example-node.example-tailnet.ts.net.evil.example','http://example-node.example-tailnet.ts.net:8443']){
+   expect((await options.fetch(request(host,'/api/state'),server))?.status).toBe(403);
+   expect((await options.fetch(request(host,'/api/tasks','POST',{origin:publicOrigin}),server))?.status).toBe(403);
+   expect((await options.fetch(request(host,'/api/ws','GET',{origin:publicOrigin}),server))?.status).toBe(403);
+  }
+  expect((await options.fetch(request('http://127.0.0.1:3210','/api/tasks','POST',{origin:publicOrigin}),server))?.status).toBe(403);
+  expect((await options.fetch(request('http://other.example.com','/api/state','GET',{'x-forwarded-host':'example-node.example-tailnet.ts.net','x-forwarded-proto':'https'}),server))?.status).toBe(403);
+  expect((await createHandler(store)(request(proxyOrigin,'/api/state'))).status).toBe(403);
+  expect(upgraded).toBe(1);
+ }finally{store.close()}
+});
+
+test('public origin configuration requires an exact HTTPS origin',()=>{
+ const store=new Store(':memory:');
+ try{
+  for(const origin of ['', 'http://example.com','https://example.com/','https://example.com/path','https://user:password@example.com','https://example.com?query=1']){
+   expect(()=>createHandler(store,undefined,undefined,origin)).toThrow();
+   expect(()=>createServerOptions(store,undefined,undefined,origin)).toThrow();
+  }
+ }finally{store.close()}
 });

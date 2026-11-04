@@ -1,6 +1,6 @@
 # ディレクトリ構成
 
-Beni は一つのアプリケーションとして管理し、サーバー側を `src/backend/`、ブラウザー側を `src/frontend/` に分けています。設定ファイルはルート、テストは対象コードの近くに置きます。
+Beni は一つのアプリケーションとして管理し、サーバー側を `src/backend/`、ブラウザー側を `src/frontend/`、共通の通信定義を `src/shared/` に分けています。設定ファイルはルート、テストは対象コードの近くに置きます。
 
 `[生成]` と `[データ]` は Git 管理の対象外です。テストファイルは一部を `*.test.tsx` としてまとめています。
 
@@ -13,12 +13,14 @@ Beni/
 │   │   ├── chat.ts                   Codex 通信、会話の保存・再開・受信・中断
 │   │   ├── chat.test.ts              会話の保存・再開・中断・分離、接続エラーのテスト
 │   │   ├── documents.ts              タスク用 Markdown の作成・読み取り・変更監視
-│   │   ├── events.ts                 文書・会話の変更をブラウザーへ通知する SSE
+│   │   ├── events.ts                 共通 WS の接続・購読・送信上限と解放処理
 │   │   ├── store/                    データベースへのアクセス
 │   │   │   ├── index.ts              SQLite にプロジェクト・タスク・メッセージ・文書の版を保存
 │   │   │   └── index.test.ts         永続化・会話の分離・文書の版管理のテスト
 │   │   └── test/                     バックエンドのテスト補助
 │   │       └── fake-codex.ts          実サービスを使わず Codex 通信を模擬する実行ファイル
+│   ├── shared/                       FE・BE 共通の通信定義
+│   │   └── communication.ts          パック・WS メッセージの型、受信検証、ハッシュ
 │   └── frontend/                     ブラウザーで動く SolidJS の画面
 │       ├── index.html                アプリの表示先と JavaScript・CSS の読み込み
 │       ├── main.tsx                  SolidJS のアプリを HTML に取り付ける入口
@@ -26,11 +28,15 @@ Beni/
 │       ├── Home.tsx                  プロジェクト・タスク作成、タスク一覧の検索・並べ替え
 │       ├── Workspace.tsx             チャット・タスク・文書の表示とタブ管理
 │       ├── api.ts                    バックエンドへの JSON リクエストとエラー処理
+│       ├── communication.ts          共通 WS、購読の共有、再接続
+│       ├── chat-sync.ts              チャットのパック照合・順序付き確定・再同期
+│       ├── chat-scroll.ts            最下部にいる間のスクロール追従
 │       ├── types.ts                  プロジェクト・タスク・文書・会話などの型
 │       ├── tailwind.css              Tailwind CSS の探索対象、daisyUI のテーマ、共通スタイル
 │       ├── *.test.tsx                画面の表示・操作のテスト
-│       ├── test-events.ts            変更通知を模擬するテスト用 EventSource
+│       ├── test-events.ts            WS とパックを模擬するテスト補助
 │       └── components/               画面を構成する部品
+│           ├── MarkdownPreview.tsx   Markdown の変換・サニタイズ・装飾表示
 │           ├── Menu.tsx              ホーム・設定への移動と検索のメニュー
 │           ├── TaskCreate.tsx        プロジェクトを選び、タスクを作成するフォーム
 │           ├── TaskList.tsx          タスク一覧と並べ替え操作
@@ -45,18 +51,19 @@ Beni/
 │           ├── TreeView.tsx          項目の階層表示と選択
 │           └── *.test.tsx            部品の表示・操作のテスト
 ├── dist/                             [生成] ビルド出力
+│   ├── shared/                       FE・BE 共通の通信定義
+│   │   └── communication.ts          パック・WS メッセージの型、受信検証、ハッシュ
 │   └── frontend/                     フロントエンドの生成物
 │       ├── app.js                    Vite が生成する JavaScript
 │       └── generated.css             Tailwind CSS・daisyUI が生成する CSS
 ├── docs/                             仕様書、画面モック、構成の説明
 │   ├── README.md                     ドキュメントの目次
 │   ├── directory-structure.md        この文書
-│   ├── communication/                通信仕様と移行計画
+│   ├── communication/                通信仕様
 │   │   ├── README.md                 方針と文書の目次
 │   │   ├── http-api.md               HTTP API とパック同期の契約
 │   │   ├── websocket.md              WS の接続・購読・メッセージ仕様
-│   │   ├── chat-sync.md              チャットのパック確定・再接続時の同期
-│   │   └── migration.md              SSE からの移行計画（移行完了まで）
+│   │   └── chat-sync.md              チャットのパック確定・再接続時の同期
 │   ├── next-agent-plan.md            アプリ全体の目的、利用の流れ、構想
 │   ├── screens/                      画面ごとの仕様
 │   │   ├── home.md                   ホーム画面

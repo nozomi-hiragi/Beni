@@ -4,7 +4,7 @@ WS の接続、購読、イベント、エラーの契約を定義します。
 
 ## 接続と役割
 
-同一 origin の `/api/ws` にブラウザーのタブごとに一本接続します。HTTP Upgrade 時にホストと Origin を検査します。接続後も購読対象のプロジェクト・タスクの対応を検証します。
+同一 origin の `/api/ws` にブラウザーのタブごとに一本接続します。HTTP Upgrade 時にホストと Origin を検査します。ローカル接続は `127.0.0.1` と同一 Origin、Tailscale Serve 経由は `BENI_PUBLIC_ORIGIN` の host と HTTPS Origin の一致が必要です。ホストの制限は HTTP と共通で、転送ヘッダーは判定に使いません。接続後も購読対象のプロジェクト・タスクの対応を検証します。
 
 通常の作成・取得・変更は HTTP です。WS は購読管理、リアルタイム通知、将来のターミナル入出力を扱います。任意の HTTP 操作を呼ぶ RPC は用意しません。
 
@@ -49,7 +49,7 @@ WS の接続、購読、イベント、エラーの契約を定義します。
 
 | topic | scope | イベント |
 | --- | --- | --- |
-| `chat` | `{projectId: number, taskId: number \| null}` | `chat.pack.delta`, `chat.pack.closed` |
+| `chat` | `{projectId: number, taskId: number \| null}` | `chat.pack.delta`, `chat.pack.closed`, `chat.changed` |
 | `documents` | `{projectId: number, taskId: number}` | `documents.changed` |
 
 チャットの一般会話は taskId を null にします。文書は具体的なタスクが必須です。プロジェクト全体の状態通知やターミナルの topic は、その機能を実装するときに追加します。
@@ -68,20 +68,22 @@ BE は購読を登録してから subscribed を送り、その後にその購�
 
 FE は画面から離れた時点でその購読のイベントを無視し、BE は解除処理後に unsubscribed を返します。それより前に送信済みのイベントが届いても、FE が終了した購読を復活させてはいけません。
 
+PackHeader の形式は [HTTP API](http-api.md#パックの形式とハッシュ) を参照してください。差分ごとに header を付けるため、途中から受信してもパックの情報を復元できます。
+
 ## チャットの差分
 
 ```json
-{"type":"event","subscriptionId":"s1","name":"chat.pack.delta","data":{"packId":"pack-example-1","delta":"説明の続きです。"}}
+{"type":"event","subscriptionId":"s1","name":"chat.pack.delta","data":{"packId":"pack-example-1","delta":"説明の続きです。","header":{"packId":"pack-example-1","sequence":2,"messageId":"message-example-1","sendId":"send-example-1","role":"assistant","kind":"text","model":null,"createdAt":"2026-01-01T00:00:00.000Z","status":"streaming","state":"streaming"}}}
 ```
 
-本文パックの data は `{packId: string, delta: string}` です。FE はパックの未確定本文へ順番に追記します。最初に受け取った差分で未確定パックを作れるため、接続し直した際にパック開始通知を再送する必要はありません。
+本文パックの data は `{packId: string, delta: string, header: PackHeader}` です。FE はパックの未確定本文へ順番に追記します。最初に受け取った差分で未確定パックを作れるため、接続し直した際にパック開始通知を再送する必要はありません。
 
 差分の再送・再開位置を扱わないため、再送用の連番や offset は持たせません。同じ接続からの差分は受信順に処理します。途中で切れた内容はパック終了時の HTTP 照合で補完します。
 
 ## パック終了
 
 ```json
-{"type":"event","subscriptionId":"s1","name":"chat.pack.closed","data":{"packId":"pack-example-1"}}
+{"type":"event","subscriptionId":"s1","name":"chat.pack.closed","data":{"packId":"pack-example-1","header":{"packId":"pack-example-1","sequence":2,"messageId":"message-example-1","sendId":"send-example-1","role":"assistant","kind":"text","model":null,"createdAt":"2026-01-01T00:00:00.000Z","status":"completed","state":"closed"}}}
 ```
 
 BE がパックを確定・保存したあとに送ります。同じパックの差分は、この通知以降には送信しません。終了はそのパックの区切りであり、返答全体の終了や FE の受け取り確定とは別です。
@@ -89,6 +91,9 @@ BE がパックを確定・保存したあとに送ります。同じパック�
 FE は HTTP の ack でハッシュ照合を行います。未受信のパックに対する終了通知なら、HTTP で全文を取得します。順序が不明な場合はパック ID 列を取得し、順番に確定します。二度届いた終了通知は同じパックを再確定させません。
 
 
+## 会話の状態変更
+
+`chat.changed` の data は `{}` です。送信受け付けや返答終了などで会話の実行状態が変わったときに送ります。FE は HTTP で会話の状態を更新し、送信可否や中断ボタンへ反映します。本文差分ごとにこの通知を送り、全文を再取得することはしません。
 
 ## 文書更新
 
@@ -124,3 +129,25 @@ FE は HTTP の ack でハッシュ照合を行います。未受信のパック
 機能ごとに topic、scope の検証、イベント名、data の型と検証、購読開始・解除処理を定義します。共通層はその登録情報で振り分けます。HTTP で取得すべき初期状態・切断後の回復方法もセットで定めます。
 
 ターミナルには FE → BE の入力・リサイズ用メッセージが必要です。チャットの購読だけで代用せず、ターミナル実装時にこの仕様へ追加します。
+
+## 上限とタイムアウト
+
+| 項目 | 値・動作 |
+| --- | --- |
+| プロトコル版 | 1 |
+| メッセージサイズ | 送受信とも64 KiB以内 |
+| 送信待ち量 | 1 MiB以内。超過時は切断して再同期 |
+| 同時購読数 | 接続ごとに32件 |
+| 使用済み購読 ID | 接続ごとに4,096件。到達時は接続を閉じて再接続で更新 |
+| BE の hello 待機 | 5秒 |
+| FE の接続・購読成立待機 | 10秒 |
+| BE の idle timeout | 30秒。WS ping で生存確認 |
+| FE の再接続待機 | 1秒から倍増し最大30秒。ready でリセット |
+
+本文差分は最大4,096 UTF-16コード単位ごとに分割し、サロゲートペアの途中では切りません。差分を結合すると元の文字列になります。
+
+明示的に閉じるコードは、非対応版が1002、バイナリ受信が1003、hello タイムアウトが1008、送信フレーム超過が1009、送信待ち超過・購読 ID の更新が1013です。切断後に失われた内容は、通知の再送ではなく HTTP 同期で回復します。
+
+FE は不正な応答または INTERNAL_ERROR を受けたときに接続をやり直します。安定した購読が30秒続かないままこれらの失敗が3回重なった場合は自動再試行を止め、ページ再読み込みを案内します。30秒以上の安定稼働後は失敗回数をリセットします。通常のネットワーク切断はこの回数制限に含めません。
+
+購読が一件もなくなった場合、FE は接続と再接続タイマーを閉じます。次に購読が必要になったときに接続を開きます。

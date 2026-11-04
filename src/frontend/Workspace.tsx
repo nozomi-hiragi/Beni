@@ -1,7 +1,9 @@
 import { batch, createEffect, createMemo, createSignal, onCleanup, onMount, Show } from 'solid-js';
 import { createStore, reconcile } from 'solid-js/store';
 import { api } from './api';
+import { communication } from './communication';
 import ChatPanel from './components/ChatPanel';
+import MarkdownPreview from './components/MarkdownPreview';
 import PhaseIndicator from './components/PhaseIndicator';
 import TabBar from './components/TabBar';
 import TreeView from './components/TreeView';
@@ -119,7 +121,7 @@ export default function Workspace(props: WorkspaceProps) {
     if (taskId === undefined) { setLoading(false); return; }
     let active = true;
     let sequence = 0,fetching=false,reload=false;
-    let events: EventSource | undefined;
+    let unsubscribe: (() => void) | undefined;
     if (documentOwner !== taskId) {
       batch(() => { setDetail(undefined); restoreDocumentTabs(taskId); });
     }
@@ -138,10 +140,12 @@ export default function Workspace(props: WorkspaceProps) {
           adoptDocuments(taskId, data.documents);
           setLoadError('');
         });
-        if(!events && typeof EventSource !== 'undefined'){
-          events=new EventSource(`/api/tasks/${taskId}/documents/events?projectId=${data.task.projectId}`);
-          events.addEventListener('change',()=>{if(active)void load()});
-          events.onerror=()=>{if(active)setLoadError('文書の更新接続を再試行しています')};
+        if (!unsubscribe) {
+          unsubscribe = communication.subscribe('documents', { projectId: data.task.projectId, taskId }, {
+            subscribed: () => { if (active) void load(); },
+            event: () => { if (active) void load(); },
+            error: message => { if (active) setLoadError(message); },
+          });
         }
       } catch (error) {
         if (active && request === sequence) setLoadError(error instanceof Error ? error.message : 'タスクを取得できませんでした');
@@ -151,7 +155,7 @@ export default function Workspace(props: WorkspaceProps) {
       }while(reload&&active);fetching=false;
     };
     void load();
-    onCleanup(() => { active = false; sequence++; events?.close(); });
+    onCleanup(() => { active = false; sequence++; unsubscribe?.(); });
   });
 
   function openTask(id: number) {
@@ -215,7 +219,7 @@ export default function Workspace(props: WorkspaceProps) {
       <TabBar label="文書" tabs={openDocuments().map(id => { const document = documents().find(item => documentId(item) === id); return {id, label:document ? documentLabel(document) : id}; })} activeId={activeDocument()} onSelect={openDocument} onClose={closeDocument} left={toggle('文書ツリーを開閉', documentTreeOpen(), 'document-tree', () => setDocumentTreeOpen(value => !value), element => { documentTreeToggle = element; })} />
       <div class="relative flex min-h-0 flex-1 flex-col">
         <Show when={documentTreeOpen()}><TreeView id="document-tree" label="文書" nodes={documents().map(document => ({id:documentId(document),label:documentLabel(document)}))} onSelect={id => { openDocument(id); setDocumentTreeOpen(false); }} /></Show>
-        <Show when={currentDocument()}>{document => <pre class="min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-words p-5 font-mono text-sm leading-relaxed">{document().content}</pre>}</Show>
+        <Show when={currentDocument()}>{document => <MarkdownPreview content={document().content} />}</Show>
       </div>
     </section>
   </section>;

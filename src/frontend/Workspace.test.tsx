@@ -1,7 +1,8 @@
+// @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-library';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import Workspace from './Workspace';
-import {FakeEventSource} from './test-events';
+import {FakeWebSocket, packResponse} from './test-events';
 
 type Deferred<T> = { promise: Promise<T>; resolve(value: T): void };
 function deferred<T>(): Deferred<T> {
@@ -13,6 +14,11 @@ function json(value: unknown): Response {
   return { ok: true, json: async () => value } as Response;
 }
 
+beforeEach(() => {
+  // jsdom has no layout or ResizeObserver; chat scrolling is tested separately.
+  vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} });
+  FakeWebSocket.instances = []; vi.stubGlobal('WebSocket', FakeWebSocket); });
+
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
@@ -20,7 +26,7 @@ afterEach(() => {
 
 describe('Workspace message submission across navigation', () => {
   it('retains the newer draft and the sending lock across remount, then displays the saved message once', async () => {
-    FakeEventSource.instances=[];vi.stubGlobal('EventSource',FakeEventSource);
+    FakeWebSocket.instances=[];vi.stubGlobal('WebSocket',FakeWebSocket);
     const taskId = 73;
     const task = { id: taskId, projectId: 1, name: 'サンプル', phase: 'requirements', status: 'idle' };
     const documents = [{ name: '指示書.md', content: '# サンプル\n', version: 1 }];
@@ -37,6 +43,7 @@ describe('Workspace message submission across navigation', () => {
       }
       if (path === '/api/codex/status') return Promise.resolve(json({installed:true,auth:'chatgpt',models:[{id:'test',name:'Test'}],usage:'unknown'}));
       if (path.startsWith('/api/chat?')) return Promise.resolve(json({id:'c',projectId:1,taskId,threadId:null,messages:[...messages]}));
+      const pack = packResponse(path, messages); if (pack) return Promise.resolve(pack);
       if (path === '/api/chat/send' && init?.method === 'POST') {
         postCount++;
         expect(JSON.parse(String(init.body))).toEqual({ projectId:1, taskId, content: '最初の希望', model:'test' });
@@ -71,7 +78,7 @@ describe('Workspace message submission across navigation', () => {
 
     messages.push({ id: 1, role: 'user', content: '最初の希望', provider:'codex', model:'test', status:'completed' } as any);
     post.resolve(json({ id: 1 }));
-    FakeEventSource.instances.filter(event=>!event.closed&&event.url.startsWith('/api/chat/events')).forEach(event=>event.change());
+    FakeWebSocket.instances.filter(event=>!event.closed).forEach(event=>event.change());
     await screen.findByText('最初の希望', { exact: true });
     expect(screen.getAllByText('最初の希望', { exact: true })).toHaveLength(1);
     expect((screen.getByRole('textbox', { name: '希望や回答を入力' }) as HTMLTextAreaElement).value).toBe('次に伝えること');
@@ -84,33 +91,36 @@ describe('Workspace message submission across navigation', () => {
 
 
 it('refreshes real Markdown content without duplicating tabs and selects requirements from its phase',async()=>{
- FakeEventSource.instances=[];vi.stubGlobal('EventSource',FakeEventSource);
+ FakeWebSocket.instances=[];vi.stubGlobal('WebSocket',FakeWebSocket);
  const task={id:901,projectId:1,name:'Documents',phase:'requirements',status:'idle'};
  let content='# Initial',version=1;
  vi.stubGlobal('fetch',vi.fn((path:string)=>{
   if(path==='/api/state')return Promise.resolve(json({projects:[],tasks:[task]}));
   if(path==='/api/tasks/901')return Promise.resolve(json({task,messages:[],documents:[{path:'requirements.md',name:'requirements.md',content,version},{path:'implementation-plan.md',name:'implementation-plan.md',content:'# Plan',version:1}]}));
   if(path==='/api/codex/status')return Promise.resolve(json({installed:false,auth:'none',models:[],usage:'unknown'}));
+  if(path.startsWith('/api/chat/packs'))return Promise.resolve(json({packs:[]}));
   if(path.startsWith('/api/chat?'))return Promise.resolve(json({id:'document-test',messages:[]}));
   throw Error(path);
  }));
  render(()=><Workspace projectId={1} taskId={901} onHome={()=>{}}/>);
- const pre=await screen.findByText('# Initial');
+ const heading=await screen.findByRole('heading',{name:'Initial',level:1});
+ const preview=heading.closest('article')!;
  const tab=screen.getByRole('tab',{name:'requirements.md'});
- pre.scrollTop=12;
- const subscription=FakeEventSource.instances.find(event=>event.url.includes('/documents/events'))!;
- subscription.change();
+ preview.scrollTop=12;
+ const subscription=FakeWebSocket.instances.find(event=>!event.closed)!;
+ await waitFor(()=>expect([...subscription.subscriptions.values()].some(sub=>sub.topic==='documents')).toBe(true));
+ subscription.change('documents');
  await Promise.resolve();
- expect(screen.getByText('# Initial')).toBe(pre);
- content='# Updated from disk';version=2;subscription.change();
- await waitFor(()=>expect(screen.getByText('# Updated from disk')).toBeTruthy(),{timeout:3000});
+ expect(screen.getByRole('heading',{name:'Initial',level:1}).closest('article')).toBe(preview);
+ content='# Updated from disk';version=2;subscription.change('documents');
+ await waitFor(()=>expect(screen.getByRole('heading',{name:'Updated from disk',level:1})).toBeTruthy(),{timeout:3000});
  expect(screen.getAllByRole('tab',{name:'requirements.md'})).toHaveLength(1);
- expect(screen.getByRole('tab',{name:'requirements.md'})).toBe(tab);expect(screen.getByText('# Updated from disk')).toBe(pre);expect(pre.scrollTop).toBe(12);
+ expect(screen.getByRole('tab',{name:'requirements.md'})).toBe(tab);expect(screen.getByRole('heading',{name:'Updated from disk',level:1}).closest('article')).toBe(preview);expect(preview.scrollTop).toBe(12);
  fireEvent.click(screen.getByRole('tab',{name:'implementation-plan.md'}));
- expect(screen.getByText('# Plan')).toBeTruthy();
+ expect(screen.getByRole('heading',{name:'Plan',level:1})).toBeTruthy();
  fireEvent.click(screen.getByRole('button',{name:'タスク内容'}));
- expect(screen.getByText('# Updated from disk')).toBeTruthy();
+ expect(screen.getByRole('heading',{name:'Updated from disk',level:1})).toBeTruthy();
  fireEvent.click(screen.getByRole('tab',{name:'ジェネラル'}));
- expect(subscription.closed).toBe(true);
- cleanup();expect(FakeEventSource.instances.every(event=>event.closed)).toBe(true);
+ await waitFor(()=>expect([...subscription.subscriptions.values()].some(sub=>sub.topic==='documents')).toBe(false));
+ cleanup();expect(FakeWebSocket.instances.every(event=>event.closed)).toBe(true);
 });

@@ -1,3 +1,5 @@
+// @vitest-environment jsdom
+import { FakeWebSocket } from './test-events';
 import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-library';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import App, { parseRoute } from './App';
@@ -14,19 +16,24 @@ beforeEach(() => {
     throw new Error(`Unexpected URL ${url}`);
   }));
 });
+beforeEach(() => {
+  // jsdom has no layout or ResizeObserver; chat scrolling is tested separately.
+  vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} });
+  FakeWebSocket.instances = []; vi.stubGlobal('WebSocket', FakeWebSocket); });
+
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); history.replaceState(null, '', '/'); });
 const pop = (url: string) => { history.replaceState(null, '', url); window.dispatchEvent(new PopStateEvent('popstate')); };
 
 it('updates URLs and restores task tabs through history without discarding a draft', async () => {
   render(() => <App />);
   fireEvent.click(await screen.findByText('一つ目'));
-  await screen.findByText('# 一つ目');
+  await screen.findByRole('heading',{name:'一つ目',level:1});
   expect(location.pathname).toBe('/project/1');
   expect(location.search).toBe('?task=11');
   fireEvent.input(screen.getByRole('textbox',{name:'希望や回答を入力'}), {target:{value:'下書き'}});
   fireEvent.click(screen.getByRole('button',{name:'タスクツリーを開閉'}));
   fireEvent.click(await screen.findByRole('button',{name:'#12 二つ目'}));
-  await screen.findByText('# 二つ目');
+  await screen.findByRole('heading',{name:'二つ目',level:1});
   expect(location.search).toBe('?task=12');
   expect(screen.getByRole('tab',{name:'#11 一つ目'})).toBeTruthy();
   pop('/project/1?task=11');
@@ -35,7 +42,7 @@ it('updates URLs and restores task tabs through history without discarding a dra
   pop('/settings');
   expect(await screen.findByRole('heading',{name:'設定'})).toBeTruthy();
   pop('/project/1?task=12');
-  expect(await screen.findByText('# 二つ目')).toBeTruthy();
+  expect(await screen.findByRole('heading',{name:'二つ目',level:1})).toBeTruthy();
   fireEvent.click(screen.getByRole('button',{name:'ホームへ戻る'}));
   expect(location.pathname).toBe('/');
 });
@@ -130,10 +137,10 @@ it('keeps a newly loaded same-project task when the workspace list is newer than
   }));
   pop('/project/1?task=11');
   render(() => <App />);
-  await screen.findByText('# 一つ目');
+  await screen.findByRole('heading',{name:'一つ目',level:1});
   fireEvent.click(screen.getByRole('button',{name:'タスクツリーを開閉'}));
   fireEvent.click(await screen.findByRole('button',{name:'#12 二つ目'}));
-  await screen.findByText('# 二つ目');
+  await screen.findByRole('heading',{name:'二つ目',level:1});
   expect(location.search).toBe('?task=12');
   expect(screen.getByRole('tab',{name:'#11 一つ目'})).toBeTruthy();
   expect(screen.queryByText('このプロジェクトのタスクが見つかりません')).toBeNull();
