@@ -11,7 +11,7 @@ it('opens the available requirements and keeps unconnected phases disabled', () 
   expect(requirements.getAttribute('aria-current')).toBe('step');
   fireEvent.click(requirements);
   expect(onRequirements).toHaveBeenCalledOnce();
-  for (const name of ['実装フロー', '実装中', '高モデルに依頼']) {
+  for (const name of ['実装フロー', '実装中', '確定']) {
     expect((screen.getByRole('button', { name }) as HTMLButtonElement).disabled).toBe(true);
   }
 });

@@ -12,6 +12,6 @@ export default function PhaseIndicator(props: PhaseIndicatorProps) {
     <span aria-hidden="true">›</span>
     <button type="button" class="btn btn-ghost btn-sm" disabled>実装中</button>
     <span class="flex-1" />
-    <button type="button" class="btn btn-primary btn-sm" disabled>高モデルに依頼</button>
+    <button type="button" class="btn btn-primary btn-sm" disabled>確定</button>
   </div>;
 }

@@ -96,7 +96,6 @@ export default function ChatPanel(props: { projectId: number; taskId?: number; l
     finally { if (key() === currentKey) { setInterrupting(false); refresh(); } }
   }
   return <>
-    <p class="border-b border-base-300 px-4 py-2 text-xs text-base-content/60">{props.taskId === undefined ? 'ジェネラルは読み取り専用です。コマンド実行や MCP は無効です。' : `このタスクの .beni/tasks/${props.taskId}/ 内で文書を読み書きします。コマンド実行はこのフォルダへの書き込みに限定し、外部ツールとネットワークは無効です。`}</p>
     <Show when={status()?.auth === 'none'}><p class="px-4 pt-3 text-sm">Codex にログインしてください。</p></Show>
     <Show when={status() && !status()!.installed}><p class="px-4 pt-3 text-sm">Codex CLI をインストールしてください。</p></Show>
     <Show when={status()?.auth === 'apiKey' || status()?.auth === 'other'}><p class="px-4 pt-3 text-sm">Codex はサブスクリプション以外の認証方式です。設定を確認してください。</p></Show>

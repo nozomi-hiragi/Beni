@@ -4,6 +4,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import Workspace from './Workspace';
 import {FakeWebSocket, packResponse} from './test-events';
 
+// Terminal behavior is covered separately; these tests isolate task/document navigation.
+vi.mock('./components/TerminalPanel', () => ({default: () => null}));
+
 type Deferred<T> = { promise: Promise<T>; resolve(value: T): void };
 function deferred<T>(): Deferred<T> {
   let resolve!: (value: T) => void;

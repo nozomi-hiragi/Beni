@@ -7,6 +7,8 @@ import MarkdownPreview from './components/MarkdownPreview';
 import PhaseIndicator from './components/PhaseIndicator';
 import TabBar from './components/TabBar';
 import TreeView from './components/TreeView';
+import TerminalPanel from './components/TerminalPanel';
+import ResizeHandle from './components/ResizeHandle';
 import type { AppState, Document, Task, TaskDetail } from './types';
 
 export interface WorkspaceProps {
@@ -16,8 +18,6 @@ export interface WorkspaceProps {
   onHome: () => void;
 }
 
-const phaseLabel = (phase: string) => phase === 'requirements' ? 'タスク内容' : phase;
-const statusLabel = (status: string) => status === 'idle' ? '入力待ち' : status;
 const documentId = (document: Document) => document.path ?? JSON.stringify([document.name, document.version]);
 type DocumentTabs = { known: string[]; open: string[]; selected?: string };
 
@@ -36,6 +36,10 @@ export default function Workspace(props: WorkspaceProps) {
   const [loadError, setLoadError] = createSignal('');
   const [openDocuments, setOpenDocuments] = createSignal<string[]>([]);
   const [activeDocument, setActiveDocument] = createSignal<string>();
+  const [leftRatio, setLeftRatio] = createSignal(50);
+  const [chatRatio, setChatRatio] = createSignal(60);
+  let workspace: HTMLElement | undefined;
+  let leftPanels: HTMLDivElement | undefined;
   const documentTabs = new Map<number, DocumentTabs>();
   let documentOwner: number | undefined;
   let alive = true;
@@ -188,11 +192,11 @@ export default function Workspace(props: WorkspaceProps) {
   const toggle = (label: string, expanded: boolean, controls: string, onClick: () => void, setRef: (element: HTMLButtonElement) => void) =>
     <button ref={setRef} type="button" class="btn btn-ghost btn-square btn-sm m-1" aria-label={label} aria-expanded={expanded} aria-controls={controls} onClick={onClick}>☰</button>;
 
-  return <section class="mx-auto grid h-auto min-h-[34rem] min-w-0 max-w-7xl gap-4 px-4 pb-5 pt-4 lg:h-[calc(100vh-7rem)] lg:grid-cols-2">
-    <div class="flex min-h-0 min-w-0 flex-col gap-4">
-      <section class="card flex min-h-[20rem] min-w-0 flex-1 flex-col overflow-hidden border border-base-300 bg-base-100 shadow-sm" aria-label="タスクチャット">
+  return <section ref={workspace} class="workspace mx-auto grid h-auto min-h-[34rem] min-w-0 max-w-7xl gap-4 px-4 pb-5 pt-4 lg:h-[calc(100vh-7rem)] lg:min-h-0" style={{"--left-ratio": `${leftRatio()}fr`, "--right-ratio": `${100 - leftRatio()}fr`}}>
+    <div ref={leftPanels} class="workspace-left grid min-h-0 min-w-0 gap-4" classList={{"workspace-left-terminal": projectId() !== undefined}} style={{"--chat-ratio": `${chatRatio()}fr`, "--terminal-ratio": `${100 - chatRatio()}fr`}}>
+      <section class="card flex min-h-[20rem] min-w-0 flex-col overflow-hidden border border-base-300 bg-base-100 shadow-sm lg:min-h-0" aria-label="タスクチャット">
         <TabBar label="チャット" tabs={[{ id: 'general', label: 'ジェネラル', closable: false }, ...openTasks().map(id => ({ id: String(id), label: taskName(id) }))]} activeId={activeTask() === undefined ? 'general' : String(activeTask())} onSelect={id => id === 'general' ? (setActiveTask(undefined), props.onTaskChange?.(undefined)) : openTask(Number(id))} onClose={id => { if (id !== 'general') closeTask(Number(id)); }} left={toggle('タスクツリーを開閉', taskTreeOpen(), 'task-tree', () => setTaskTreeOpen(value => !value), element => { taskTreeToggle = element; })} />
-        <div class="relative flex min-h-0 flex-1 flex-col">
+        <div class="relative flex min-h-0 flex-1 flex-col overflow-auto">
           <Show when={taskTreeOpen()}><TreeView id="task-tree" label="タスク" nodes={[{id:'general', label:'ジェネラル'}, ...taskOptions().map(task => ({id:String(task.id), label:taskLabel(task)})), ...(props.taskId !== undefined && !taskOptions().some(task => task.id === props.taskId) ? [{id:String(props.taskId),label:taskName(props.taskId)}] : [])]} onSelect={id => { if (id === 'general') { setActiveTask(undefined); props.onTaskChange?.(undefined); } else openTask(Number(id)); setTaskTreeOpen(false); }} /></Show>
           <Show when={taskTreeOpen() && treeError()}><p role="alert" class="relative z-20 m-2 text-sm text-error">{treeError()}</p></Show>
           <Show when={activeTask() === undefined && projectId() !== undefined}><ChatPanel projectId={projectId()!} /></Show>
@@ -204,18 +208,18 @@ export default function Workspace(props: WorkspaceProps) {
                 const document = documents().filter(item => (item.name === 'requirements.md' || item.name === '指示書.md')).reduce<Document | undefined>((latest, item) => !latest || item.version > latest.version ? item : latest, undefined);
                 if (document) openDocument(documentId(document));
               }} />
-              <p class="border-b border-base-300 bg-base-200/50 px-5 py-3 text-xs leading-relaxed text-base-content/70">現在: {phaseLabel(detail()!.task.phase)} · {statusLabel(detail()!.task.status)}。タスクの会話から requirements.md と implementation-plan.md を更新します。</p>
               <ChatPanel projectId={detail()!.task.projectId} taskId={activeTask()} legacyMessages={detail()!.messages} />
             </Show>
           </Show>
         </div>
       </section>
-      <section class="card flex h-36 min-w-0 flex-col overflow-hidden border border-base-300 bg-base-100 shadow-sm" aria-label="ターミナル">
-        <TabBar label="ターミナル" tabs={[{id:'unavailable',label:'ターミナル（未接続）'}]} activeId="unavailable" onSelect={() => {}} right={<button type="button" class="btn btn-ghost btn-square btn-sm m-1" aria-label="ターミナルを追加（未接続）" title="ターミナルは未接続です" disabled>＋</button>} />
-        <p class="p-4 text-sm text-base-content/60">ターミナル実行は未接続です。</p>
-      </section>
+      <Show when={projectId() !== undefined}>
+        <ResizeHandle orientation="horizontal" label="チャットとターミナルの高さを調整" container={() => leftPanels} value={chatRatio()} onChange={setChatRatio} />
+        <TerminalPanel projectId={projectId()!} />
+      </Show>
     </div>
-    <section class="card flex min-h-[20rem] min-w-0 flex-col overflow-hidden border border-base-300 bg-base-100 shadow-sm" aria-label="文書プレビュー">
+    <ResizeHandle orientation="vertical" label="チャットと文書プレビューの幅を調整" container={() => workspace} value={leftRatio()} onChange={setLeftRatio} />
+    <section class="card flex min-h-[20rem] min-w-0 flex-col lg:min-h-0 overflow-hidden border border-base-300 bg-base-100 shadow-sm" aria-label="文書プレビュー">
       <TabBar label="文書" tabs={openDocuments().map(id => { const document = documents().find(item => documentId(item) === id); return {id, label:document ? documentLabel(document) : id}; })} activeId={activeDocument()} onSelect={openDocument} onClose={closeDocument} left={toggle('文書ツリーを開閉', documentTreeOpen(), 'document-tree', () => setDocumentTreeOpen(value => !value), element => { documentTreeToggle = element; })} />
       <div class="relative flex min-h-0 flex-1 flex-col">
         <Show when={documentTreeOpen()}><TreeView id="document-tree" label="文書" nodes={documents().map(document => ({id:documentId(document),label:documentLabel(document)}))} onSelect={id => { openDocument(id); setDocumentTreeOpen(false); }} /></Show>

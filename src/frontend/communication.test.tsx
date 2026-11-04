@@ -203,3 +203,26 @@ it('resets the failure budget after stable service and explains a permanent stop
   await vi.advanceTimersByTimeAsync(60_000);
   expect(FakeWebSocket.instances).toHaveLength(4);
 });
+
+it('keeps terminal sessions distinct and never buffers input across reconnects', async () => {
+  vi.useFakeTimers();
+  const transport = new Communication(), first = listener(), second = listener();
+  const scope = {projectId:20,taskId:null,terminalId:'first'};
+  disposals.push(transport.subscribe('terminal',scope,first));
+  disposals.push(transport.subscribe('terminal',{...scope,terminalId:'second'},second));
+  expect(transport.terminal(scope,{type:'terminal.input',generation:1,data:'offline'})).toBe(false);
+  await vi.advanceTimersByTimeAsync(0);
+  const socket=FakeWebSocket.instances[0];
+  expect(socket.subscriptions.size).toBe(2);
+  expect(transport.terminal(scope,{type:'terminal.input',generation:1,data:'one'})).toBe(true);
+  const id=[...socket.subscriptions].find(([,sub])=>sub.scope.terminalId==='first')![0];
+  expect(socket.sent.at(-1)).toEqual({type:'terminal.input',generation:1,data:'one',subscriptionId:id});
+  socket.receive({type:'error',code:'FORBIDDEN',subscriptionId:id,message:'操作権がありません'});
+  socket.receive({type:'event',subscriptionId:id,name:'terminal.sync.end',data:{sequence:0}});
+  expect(first.event).toHaveBeenCalledOnce(); expect(socket.closed).toBe(false);
+  socket.close();
+  expect(transport.terminal(scope,{type:'terminal.input',generation:1,data:'lost'})).toBe(false);
+  await vi.advanceTimersByTimeAsync(1000);
+  const next=FakeWebSocket.instances[1];
+  expect(next.sent.some(message=>message.type==='terminal.input')).toBe(false);
+});
