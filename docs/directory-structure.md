@@ -51,6 +51,12 @@ Beni/
 ├── docs/                             仕様書、画面モック、構成の説明
 │   ├── README.md                     ドキュメントの目次
 │   ├── directory-structure.md        この文書
+│   ├── communication/                通信仕様と移行計画
+│   │   ├── README.md                 方針と文書の目次
+│   │   ├── http-api.md               HTTP API とパック同期の契約
+│   │   ├── websocket.md              WS の接続・購読・メッセージ仕様
+│   │   ├── chat-sync.md              チャットのパック確定・再接続時の同期
+│   │   └── migration.md              SSE からの移行計画（移行完了まで）
 │   ├── next-agent-plan.md            アプリ全体の目的、利用の流れ、構想
 │   ├── screens/                      画面ごとの仕様
 │   │   ├── home.md                   ホーム画面
