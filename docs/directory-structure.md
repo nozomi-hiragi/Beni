@@ -65,6 +65,16 @@ Beni/
 ├── docs/                             仕様書、画面モック、構成の説明
 │   ├── README.md                     ドキュメントの目次
 │   ├── directory-structure.md        この文書
+│   ├── data/                         データの仕様と設計・移行
+│   │   ├── README.md                 保存責任・正本・データの関係
+│   │   ├── migration.md              全体の設計・移行と検証
+│   │   ├── sqlite/                   SQLite の仕様と設計・移行
+│   │   │   ├── README.md             保存責任と参照の方針
+│   │   │   └── migration.md          現行テーブル・ID・旧履歴
+│   │   └── beni/                     プロジェクト内データの仕様と設計・移行
+│   │       ├── README.md             文書の正本と復元の方針
+│   │       ├── chat.md               .beni/chat の会話保存仕様
+│   │       └── migration.md          現行配置・会話移行・未登録タスク
 │   ├── communication/                通信仕様
 │   │   ├── README.md                 方針と文書の目次
 │   │   ├── http-api.md               HTTP API とパック同期の契約

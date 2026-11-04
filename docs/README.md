@@ -4,6 +4,8 @@
 
 - [ディレクトリ構成](directory-structure.md)
 - [通信仕様・API](communication/README.md)
+- [データ設計](data/README.md)
+- [データの設計・移行](data/migration.md)
 
 ## 次期版の仕様
 
