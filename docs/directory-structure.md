@@ -31,6 +31,7 @@ Beni/
 │   ├── shared/                       FE・BE 共通の通信定義
 │   │   ├── ids.ts                    プロジェクト・タスクIDの生成と種別検証
 │   │   ├── task-phase.ts             共通のフェーズ識別子と検証
+│   │   ├── chat-commands.ts          コマンドの一覧・接続先別の対応・入力解析
 │   │   └── communication.ts          パック・WS メッセージの型、受信検証、ハッシュ
 │   └── frontend/                     ブラウザーで動く SolidJS の画面
 │       ├── index.html                アプリの表示先と JavaScript・CSS の読み込み
@@ -112,7 +113,8 @@ Beni/
 │   ├── beni.sqlite                   プロジェクトの登録情報と指示テンプレート（関連ファイルも同じ場所）
 │   ├── chat/
 │   │   ├── instructions.json         インストラクション編集相談の会話
-│   │   └── instruction-history/      編集用指示の適用前の会話（会話ID.json）
+│   │   ├── instruction-history/      編集用指示の適用前の会話（会話ID.json）
+│   │   └── history/                  リセット前の編集相談の会話（会話ID.json）
 │   └── instruction-editor/           編集相談CLIの作業先（書き込み不可）
 ├── node_modules/                     [生成] インストールした依存パッケージ
 ├── README.md                         概要、起動方法、保存先、機能、テスト方法

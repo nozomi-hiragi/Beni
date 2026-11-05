@@ -15,8 +15,10 @@
 ├── knowledge.md                  プロジェクト共通のナレッジ（必要時）
 ├── chat/
 │   ├── general.json              ジェネラル会話
+│   ├── history/                  リセット前のジェネラル会話（会話ID.json）
 │   └── <taskId>/
-│       └── <phase>.json          フェーズ別のタスク会話
+│       ├── <phase>.json          フェーズ別のタスク会話
+│       └── history/              リセット前のフェーズ会話（会話ID.json）
 └── tasks/
     └── <taskId>/
         ├── task.json             タスク情報
