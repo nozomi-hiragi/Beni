@@ -184,7 +184,8 @@ it.each(['completed', 'interrupted', 'failed'] as const)('keeps Aura visible dur
     if (url.startsWith('/api/chat/packs?')) return Promise.resolve(json({packs:url.includes('afterPackId')?[]:[earlier,user,pack].map(item => ({packId:item.packId,state:item.state}))}));
     return Promise.resolve(json({pack:url.includes(`/packs/${earlier.packId}?`)?earlier:url.includes(`/packs/${user.packId}?`)?user:pack}));
   }));
-  render(() => <ChatPanel phase="requirements" projectId={'019a0000-0000-7000-8000-000000000047'} taskId={'019a0000-0000-7100-8000-000000000007'} />);
+  const taskId = `019a0000-0000-7100-8000-00000000000${['completed','interrupted','failed'].indexOf(outcome) + 7}`;
+  render(() => <ChatPanel phase="requirements" projectId={'019a0000-0000-7000-8000-000000000047'} taskId={taskId} />);
   const tool = await screen.findByText('read_file');
   const article = tool.closest('article')!;
   const details = tool.closest('details')!;
@@ -400,4 +401,30 @@ it('同時パネルは一覧取得を共有し、ローカル選択は再初期�
  await screen.findByRole('option',{name:'Codex/B'});
  expect((screen.getByRole('combobox') as HTMLSelectElement).value).toBe('codex:b');
  expect(calls).toBe(2);
+});
+
+it('requires instruction focus and sends the selection captured at submit', async () => {
+ const sent:unknown[]=[];
+ vi.stubGlobal('fetch',vi.fn((url:string,init?:RequestInit)=>{
+  if(url==='/api/codex/status') return Promise.resolve(json({installed:true,auth:'chatgpt',models:[{id:'test',name:'Test'}]}));
+  if(url==='/api/claude/status') return Promise.resolve(json({installed:false,auth:'none',models:[]}));
+  if(url==='/api/chat/send'){sent.push(JSON.parse(String(init?.body)));return Promise.resolve(json({messages:[]}));}
+  return Promise.resolve(packResponse(url,[])??json({id:'focus-chat',projectId:'instructions',taskId:null,selectedModel:{id:'test',name:'Test',provider:'codex'},messages:[]}));
+ }));
+ const [focus,setFocus]=createSignal<string|null>(null);
+ render(()=> <ChatPanel projectId="instructions" instructionFocus={focus()} instructionFocusLabel={focus()==='common'?'全共通':undefined}/>);
+ fireEvent.input(screen.getByRole('textbox',{name:'希望や回答を入力'}),{target:{value:'指示を整えて'}});
+ await screen.findByRole('option',{name:'Codex/Test'});
+ const submit=screen.getByRole('button',{name:'送信'}) as HTMLButtonElement;
+ expect(submit.disabled).toBe(true);
+ expect(screen.getByText('フォーカス: 未選択')).toBeTruthy();
+ fireEvent.submit(submit.closest('form')!);
+ expect(sent).toHaveLength(0);
+ setFocus('common');
+ await waitFor(()=>expect(submit.disabled).toBe(false));
+ expect(screen.getByText('フォーカス: 全共通')).toBeTruthy();
+ fireEvent.click(submit);
+ setFocus('editor');
+ await waitFor(()=>expect(sent).toHaveLength(1));
+ expect(sent[0]).toMatchObject({projectId:'instructions',instructionFocus:'common',content:'指示を整えて'});
 });

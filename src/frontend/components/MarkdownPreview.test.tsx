@@ -7,6 +7,28 @@ import MarkdownPreview from './MarkdownPreview';
 afterEach(cleanup);
 
 describe('Markdown document preview', () => {
+  it('leaves template tokens unchanged unless variable labels are supplied', () => {
+    const { container } = render(() => <MarkdownPreview content="{{project_directory}}" />);
+    expect(container.textContent).toBe('{{project_directory}}\n');
+    expect(container.querySelector('.badge')).toBeNull();
+  });
+
+  it('decorates known text tokens safely without changing link attributes or unknown tokens', () => {
+    const label = '<img src=x onerror=alert(1)>';
+    const { container } = render(() => <MarkdownPreview
+      content={'{{project_directory}} {{unknown}} {{constructor}} `{{project_directory}}` [{{project_directory}}](https://example.com/{{project_directory}} "{{project_directory}}")'}
+      variableLabels={{project_directory: label}}
+    />);
+    const badges = container.querySelectorAll('.badge');
+    expect(badges).toHaveLength(3);
+    expect(Array.from(badges, badge => badge.textContent)).toEqual([label, label, label]);
+    expect(container.querySelector('img, [onerror]')).toBeNull();
+    expect(container.textContent).toContain('{{unknown}} {{constructor}}');
+    const link = screen.getByRole('link');
+    expect(link.getAttribute('href')).toBe('https://example.com/%7B%7Bproject_directory%7D%7D');
+    expect(link.getAttribute('title')).toBe('{{project_directory}}');
+  });
+
   it('renders GFM content and updates within the same scroll container', () => {
     const [content, setContent] = createSignal(`# Document
 

@@ -4,7 +4,7 @@ import { createMemo } from 'solid-js';
 
 const markdown = new Marked({ async: false, gfm: true });
 
-function renderMarkdown(content: string, documents: string[]): string {
+function renderMarkdown(content: string, documents: string[], variableLabels?: Record<string, string>): string {
   const fragment = DOMPurify.sanitize(markdown.parse(content, { async: false }), {
     ALLOWED_TAGS: ['body', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'em', 'strong', 'del', 'a', 'ul', 'ol', 'li', 'blockquote', 'table', 'thead', 'tbody', 'tr', 'th', 'td', 'pre', 'code', 'hr', 'br', 'input', 'img'],
     ALLOWED_ATTR: ['href', 'title', 'start', 'type', 'checked', 'disabled', 'alt'],
@@ -26,13 +26,36 @@ function renderMarkdown(content: string, documents: string[]): string {
     if (input.getAttribute('type') !== 'checkbox') { input.remove(); continue; }
     input.setAttribute('disabled', '');
   }
+  if (variableLabels) {
+    const walker = document.createTreeWalker(fragment, NodeFilter.SHOW_TEXT);
+    const nodes: Text[] = [];
+    while (walker.nextNode()) nodes.push(walker.currentNode as Text);
+    for (const node of nodes) {
+      const text = node.data;
+      const replacement = document.createDocumentFragment();
+      let offset = 0;
+      for (const match of text.matchAll(/\{\{([a-zA-Z0-9_]+)\}\}/g)) {
+        if (!Object.hasOwn(variableLabels, match[1]!)) continue;
+        replacement.append(document.createTextNode(text.slice(offset, match.index)));
+        const badge = document.createElement('span');
+        badge.className = 'badge badge-soft badge-primary h-auto max-w-full whitespace-normal align-baseline text-xs';
+        badge.textContent = variableLabels[match[1]!]!;
+        replacement.append(badge);
+        offset = match.index + match[0].length;
+      }
+      if (offset) {
+        replacement.append(document.createTextNode(text.slice(offset)));
+        node.replaceWith(replacement);
+      }
+    }
+  }
   const container = document.createElement('div');
   container.append(fragment);
   return container.innerHTML;
 }
 
-export default function MarkdownPreview(props: { content: string; documents?: string[]; onDocument?: (name: string) => void }) {
-  const html = createMemo(() => renderMarkdown(props.content, props.documents ?? []));
+export default function MarkdownPreview(props: { content: string; documents?: string[]; onDocument?: (name: string) => void; variableLabels?: Record<string, string> }) {
+  const html = createMemo(() => renderMarkdown(props.content, props.documents ?? [], props.variableLabels));
   return <article class="markdown-preview min-h-0 min-w-0 flex-1 overflow-auto p-5 text-sm leading-relaxed" innerHTML={html()} onClick={event => {
     const link = (event.target as Element).closest('a');
     const name = link?.getAttribute('data-document');

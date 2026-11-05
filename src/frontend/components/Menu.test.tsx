@@ -8,10 +8,11 @@ afterEach(cleanup);
 it('displays the current title and only shows the home button outside home', () => {
   const onHome = vi.fn();
   const onSettings = vi.fn();
+  const onInstructions = vi.fn();
   const [title, setTitle] = createSignal('Beni');
   const [showHome, setShowHome] = createSignal(false);
   const [query, setQuery] = createSignal('');
-  render(() => <Menu title={title()} showHome={showHome()} query={query()} onHome={onHome} onSettings={onSettings} onQueryChange={setQuery} />);
+  render(() => <Menu title={title()} showHome={showHome()} query={query()} onHome={onHome} onSettings={onSettings} onInstructions={onInstructions} onQueryChange={setQuery} />);
 
   expect(screen.getByText('Beni')).toBeTruthy();
   expect(screen.queryByRole('button', { name: 'ホームへ戻る' })).toBeNull();
@@ -19,6 +20,11 @@ it('displays the current title and only shows the home button outside home', () 
   fireEvent.input(search, { target: { value: '画面' } });
   expect(query()).toBe('画面');
   const settingsButton = screen.getByRole('button', { name: '設定' });
+  const instructionsButton = screen.getByRole('button', { name: 'インストラクション管理' });
+  expect(instructionsButton.nextElementSibling).toBe(settingsButton);
+  expect(instructionsButton.querySelector('svg')?.getAttribute('aria-hidden')).toBe('true');
+  fireEvent.click(instructionsButton);
+  expect(onInstructions).toHaveBeenCalledOnce();
   const settingsIcon = settingsButton.querySelector('svg');
   expect(settingsIcon?.getAttribute('aria-hidden')).toBe('true');
   fireEvent.click(settingsButton);

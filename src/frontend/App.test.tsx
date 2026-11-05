@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { FakeWebSocket } from './test-events';
-import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-library';
+import { cleanup, fireEvent, render, screen, within, waitFor } from '@solidjs/testing-library';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import App, { parseRoute } from './App';
 
@@ -10,6 +10,8 @@ const json = (data: unknown) => ({ ok: true, json: async () => data }) as Respon
 beforeEach(() => {
   history.replaceState(null, '', '/');
   vi.stubGlobal('fetch', vi.fn((url: string) => {
+    if (url === '/api/instructions') return Promise.resolve(json({instructions:[{key:'editor',content:'編集相談用の指示'},{key:'common',content:'共通の指示'},{key:'requirements',content:'要件の指示'}]}));
+    if (url === '/api/chat?projectId=instructions') return Promise.resolve(json({messages:[]}));
     if (url === '/api/state') return Promise.resolve(json({projects,tasks}));
     const task = tasks.find(item => url === `/api/tasks/${item.id}`);
     if (task) return Promise.resolve(json({task,messages:[],documents:[{name:'指示書.md',version:1,content:`# ${task.name}`}]}));
@@ -72,6 +74,8 @@ it('does not let a late project lookup change a newer page', async () => {
   let release!: (response: Response) => void;
   const pending = new Promise<Response>(resolve => { release = resolve; });
   vi.stubGlobal('fetch', vi.fn((url: string) => {
+    if (url === '/api/instructions') return Promise.resolve(json({instructions:[{key:'editor',content:'編集相談用の指示'},{key:'common',content:'共通の指示'},{key:'requirements',content:'要件の指示'}]}));
+    if (url === '/api/chat?projectId=instructions') return Promise.resolve(json({messages:[]}));
     if (url === '/api/state') return pending;
     throw new Error(`Unexpected URL ${url}`);
   }));
@@ -92,6 +96,8 @@ it('never labels another project with the previous project name while loading or
   let rejectSecond!: (error: Error) => void;
   const pending = new Promise<Response>((_, reject) => { rejectSecond = reject; });
   vi.stubGlobal('fetch', vi.fn((url: string) => {
+    if (url === '/api/instructions') return Promise.resolve(json({instructions:[{key:'editor',content:'編集相談用の指示'},{key:'common',content:'共通の指示'},{key:'requirements',content:'要件の指示'}]}));
+    if (url === '/api/chat?projectId=instructions') return Promise.resolve(json({messages:[]}));
     if (url === '/api/state') {
       calls++;
       return calls <= 2 ? Promise.resolve(json({projects,tasks})) : pending;
@@ -127,6 +133,8 @@ it('opens a selected project even if it has no tasks', async () => {
 it('keeps a newly loaded same-project task when the workspace list is newer than the project snapshot', async () => {
   let stateCalls = 0;
   vi.stubGlobal('fetch', vi.fn((url: string) => {
+    if (url === '/api/instructions') return Promise.resolve(json({instructions:[{key:'editor',content:'編集相談用の指示'},{key:'common',content:'共通の指示'},{key:'requirements',content:'要件の指示'}]}));
+    if (url === '/api/chat?projectId=instructions') return Promise.resolve(json({messages:[]}));
     if (url === '/api/state') {
       stateCalls++;
       return Promise.resolve(json({projects, tasks: stateCalls === 1 ? [tasks[0]] : [tasks[0], tasks[1]]}));
@@ -176,4 +184,48 @@ it('updates the URL after deletion and refuses a deleted task from cached histor
   pop(`${path}?task=${tasks[0]!.id}`);
   await waitFor(() => expect(screen.getByText('このプロジェクトのタスクが見つかりません')).toBeTruthy());
   expect(screen.queryByRole('tab',{name:'一つ目'})).toBeNull();
+});
+
+it('opens instruction management from the header and keeps it separate from settings through history', async () => {
+  const original = fetch;
+  vi.stubGlobal('fetch', vi.fn((url: string, init?: RequestInit) => url === '/api/instructions'
+    ? Promise.resolve(json({instructions: [{key:'editor',content:'編集相談用の指示'}, {key:'common',content:'共通の指示'}, {key:'requirements',content:'要件の指示'}]}))
+    : original(url, init)));
+  render(() => <App />);
+  fireEvent.click(screen.getByRole('button', {name:'インストラクション管理'}));
+  expect(location.pathname).toBe('/instructions');
+  expect(await screen.findByRole('heading', {name:'インストラクション相談',level:2})).toBeTruthy();
+  expect(screen.queryByRole('heading', {level:1})).toBeNull();
+  expect(await screen.findByText('共通の指示')).toBeTruthy();
+  expect(screen.queryByText('編集相談用の指示')).toBeNull();
+  expect(within(screen.getByRole('tablist',{name:'プロンプトの種類'})).getByRole('tab',{name:'インストラクション'}).getAttribute('aria-selected')).toBe('true');
+  expect(screen.getByRole('log',{name:'チャット履歴'}).closest('aside')).toBeTruthy();
+  expect(within(screen.getByRole('tablist',{name:'プロンプトの種類'})).getByRole('tab',{name:'インストラクション'}).closest('aside')).toBeNull();
+  expect(screen.getByRole('tab', {name:'要件定義'})).toBeTruthy();
+  expect(screen.getByLabelText('埋め込み変数')).toBeTruthy();
+  fireEvent.click(within(screen.getByRole('tablist',{name:'プロンプトの種類'})).getByRole('tab',{name:'編集用'}));
+  expect(screen.getByText('編集相談用の指示').closest('aside')).toBeNull();
+  expect(screen.queryByText('共通の指示')).toBeNull();
+  fireEvent.click(screen.getByRole('button', {name:'設定'}));
+  expect(location.pathname).toBe('/settings');
+  expect(await screen.findByRole('heading', {name:'設定',level:1})).toBeTruthy();
+  expect(screen.queryByRole('tablist', {name:'フェーズ別インストラクション'})).toBeNull();
+  expect(screen.queryByRole('heading',{name:'埋め込みツール'})).toBeNull();
+  pop('/instructions');
+  expect(await screen.findByRole('heading', {name:'インストラクション相談',level:2})).toBeTruthy();
+  expect(screen.queryByRole('heading', {level:1})).toBeNull();
+  pop('/settings');
+  expect(await screen.findByRole('heading', {name:'設定',level:1})).toBeTruthy();
+  pop('/instructions');
+  fireEvent.click(screen.getByRole('button', {name:'ホームへ戻る'}));
+  expect(location.pathname).toBe('/');
+});
+
+it('recognizes a direct instruction management URL', async () => {
+  pop('/instructions');
+  expect(parseRoute(new URL(location.href))).toEqual({kind:'instructions'});
+  render(() => <App />);
+  expect(await screen.findByRole('heading', {name:'インストラクション相談',level:2})).toBeTruthy();
+  expect(screen.queryByRole('heading', {level:1})).toBeNull();
+  expect(screen.queryByRole('heading', {name:'設定',level:1})).toBeNull();
 });

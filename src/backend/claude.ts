@@ -31,7 +31,7 @@ export async function claudeStatus(executable:string|null):Promise<ClaudeStatus>
  return status;
 }
 
-type Options={cwd:string;model:string|null;sandbox:'read-only'|'workspace-write';developerInstructions?:string;dynamicTools?:EmbeddedTool[]};
+type Options={builtinTools?:false;cwd:string;model:string|null;sandbox:'read-only'|'workspace-write';developerInstructions?:string;dynamicTools?:EmbeddedTool[]};
 type Block={id:string;type:'text'|'tool_use';text:string;name?:string;input?:unknown;partial?:string;complete:boolean};
 
 // ChatService が使う内部通知に CLI の NDJSON を変換する。CLI はターンごとに起動する。
@@ -75,7 +75,7 @@ export class ClaudeRpc {
    if(!Array.isArray(params.input)||params.input.some((item:any)=>item.type!=='text'||typeof item.text!=='string'))throw new ClaudeRejected();
    this.turn=randomUUID();
    const writable=this.options.sandbox==='workspace-write';
-   const tools=writable?'Read,Glob,Grep,Write,Edit,Bash':'Read,Glob,Grep';
+   const tools=this.options.builtinTools===false?'':writable?'Read,Glob,Grep,Write,Edit,Bash':'Read,Glob,Grep';
    // Bash の許可は CLI の必須 sandbox と組み合わせ、隔離外への再試行を許可しない。
    // 管理者ポリシーが優先され、CLI 既定の一時領域・worktree の共有 .git は書込可能。
    const settings={disableAllHooks:true,...(writable?{sandbox:{enabled:true,failIfUnavailable:true,autoAllowBashIfSandboxed:true,allowUnsandboxedCommands:false,excludedCommands:[],enableWeakerNestedSandbox:false,enableWeakerNetworkIsolation:false,allowAppleEvents:false,filesystem:{disabled:false,allowWrite:[]},network:{strictAllowlist:true,allowedDomains:[],deniedDomains:['*'],allowUnixSockets:[],allowAllUnixSockets:false,allowLocalBinding:false,allowMachLookup:[]}}}:{})};

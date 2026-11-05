@@ -15,6 +15,7 @@ afterEach(()=>{cleanup();vi.unstubAllGlobals();});
 it('同じ生IDのCodexとClaudeを区別して送信し、拒否は選択providerだけを警告する',async()=>{
  let sent:unknown;
  vi.stubGlobal('fetch',vi.fn((url:string,init?:RequestInit)=>{
+  if(url==='/api/instructions')return Promise.resolve(json({instructions:[{key:'common',content:'# 共通'}]}));
   if(url==='/api/codex/status')return Promise.resolve(json(codex));
   if(url==='/api/claude/status')return Promise.resolve(json(claude));
   if(url.startsWith('/api/chat/packs'))return Promise.resolve(json({packs:[]}));
@@ -40,6 +41,7 @@ it('同じ生IDのCodexとClaudeを区別して送信し、拒否は選択provid
 
 it.each(['認証なし','取得失敗'])('Claudeが%sでもCodexの選択と送信を妨げない',async failure=>{
  vi.stubGlobal('fetch',vi.fn((url:string)=>{
+  if(url==='/api/instructions')return Promise.resolve(json({instructions:[{key:'common',content:'# 共通'}]}));
   if(url==='/api/codex/status')return Promise.resolve(json(codex));
   if(url==='/api/claude/status')return failure==='取得失敗'?Promise.reject(Error('offline')):Promise.resolve(json({...claude,auth:'none'}));
   if(url.startsWith('/api/chat/packs'))return Promise.resolve(json({packs:[]}));
@@ -57,6 +59,7 @@ it('Codex取得失敗時もClaudeを使え、フェーズ往復で選択を即�
  let codexCalls=0,claudeCalls=0;
  const [phase,setPhase]=createSignal<'requirements'|'documents'>('requirements');
  vi.stubGlobal('fetch',vi.fn((url:string)=>{
+  if(url==='/api/instructions')return Promise.resolve(json({instructions:[{key:'common',content:'# 共通'}]}));
   if(url==='/api/codex/status'){codexCalls++;return Promise.reject(Error('offline'));}
   if(url==='/api/claude/status'){claudeCalls++;return Promise.resolve(json(claude));}
   if(url.startsWith('/api/chat/packs'))return Promise.resolve(json({packs:[]}));
@@ -74,6 +77,7 @@ it('Codex取得失敗時もClaudeを使え、フェーズ往復で選択を即�
 it('設定のClaude更新だけ共有一覧へ反映し、CLI制限と非対応版を表示する',async()=>{
  let version='2.1.291',codexCalls=0,claudeCalls=0;
  vi.stubGlobal('fetch',vi.fn((url:string)=>{
+  if(url==='/api/instructions')return Promise.resolve(json({instructions:[{key:'common',content:'# 共通'}]}));
   if(url==='/api/codex/status'){codexCalls++;return Promise.resolve(json(codex));}
   if(url==='/api/claude/status'){claudeCalls++;return Promise.resolve(json({...claude,version,auth:version==='2.1.291'?'unknown':'claude',models:version==='2.1.291'?null:[{id:'opus',name:'Opus'}]}));}
   if(url.startsWith('/api/chat/packs'))return Promise.resolve(json({packs:[]}));
@@ -95,6 +99,7 @@ it('providerのないローカル保存をCodexとして復元する',async()=>{
  const projectId='019a0000-0000-7000-8000-000000000ad6';
  localStorage.setItem(`beni:model:${projectId}:general:`,JSON.stringify({id:'same',name:'Legacy'}));
  vi.stubGlobal('fetch',vi.fn((url:string)=>{
+  if(url==='/api/instructions')return Promise.resolve(json({instructions:[{key:'common',content:'# 共通'}]}));
   if(url==='/api/codex/status')return Promise.resolve(json(codex));
   if(url==='/api/claude/status')return Promise.resolve(json(claude));
   if(url.startsWith('/api/chat/packs'))return Promise.resolve(json({packs:[]}));
@@ -109,7 +114,7 @@ it('providerのないローカル保存をCodexとして復元する',async()=>{
 });
 
 it.each([false,true])('設定でClaudeの検出と認証状態を説明する installed=%s',async installed=>{
- vi.stubGlobal('fetch',vi.fn((url:string)=>Promise.resolve(json(url==='/api/codex/status'?codex:{...claude,installed,auth:'none',version:installed?'2.1.292':null,models:null}))));
+ vi.stubGlobal('fetch',vi.fn((url:string)=>Promise.resolve(json(url==='/api/instructions'?{instructions:[{key:'common',content:'# 共通'}]}:url==='/api/codex/status'?codex:{...claude,installed,auth:'none',version:installed?'2.1.292':null,models:null}))));
  render(()=><CodexSettings/>);
  await screen.findByText(installed?'Claude にログインしてください':'Claude CLI をインストールしてください');
 });

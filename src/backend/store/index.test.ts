@@ -490,3 +490,28 @@ test('task metadata rolls back when its operation history cannot be recorded', (
     expect(operations.filter(type => type === 'task.completed')).toHaveLength(1);
   } finally { store.close(); rmSync(f.root, {recursive: true, force: true}); }
 });
+
+test('instructions seed missing keys and preserve saved templates across restart', () => {
+ const f=fixture();
+ try {
+  let store=new Store(f.path);
+  expect(store.instructions().map(item=>item.key)).toEqual(['common','requirements','documents','implementation','execution','retrospective','editor']);
+  store.close();
+  const db=new Database(f.path);
+  db.query('UPDATE instructions SET content=? WHERE key=?').run('# Saved {{project_directory}}','common');
+  db.query('DELETE FROM instructions WHERE key=?').run('documents'); db.close();
+  store=new Store(f.path);
+  expect(store.instructions()).toHaveLength(7);
+  expect(store.instructions()[0]!.content).toBe('# Saved {{project_directory}}');
+  expect(store.instructions().find(item=>item.key==='documents')!.content).toContain('仕様整理');
+  store.close();
+ } finally {rmSync(f.root,{recursive:true,force:true})}
+});
+
+test('instruction replacement validates variables and never re-evaluates inserted content', async () => {
+ const {renderInstruction,composeInstructions,defaultInstructions}=await import('../instructions');
+ expect(renderInstruction('{{knowledge_content}} / {{project_directory}}',{knowledge_content:'{{unknown}}',project_directory:'/example'})).toBe('{{unknown}} / /example');
+ expect(()=>renderInstruction('{{unknown}}',{})).toThrow('未知のインストラクション変数: unknown');
+ expect(()=>renderInstruction('{{task_id}}',{})).toThrow('インストラクション変数が不足しています: task_id');
+ expect(composeInstructions(defaultInstructions,null,{project_directory:'/project',working_directory:'/project'})).not.toContain('requirements.md');
+});

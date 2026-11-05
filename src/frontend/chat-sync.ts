@@ -2,6 +2,7 @@ import { api } from './api';
 import { object, packHash, validId, validPack, type Pack, type PackEntry, type PackHeader, type Scope, type TopicEvent } from '../shared/communication';
 
 const histories = new Map<string, Pack[]>();
+const conversationIds = new Map<string, string>();
 export const scopeQuery = (scope: Scope) => `projectId=${scope.projectId}${scope.taskId === null ? '' : `&taskId=${scope.taskId}&phase=${scope.phase}`}`;
 
 // Confirmed packs survive tab switches; unconfirmed deltas belong to a subscription generation.
@@ -20,6 +21,16 @@ export class ChatSync {
     this.key = scopeQuery(scope);
     this.confirmed = histories.get(this.key) ?? [];
     this.publish();
+  }
+  conversation(id: string) {
+    const previous = conversationIds.get(this.key);
+    conversationIds.set(this.key, id);
+    if (previous === undefined || previous === id) return;
+    this.generation++;
+    for (const request of this.requests) request.abort();
+    this.confirmed = []; histories.delete(this.key);
+    this.provisional.clear(); this.closed.clear(); this.order = [];
+    this.publish(); this.refresh();
   }
   dispose() { this.active = false; this.generation++; for (const request of this.requests) request.abort(); }
   subscribed() {
