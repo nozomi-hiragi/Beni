@@ -22,6 +22,8 @@ HTTP による取得・操作と、チャットのパック同期の契約を定
 | `GET /api/state` | なし | 200 `{projects: Project[], tasks: Task[]}` | — |
 | `POST /api/projects` | `{name: string, folder: string}`。名前は空白のみ不可、folder は絶対パス | 201 `Project` | 400 入力・保存先不正 |
 | `POST /api/tasks` | `{projectId: string, name: string}`。空白のみの名前は保存時に拒否 | 201 `Task` | 400 入力不正、404 プロジェクトなし |
+| `POST /api/tasks/:id/delete` | `{projectId: string}` | 200 `{ok: true}`。タスク・文書・タスク会話を削除 | 404 タスクなし・所属不一致、409 チャット実行中、500 削除失敗 |
+| `POST /api/tasks/:id/rename` | `{projectId: string, name: string}`。名前の前後の空白を除く | 200 更新後の `Task` | 400 名前不正、404 タスクなし・所属不一致、500 保存失敗 |
 | `GET /api/tasks/:id` | パスのタスク ID | 200 `{task: Task, documents: Document[]}` | 404 タスクなし、500 文書取得失敗 |
 | `POST /api/folders/list` | `{path?: string}`。指定時は絶対パス | 200 `FolderList` | 400 パス不正・開けない |
 | `GET /api/codex/status` | なし | 200 `CodexStatus` | 接続失敗時は一部の情報を unknown/null として返す |

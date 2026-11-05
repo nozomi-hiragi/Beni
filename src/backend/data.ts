@@ -76,7 +76,38 @@ export function newMetadata(kind: 'project' | 'task', name: string, unknownDates
   };
 }
 export function recoverTasks(folder: string) {
-  const root = directory(join(projectRoot(folder), 'tasks'));
+  const managed = projectRoot(folder);
+  const root = directory(join(managed, 'tasks'));
+  // 未確定の削除は戻し、確定済みの隔離データは再試行で片付ける。
+  for (const entry of readdirSync(managed)) {
+    if (!entry.startsWith('.deleting-') || !validTaskId(entry.slice(10))) continue;
+    const staged = directory(join(managed, entry)), id = entry.slice(10);
+    if (!readdirSync(staged).length) { rmSync(staged, {recursive:true}); continue; }
+    const committed = pathExists(join(staged, 'committed.json'));
+    if (!committed && !pathExists(join(staged, 'task')) && !pathExists(join(staged, 'chat.json')) && readdirSync(staged).every(name => name === 'journal.json' || /^journal\.json\.tmp-[a-f0-9-]+$/.test(name))) {
+      rmSync(staged, {recursive:true}); continue;
+    }
+    const journal = readJson(join(staged, committed ? 'committed.json' : 'journal.json'));
+    if (journal.version !== 1 || journal.taskId !== id || journal.projectId !== metadata(join(managed, 'project.json'), 'project').id || readdirSync(staged).some(name => !['journal.json','committed.json','task','chat.json'].includes(name))) throw Error('Invalid deletion journal');
+    if (committed) {
+      try { cleanDeletedTask(staged); } catch { /* 次回の読み込みで再試行する。 */ }
+      continue;
+    }
+    const task = join(staged, 'task'), chat = join(staged, 'chat.json');
+    if (pathExists(chat)) {
+      const destination = join(directory(join(managed, 'chat')), `${id}.json`);
+      if (pathExists(destination)) throw Error('Deletion recovery conflict');
+      const stat = lstatSync(chat);
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) throw Error('Invalid chat file');
+      renameSync(chat, destination);
+    }
+    if (pathExists(task)) {
+      directory(task);
+      if (pathExists(join(root, id))) throw Error('Deletion recovery conflict');
+      renameSync(task, join(root, id));
+    }
+    rmSync(staged, {recursive:true});
+  }
   for (const entry of readdirSync(root)) {
     if (entry.startsWith('.creating-')) continue;
     const path = join(root, entry);
@@ -108,4 +139,12 @@ export function recoverTasks(folder: string) {
     writeJson(join(root, value.id, 'task.json'), value);
   }
   return root;
+}
+// 確定マーカーを最後まで残し、途中で掃除に失敗しても復元しない。
+export function cleanDeletedTask(staged: string) {
+  rmSync(join(staged, 'task'), {recursive:true, force:true});
+  rmSync(join(staged, 'chat.json'), {force:true});
+  rmSync(join(staged, 'journal.json'), {force:true});
+  rmSync(join(staged, 'committed.json'), {force:true});
+  rmSync(staged, {recursive:true});
 }

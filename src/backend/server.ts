@@ -109,6 +109,19 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
     catch { return json({error:'フォルダを開けませんでした'},400); }
    }
    if (url.pathname === '/api/projects') {if(typeof input.name!=='string'||typeof input.folder!=='string'||!isAbsolute(input.folder)) return json({error:'名前と絶対パスを入力してください'},400);if(!input.name.trim())return json({error:'名前を入力してください'},400);return json(store.createProject(input.name,input.folder),201)}
+   const deleteMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/delete$/);
+   if (deleteMatch) {
+    if (!validTaskId(deleteMatch[1]) || !scope(input.projectId, deleteMatch[1])) return json({error:'タスクが見つかりません'},404);
+    try { chat.deleteTask(input.projectId as string, deleteMatch[1]!, () => store.deleteTask(input.projectId as string, deleteMatch[1]!)); return json({ok:true}); }
+    catch (error) { return error instanceof Error && error.message === 'busy' ? json({error:'チャットの処理中は削除できません'},409) : json({error:'タスクを削除できませんでした'},500); }
+   }
+   const renameMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/rename$/);
+   if (renameMatch) {
+    if (typeof input.name !== 'string' || !input.name.trim()) return json({error:'タスク名を入力してください'},400);
+    if (!validTaskId(renameMatch[1]) || !scope(input.projectId, renameMatch[1])) return json({error:'タスクが見つかりません'},404);
+    try { return json(projectTask(store.renameTask(input.projectId as string, renameMatch[1]!, input.name))); }
+    catch { return json({error:'タスク名を保存できませんでした'},500); }
+   }
    if (url.pathname === '/api/tasks') {if(typeof input.name!=='string'||!validProjectId(input.projectId))return json({error:'タスク名とプロジェクトを確認してください'},400);const project=scope(input.projectId,null);if(!project)return json({error:'プロジェクトが見つかりません'},404);return json(projectTask(store.createTask(input.projectId,input.name)),201)}
    return json({error:'見つかりません'},404);
   } catch(error) {if(error instanceof Error&&error.message.startsWith('Duplicate live project copy'))return json({error:'同じIDのプロジェクトが登録済みです。別プロジェクトにする場合は bun run clone:project を使って複製してください'},409);return json({error:'入力または保存先を確認してください'},400)}

@@ -318,3 +318,41 @@ test('HTTP task chat records activity while GET recovery and general chat preser
   expect(store.task(task.id)!.updatedAt).toBe(completed.updatedAt);
  }finally{store.close();await rm(folder,{recursive:true,force:true})}
 });
+
+test('task rename validates scope and persists only name and activity metadata', async () => {
+ const folder=await mkdtemp(join(tmpdir(),'beni-rename-'));
+ const store=new Store(':memory:');const handle=createHandler(store);
+ const post=(path:string,data:unknown)=>handle(new Request(`http://127.0.0.1:3210${path}`,{method:'POST',headers:{origin:'http://127.0.0.1:3210','content-type':'application/json'},body:JSON.stringify(data)}));
+ try {
+  const project=store.createProject('Example',folder);const task=store.createTask(project.id,'Before');
+  const file=join(folder,'.beni','tasks',task.id,'task.json');
+  const before=JSON.parse(await readFile(file,'utf8'));before.updatedAt=null;before.extra={retained:true};await writeFile(file,JSON.stringify(before));
+  for(const name of ['', '  ', 42, null]) expect((await post(`/api/tasks/${task.id}/rename`,{projectId:project.id,name})).status).toBe(400);
+  expect((await post(`/api/tasks/${task.id}/rename`,{projectId:generateId('project'),name:'After'})).status).toBe(404);
+  expect((await post('/api/tasks/invalid/rename',{projectId:project.id,name:'After'})).status).toBe(404);
+  expect(JSON.parse(await readFile(file,'utf8'))).toEqual(before);
+  const response=await post(`/api/tasks/${task.id}/rename`,{projectId:project.id,name:'  After  '});expect(response.status).toBe(200);
+  const result=await response.json();expect(result.name).toBe('After');expect(result.id).toBe(task.id);expect(result.updatedAt).toBeTruthy();
+  const after=JSON.parse(await readFile(file,'utf8'));expect(after).toEqual({...before,name:'After',updatedAt:result.updatedAt});
+  expect((await post(`/api/tasks/${task.id}/rename`,{projectId:project.id,name:' After '})).status).toBe(200);
+  expect(JSON.parse(await readFile(file,'utf8'))).toEqual(after);
+  const state=await (await handle(new Request('http://127.0.0.1:3210/api/state'))).json();expect(state.tasks[0].name).toBe('After');
+  expect((await (await handle(new Request(`http://127.0.0.1:3210/api/tasks/${task.id}`))).json()).task.name).toBe('After');
+ }finally{store.close();await rm(folder,{recursive:true,force:true})}
+});
+
+test('task deletion API enforces origin and project scope and blocks send initialization', async () => {
+ const folder=await mkdtemp(join(tmpdir(),'beni-delete-')),store=new Store(':memory:');
+ try {
+  const p=store.createProject('Demo',folder),t=store.createTask(p.id,'Target');
+  let release!:()=>void;const waiting=new Promise<void>(resolve=>{release=resolve});
+  const chat=new ChatService(()=>folder,()=>'/fake');chat.status=async()=>{await waiting;return {auth:'none'} as any};
+  const handle=createHandler(store,folder,chat);
+  const post=(projectId:unknown,origin='http://127.0.0.1:3210')=>handle(new Request(`http://127.0.0.1:3210/api/tasks/${t.id}/delete`,{method:'POST',headers:{origin,'content-type':'application/json'},body:JSON.stringify({projectId})}));
+  expect((await post(p.id,'https://example.com')).status).toBe(403);expect((await post(generateId('project'))).status).toBe(404);
+  const sending=chat.send(p.id,t.id,'hello',null,folder).catch(()=>{});
+  expect((await post(p.id)).status).toBe(409);expect(store.task(t.id)).not.toBeNull();
+  release();await sending;expect((await post(p.id)).status).toBe(200);expect((await post(p.id)).status).toBe(404);
+  expect((await (await handle(new Request('http://127.0.0.1:3210/api/state'))).json()).tasks).toEqual([]);
+ }finally{store.close();await rm(folder,{recursive:true,force:true})}
+});

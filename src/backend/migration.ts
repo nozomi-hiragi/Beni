@@ -242,6 +242,7 @@ export async function cloneProject(sourceFolder: string, destinationFolder: stri
     const stat = lstatSync(path);
     if (!stat.isDirectory() || stat.isSymbolicLink()) throw Error('Invalid clone source directory');
   }
+  if (readdirSync(source).some(name => name.startsWith('.deleting-'))) throw Error('Pending task deletion. Open the original project in Beni before cloning.');
   const destination = resolve(destinationFolder);
   if (destination === source || destination.startsWith(source + '/')) throw Error('Clone destination cannot be inside source data');
   if (pathExists(destination)) directory(destination);

@@ -1,9 +1,9 @@
 import { taskDocuments, taskDocumentSnapshot, documentContentsKey } from '../documents';
 import { Database } from 'bun:sqlite';
-import { existsSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readdirSync, renameSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { validProjectId, validTaskId } from '../../shared/ids';
-import { directory, metadata, newMetadata, projectRoot, recoverTasks, pathExists, writeJson, type TaskMetadata } from '../data';
+import { cleanDeletedTask, directory, metadata, newMetadata, projectRoot, recoverTasks, pathExists, writeJson, type TaskMetadata } from '../data';
 export type Project = {
   id: string;
   name: string;
@@ -147,6 +147,40 @@ export class Store {
     const {file, value} = this.scopedTask(projectId, taskId);
     value.updatedAt = new Date(Math.max(Date.now(), Date.parse(value.updatedAt ?? '') || 0)).toISOString();
     writeJson(file, value);
+  }
+  renameTask(projectId: string, taskId: string, name: string): TaskRow {
+    if (typeof name !== 'string' || !name.trim()) throw Error('Empty value');
+    const {file, value} = this.scopedTask(projectId, taskId);
+    if (value.name === name.trim()) return {id: value.id, project_id: projectId, name: value.name, phase: value.phase, status: value.status, createdAt: value.createdAt, updatedAt: value.updatedAt};
+    value.name = name.trim();
+    value.updatedAt = new Date(Math.max(Date.now(), Date.parse(value.updatedAt ?? '') || 0)).toISOString();
+    writeJson(file, value);
+    return {id: value.id, project_id: projectId, name: value.name, phase: value.phase, status: value.status, createdAt: value.createdAt, updatedAt: value.updatedAt};
+  }
+  deleteTask(projectId: string, taskId: string) {
+    const {project} = this.scopedTask(projectId, taskId);
+    const root = projectRoot(project.folder), task = join(root, 'tasks', taskId);
+    const chatRoot = join(root, 'chat');
+    if (pathExists(chatRoot)) directory(chatRoot);
+    const chat = join(chatRoot, `${taskId}.json`);
+    if (pathExists(chat)) {
+      const stat = lstatSync(chat);
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) throw Error('Invalid chat file');
+    }
+    const staged = join(root, `.deleting-${taskId}`);
+    mkdirSync(staged, {mode:0o700});
+    try { writeJson(join(staged, 'journal.json'), {version:1, projectId, taskId}); }
+    catch (error) { rmSync(staged, {recursive:true}); throw error; }
+    try {
+      renameSync(task, join(staged, 'task'));
+      if (pathExists(chat)) renameSync(chat, join(staged, 'chat.json'));
+      renameSync(join(staged, 'journal.json'), join(staged, 'committed.json'));
+    } catch (error) {
+      recoverTasks(project.folder);
+      throw error;
+    }
+    // 確定後の掃除に失敗しても対象は一覧へ戻さず、次回に再試行する。
+    try { cleanDeletedTask(staged); } catch { /* recoverTasks が再試行する。 */ }
   }
   createTask(projectId: string, name: string, initialize?: (task: TaskRow) => void): TaskRow {
     if (!validProjectId(projectId)) throw Error('Invalid project');

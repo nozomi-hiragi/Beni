@@ -647,3 +647,55 @@ test('document activity survives restart and ignores initial unknown dates and t
     expect(() => store.touchTask(other.id, task.id)).toThrow('Unknown task');
   } finally { store.close(); rmSync(f.root, { recursive: true, force: true }); }
 });
+
+test('task deletion removes only scoped documents and chat and rejects unsafe chat links', () => {
+ const f=fixture(), store=new Store(f.path);
+ try {
+  const p=store.createProject('Demo',f.folder), target=store.createTask(p.id,'Target'), other=store.createTask(p.id,'Other');
+  const root=join(f.folder,'.beni'), chats=join(root,'chat');mkdirSync(chats);
+  for(const name of ['general.json',`${target.id}.json`,`${other.id}.json`])writeFileSync(join(chats,name),'{}');
+  mkdirSync(join(root,'old'));writeFileSync(join(root,'old','archive.json'),'archive');
+  const external=join(f.root,'external.json');writeFileSync(external,'safe');rmSync(join(chats,`${target.id}.json`));symlinkSync(external,join(chats,`${target.id}.json`));
+  expect(()=>store.deleteTask(p.id,target.id)).toThrow('Invalid chat file');expect(store.task(target.id)).not.toBeNull();expect(readFileSync(external,'utf8')).toBe('safe');
+  rmSync(join(chats,`${target.id}.json`));writeFileSync(join(chats,`${target.id}.json`),'{}');
+  expect(()=>store.deleteTask(generateId('project'),target.id)).toThrow();
+  store.deleteTask(p.id,target.id);
+  expect(store.tasks().map(t=>t.id)).toEqual([other.id]);expect(existsSync(join(chats,`${target.id}.json`))).toBe(false);
+  expect(readFileSync(join(chats,'general.json'),'utf8')).toBe('{}');expect(readFileSync(join(chats,`${other.id}.json`),'utf8')).toBe('{}');expect(readFileSync(join(root,'old','archive.json'),'utf8')).toBe('archive');
+ }finally{store.close();rmSync(f.root,{recursive:true,force:true})}
+});
+
+test('task deletion recovery rolls back incomplete moves and never restores committed partial cleanup', () => {
+ const f=fixture(),store=new Store(f.path);
+ try {
+  const p=store.createProject('Demo',f.folder),t=store.createTask(p.id,'Target'),root=join(f.folder,'.beni');mkdirSync(join(root,'chat'));
+  const staged=join(root,`.deleting-${t.id}`);mkdirSync(staged);writeFileSync(join(staged,'journal.json'),JSON.stringify({version:1,projectId:p.id,taskId:t.id}));
+  renameSync(join(root,'tasks',t.id),join(staged,'task'));writeFileSync(join(staged,'chat.json'),'{}');
+  expect(store.tasks().map(t=>t.id)).toContain(t.id);expect(readFileSync(join(root,'chat',`${t.id}.json`),'utf8')).toBe('{}');expect(existsSync(staged)).toBe(false);
+  mkdirSync(staged);renameSync(join(root,'tasks',t.id),join(staged,'task'));renameSync(join(root,'chat',`${t.id}.json`),join(staged,'chat.json'));
+  writeFileSync(join(staged,'committed.json'),JSON.stringify({version:1,projectId:p.id,taskId:t.id}));rmSync(join(staged,'task','task.json'));
+  expect(store.tasks()).toEqual([]);expect(existsSync(staged)).toBe(false);expect(existsSync(join(root,'chat',`${t.id}.json`))).toBe(false);
+ }finally{store.close();rmSync(f.root,{recursive:true,force:true})}
+});
+
+test('task deletion rolls back filesystem failures before commit', async () => {
+ const f=fixture(),store=new Store(f.path),fs=await import('node:fs');
+ const original=fs.renameSync;
+ let fault:ReturnType<typeof spyOn>|undefined;
+ try {
+  const p=store.createProject('Demo',f.folder),t=store.createTask(p.id,'Target'),root=join(f.folder,'.beni');mkdirSync(join(root,'chat'));writeFileSync(join(root,'chat',`${t.id}.json`),'history');
+  fault=spyOn(fs,'renameSync').mockImplementation((from,to)=>{if(String(to).endsWith('/committed.json'))throw Error('simulated filesystem failure');return original(from,to)});
+  expect(()=>store.deleteTask(p.id,t.id)).toThrow('simulated filesystem failure');fault.mockRestore();fault=undefined;
+  expect(store.task(t.id)?.name).toBe('Target');expect(readFileSync(join(root,'tasks',t.id,'requirements.md'),'utf8')).toBe('# Target\n');expect(readFileSync(join(root,'chat',`${t.id}.json`),'utf8')).toBe('history');
+  store.deleteTask(p.id,t.id);expect(store.tasks()).toEqual([]);
+ }finally{fault?.mockRestore();store.close();rmSync(f.root,{recursive:true,force:true})}
+});
+
+test('recovery discards an initial journal write interrupted before any source was moved', async () => {
+ const f=fixture(),store=new Store(f.path);
+ try {
+  const p=store.createProject('Demo',f.folder),t=store.createTask(p.id,'Target'),staged=join(f.folder,'.beni',`.deleting-${t.id}`);mkdirSync(staged);writeFileSync(join(staged,'journal.json.tmp-00000000-0000-0000-0000-000000000000'),'{');
+  const clone=join(f.root,'clone');await expect(cloneProject(f.folder,clone)).rejects.toThrow('Pending task deletion');expect(existsSync(join(clone,'.beni'))).toBe(false);
+  expect(store.tasks().map(t=>t.id)).toEqual([t.id]);expect(existsSync(staged)).toBe(false);
+ }finally{store.close();rmSync(f.root,{recursive:true,force:true})}
+});

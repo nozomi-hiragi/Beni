@@ -50,6 +50,7 @@ export class ChatService {
  private closePack(pack:Pack,status:State,events:TopicEvent[]){if(pack.state==='closed')return;pack.status=status;pack.state='closed';events.push({name:'chat.pack.closed',data:{packId:pack.packId,header:packHeader(pack)}})}
  private locks=new Map<string,Promise<unknown>>();
  private active=new Map<string,{rpc:Rpc;threadId:string|null;turnId:string|null}>();
+ deleteTask(p:string,t:string,remove:()=>void){const k=key(p,t);if(this.active.has(k)||this.locks.has(k))throw Error('busy');remove();}
  private activity:(projectId:string,taskId:string)=>void=()=>{};
  constructor(private resolveProjectFolder:(projectId:string)=>string,private executable=()=>Bun.which('codex')) {}
  setTaskActivity(activity:(projectId:string,taskId:string)=>void){this.activity=activity}
