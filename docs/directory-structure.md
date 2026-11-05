@@ -10,7 +10,9 @@ Beni/
 │   ├── backend/                      Bun で動くサーバー側の処理
 │   │   ├── server.ts                 サーバー起動、API、フロントエンド配信、保存先設定
 │   │   ├── server.test.ts            API・配信・文書管理・変更通知・保存先のテスト
-│   │   ├── chat.ts                   Codex 通信、会話の保存・再開・受信・中断
+│   │   ├── chat.ts                   エージェント通信、会話の保存・再開・受信・中断
+│   │   ├── claude.ts                 Claude Code CLI の状態確認とストリーム変換
+│   │   ├── claude.test.ts            Claude の受信・権限設定・中断・接続失敗のテスト
 │   │   ├── chat.test.ts              会話の保存・再開・中断・分離、接続エラーのテスト
 │   │   ├── data.ts                   メタデータ検証・保存と文書だけ残ったタスクの復元
 │   │   ├── migration.ts              旧データの移行・照合・バックアップと.beniの複製
@@ -24,7 +26,8 @@ Beni/
 │   │   │   ├── index.ts              SQLiteの登録情報とプロジェクト内のタスク管理
 │   │   │   └── index.test.ts         メタデータ・復元・移行・複製のテスト
 │   │   └── test/                     バックエンドのテスト補助
-│   │       └── fake-codex.ts          実サービスを使わず Codex 通信を模擬する実行ファイル
+│   │       ├── fake-codex.ts          実サービスを使わず Codex 通信を模擬する実行ファイル
+│   │       └── fake-claude.ts         実サービスを使わず Claude 通信を模擬する実行ファイル
 │   ├── shared/                       FE・BE 共通の通信定義
 │   │   ├── ids.ts                    プロジェクト・タスクIDの生成と種別検証
 │   │   ├── task-phase.ts             共通のフェーズ識別子と検証
@@ -36,6 +39,7 @@ Beni/
 │       ├── Home.tsx                  プロジェクト・タスク作成、タスク一覧の検索・並べ替え
 │       ├── Workspace.tsx             チャット・タスク・文書の表示とタブ管理
 │       ├── api.ts                    バックエンドへの JSON リクエストとエラー処理
+│       ├── model-cache.ts            接続先別のモデル一覧とフェーズ別選択のキャッシュ
 │       ├── communication.ts          共通 WS、購読の共有、再接続
 │       ├── chat-sync.ts              チャットのパック照合・順序付き確定・再同期
 │       ├── chat-scroll.ts            最下部にいる間のスクロール追従

@@ -23,20 +23,23 @@ HTTP による取得・操作と、チャットのパック同期の契約を定
 | `POST /api/projects` | `{name: string, folder: string}`。名前は空白のみ不可、folder は絶対パス | 201 `Project` | 400 入力・保存先不正 |
 | `POST /api/tasks` | `{projectId: string, name: string}`。空白のみの名前は保存時に拒否 | 201 `Task` | 400 入力不正、404 プロジェクトなし |
 | `POST /api/tasks/:id/delete` | `{projectId: string}` | 200 `{ok: true}`。タスク・文書・タスク会話を削除 | 404 タスクなし・所属不一致、409 チャット実行中、500 削除失敗 |
-| `POST /api/tasks/:id/phase` | `{projectId: string, phase: string, direction?: "next" | "back"}`。現在のフェーズを指定、既定next | 200 移動後の `Task` | 400 入力不正、404 タスクなし・所属不一致、409 実行中・フェーズ不一致・終端 |
+| `POST /api/tasks/:id/phase` | `{projectId: string, phase: string, target: string}`。現在と移動先の準備フェーズを指定 | 200 移動後の `Task` | 400 入力不正、404 タスクなし・所属不一致、409 実行中・フェーズ不一致 |
+| `POST /api/tasks/:id/start` | `{projectId: string, phase: string, model: string \| null, provider?: "codex" \| "claude"}` | 200 実装中の `Task`。選択モデルへ実装開始の依頼を送信 | 400 入力不正、404 対象なし、409 実行中・フェーズ不一致・実装手順未編集、500 開始失敗 |
+| `POST /api/tasks/:id/stop` | `{projectId: string, phase: "implementation"}` | 200 停止完了後の実装手順の `Task` | 404 対象なし、409 フェーズ不一致・停止処理中、500 停止失敗 |
 | `POST /api/tasks/:id/rename` | `{projectId: string, name: string}`。名前の前後の空白を除く | 200 更新後の `Task` | 400 名前不正、404 タスクなし・所属不一致、500 保存失敗 |
-| `GET /api/tasks/:id` | パスのタスク ID | 200 `{task: Task, documents: Document[]}` | 404 タスクなし、500 文書取得失敗 |
+| `GET /api/tasks/:id` | パスのタスク ID | 200 `{task: Task, documents: Document[], canStart: boolean}` | 404 タスクなし、500 文書取得失敗 |
 | `POST /api/folders/list` | `{path?: string}`。指定時は絶対パス | 200 `FolderList` | 400 パス不正・開けない |
 | `GET /api/codex/status` | なし | 200 `CodexStatus` | 接続失敗時は一部の情報を unknown/null として返す |
+| `GET /api/claude/status` | なし | 200 `ClaudeStatus` | 接続失敗時はunknown/nullとして返す |
 | `GET /api/chat` | query: `projectId`, 任意の `taskId`、タスクでは `phase` | 200 `Conversation` | 404 会話対象なし、500 履歴取得失敗 |
-| `POST /api/chat/send` | `{projectId, taskId, phase, content, model}`。content は空白のみ不可、model は256文字以内の文字列か null | 202 `Conversation` | 409 送信中、400 Codex 利用不可・設定不適合、404 対象なし、500 保存・接続失敗 |
+| `POST /api/chat/send` | `{projectId, taskId, phase, content, model, provider?}`。content は空白のみ不可、model は256文字以内の文字列か null | 202 `Conversation` | 409 送信中、400 Codex 利用不可・設定不適合、404 対象なし、500 保存・接続失敗 |
 | `POST /api/chat/interrupt` | `{projectId, taskId, phase}` | 200 `{ok: true}` | 409 停止対象なし、404 対象なし、500 保存・接続失敗 |
 
 タスクチャットの `phase` は `requirements`・`documents`・`implementation-plan`・`implementation` のいずれかとする。
 
 `chat/send` の 202 は受け付けであり、返答終了ではない。メッセージの送信は `/api/chat/send` を使う。
 
-フェーズは `requirements` → `documents` → `implementation-plan` → `implementation` の順に進む。変更時にエージェントを自動起動しない。
+準備中は `requirements`・`documents`・`implementation-plan` 間を選択できる。`implementation` へ入るにはstartを使い、stop完了後は `implementation-plan` へ戻る。phase操作ではエージェントを自動起動せず、startでは実装開始の定型依頼を実装中の会話へ送る。
 
 プロジェクト・タスク作成は対応する文書ディレクトリも初期化する。タスク詳細取得でも必要な文書の初期化処理が走る。`GET /api/chat` は実行中でない pending/streaming メッセージを unknown に更新する場合がある。
 
@@ -57,15 +60,19 @@ type CodexStatus = {
   auth: 'chatgpt' | 'apiKey' | 'other' | 'none' | 'unknown';
   models: { id: string; name: string }[] | null; usage: 'unknown';
 };
+type ClaudeStatus = Omit<CodexStatus, 'auth'> & {
+  auth: 'claude' | 'apiKey' | 'other' | 'none' | 'unknown';
+};
 type ChatMessage = {
   id: string; sendId: string; role: 'user' | 'assistant'; content: string;
-  provider: 'codex'; model: string | null; createdAt: string; updatedAt: string;
+  provider: 'codex' | 'claude'; model: string | null; createdAt: string; updatedAt: string;
   status: 'pending' | 'streaming' | 'completed' | 'failed' | 'interrupted' | 'unknown';
-  threadId: string | null; sessionId: string | null;
+  threadId: string | null; sessionId: string | null; errorCode?: 'MODEL_UNAVAILABLE';
 };
 type Conversation = {
   version: 1; id: string; projectId: string; taskId: string | null; phase: string | null; lastEventId: number;
-  threadId: string | null; sessionId: string | null; messages: ChatMessage[];
+  threadId: string | null; sessionId: string | null; sessionProvider?: 'codex' | 'claude';
+  selectedModel: {id: string; name: string; provider?: 'codex' | 'claude'} | null; messages: ChatMessage[];
 };
 ```
 
@@ -98,7 +105,7 @@ type Pack = {
   packId: string; sequence: number; messageId: string; sendId: string;
   role: 'user' | 'assistant'; kind: 'text' | 'tool'; content: string;
   tool: {name: string; input: string; output: string} | null;
-  model: string | null; createdAt: string;
+  provider?: 'codex' | 'claude'; model: string | null; createdAt: string;
   status: 'pending' | 'streaming' | 'completed' | 'failed' | 'interrupted' | 'unknown';
   state: 'streaming' | 'closed';
 };
@@ -117,6 +124,8 @@ sequence は会話内の生成順です。ユーザー発言も一つの終了�
  pack.tool ? [pack.tool.name, pack.tool.input, pack.tool.output] : null,
  pack.model, pack.createdAt]
 ```
+
+Claudeのパックでは上記配列の末尾へ文字列 `"claude"` を追加する。providerの省略と `"codex"` は既存の配列を使い、過去のパックのハッシュを変えない。
 
 status/state は生成状態を表し、本文のハッシュには含めません。FE は終了通知の header から終了状態を受け取り、復元したパックを照合します。本文が一致すれば全文の再取得は不要です。
 
@@ -145,3 +154,9 @@ status/state は生成状態を表し、本文のハッシュには含めませ�
 ## タスク変更履歴
 
 イベント一覧・文書の版の取得は [変更履歴の取得契約](../objects/task-events.md#取得と通知の契約) に従う。タスクへの送信は現在phaseとの一致を検証し、古い画面から別フェーズへ送信した場合は409。送信準備・実行中はタスク全体で排他とし、別フェーズからの送信や前後へのフェーズ変更を409で拒否する。取得・パック照合は指定したフェーズの会話に限定する。
+
+`Conversation.selectedModel` は `{id, name, provider?}` または `null`。送信を受け付けたモデルを会話ごとに永続化する。モデル選択だけの保存APIは設けない。送信時にもモデルの利用状態を確認し、指定したモデルが利用できなければ代替モデルでは実行しない。
+
+モデル利用不可の送信・開始要求には400と `{code: "MODEL_UNAVAILABLE", error: string}` を返す。この場合は会話に新しい送信を追加しない。受け付け後に接続先から明示的なモデル拒否が届いた場合は、該当するアシスタントメッセージに `errorCode: "MODEL_UNAVAILABLE"` を記録し、`chat.changed` による履歴再取得で通知する。FEは送信IDで元の入力を復元し、選択モデルを警告状態にする。受け付け済みの履歴・パックは失敗として残し、削除や自動再送はしない。一般的な拒否や通信断にはこのコードを付けない。
+
+送信・実装開始の `provider` は `codex` または `claude`。省略時は既存クライアント互換として `codex`。モデルIDは接続先の生IDを送り、画面表示の接頭辞は含めない。選択した接続先だけへ送信し、他方へ自動変更しない。

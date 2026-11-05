@@ -19,10 +19,15 @@ Beni はインストールとログイン状態を確認する。未インスト
 
 ### Claude Code
 
-- Claude Agent SDK の `query()` を使い、`pathToClaudeCodeExecutable` に検出したユーザーのインストール済み Claude Code CLI を指定する。認証はその CLI に任せ、部分応答を逐次受け取る。
-- ログイン状態は CLI の正式な状態確認機能で確認する。認証トークンを取り出して独自の HTTP リクエストに使わない。未ログインなら「Claude Code にログインしてください」と表示する。
-- 会話に対応するセッション ID を記録し、再開可能な場合はそのセッションを再開する。会話時に使うツールの権限と承認要求を明示的に扱う。
-- 実行ファイルの検出、認証状態、モデル、利用枠は別々に確認する。認証方式が API キーなどの場合は明示し、サブスク利用と混同しない。利用枠の取得にもトークンの直接読み取りを使わず、正式に公開された CLI・SDK の出力で確認できる範囲を表示する。
+- インストール済みの公式Claude Code CLIを非対話モードで起動し、`stream-json` の部分応答・ツール結果・完了通知を既存のパック配信へ変換する。外部SDKを追加せず、認証とサービスとの通信はCLIに任せる。
+- 対応するCLIは2.1.292以降。`--version` と `auth status --json` で状態を確認する。認証方式が `claude.ai`、接続先が `firstParty`、ログイン済みのときに利用する。APIキー・第三者プロバイダーへ自動変更しない。アカウントIDやメールアドレスは保存・返却しない。
+- モデル候補はCLIの `sonnet`・`opus`・`haiku` エイリアス。候補の表示はアカウントの利用権限を保証しない。送信時のモデル拒否は警告表示と入力の復元で扱う。
+- 同じ接続先の会話はセッションIDで再開する。接続先を切り替えた場合は新規セッションを作り、保存済みの会話本文を参考履歴として引き継ぐ。他の接続先のセッションIDを流用しない。
+- `restricted`・`safe-mode` を使い、ユーザーやプロジェクトの追加設定、外部MCP、フック、ブラウザー連携などを無効にする。GeneralではRead・Glob・Grep、タスクではそれらにWrite・Edit・Bashを加える。準備フェーズの作業先はタスク文書フォルダ、実装中はプロジェクトフォルダとする。
+- タスクではCLIのサンドボックス内でシェルコマンドを実行し、テストやビルドにも利用できる。準備フェーズはタスク文書フォルダ、実装中はプロジェクトフォルダを作業範囲とし、ネットワーク接続とサンドボックス外への再実行を許可しない。サンドボックスを利用できない環境ではコマンド実行を拒否する。
+- Claude CLIの既定により、専用の一時フォルダとGit worktreeの共有Git管理領域にも書き込みが許可される。Codexと隔離範囲が完全に同一ではない。管理者が設定したCLIポリシーがBeniの指定より優先される。Linux・WSL2では、Unixソケットの隔離にはCLIの追加seccompフィルタが必要であり、通常のサンドボックス起動成功だけでは保証されない。
+
+接続方式とCLIオプションは [Claude Code CLIリファレンス](https://code.claude.com/docs/en/cli-reference)、コマンドの隔離は [Claude Codeサンドボックス](https://code.claude.com/docs/en/sandboxing) に従う。
 
 ### 将来の接続候補
 
@@ -34,6 +39,7 @@ Sign in with ChatGPT を追加する場合は、対象となるオープンソ�
 
 FE・BE 間の配信・確定・再接続は [チャットのパック同期](../communication/chat-sync.md) に定義する。この文書は CLI 連携、画面の要件、BE の履歴保存を扱う。
 
+- モデルの選択は会話ごと（タスクではフェーズごと）に保存する。利用できない選択は `⚠️` 付きで残し、送信・実装開始を止める。詳細は [チャットのモデル選択](../objects/chat.md#モデルの選択) に従う。
 - 接続先・モデルを選び、ユーザー発言と回答を表示する。応答は受信途中も更新し、完了・失敗・中断・結果不明を区別する。
 - 会話は daisyUI の Chat で表示し、ユーザー発言を右、エージェントの返答を左に配置する。実行中は Aura と「作業中」の表示を出し、本文の受信前やツール実行中も継続する。
 - チャットが最下部にある間は内容の追加に追従する。ユーザーが上へスクロールしたら追従を止め、最下部へ戻ると再開する。会話を切り替えたときは最下部から表示する。
@@ -65,7 +71,7 @@ FE・BE 間の配信・確定・再接続は [チャットのパック同期](..
 - [Sign in with ChatGPT：オープンソースアプリ向け概要](https://developers.openai.com/siwc/token-sharing-open-source)
 - [Sign in with ChatGPT：Codex app-server](https://developers.openai.com/siwc/token-sharing-open-source/codex-app-server)
 - [Sign in with ChatGPT：プレビューの制限](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations)
-- [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk/overview)
+- [Claude Codeの非対話実行](https://code.claude.com/docs/en/headless)
 - [Claude Code の利用条件](https://code.claude.com/docs/en/legal-and-compliance)
 
 関連：[全体仕様](../next-agent-plan.md) / [プロジェクト詳細画面](../screens/project-detail.md) / [設定画面](../screens/settings.md)
