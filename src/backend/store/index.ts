@@ -1,7 +1,10 @@
+import { defaultInstructions, validateInstruction, type Instruction } from '../instructions';
 import { taskDocuments, taskDocumentSnapshot, documentContentsKey, retrospectiveDocument } from '../documents';
+import { tmpdir } from 'node:os';
+import { mkdtempSync } from 'node:fs';
 import { Database } from 'bun:sqlite';
 import { existsSync, lstatSync, mkdirSync, readdirSync, renameSync, rmSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { validProjectId, validTaskId } from '../../shared/ids';
 import { cleanDeletedTask, directory, metadata, newMetadata, projectRoot, recoverTasks, pathExists, readJson, writeJson, validateChatDirectory, type TaskMetadata } from '../data';
 import { taskPhases, type TaskPhase } from '../../shared/task-phase';
@@ -36,7 +39,10 @@ function recoverProjectTasks(folder: string, projectId: string) {
 }
 export class Store {
   private readonly db: Database;
-  constructor(path: string) {
+  private memoryDirectory?:string;
+  get dataDirectory(){return this.databasePath===':memory:'?(this.memoryDirectory??=mkdtempSync(join(tmpdir(),'beni-app-'))):dirname(resolve(this.databasePath))}
+  constructor(private databasePath: string) {
+    const path=databasePath;
     this.db = new Database(path, {
       create: true
     });
@@ -50,9 +56,26 @@ export class Store {
       throw Error('Legacy data is unsupported.');
     }
     this.db.exec('CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY,name TEXT NOT NULL,folder TEXT NOT NULL UNIQUE)');
+    this.db.exec('CREATE TABLE IF NOT EXISTS instructions(key TEXT PRIMARY KEY,content TEXT NOT NULL)');
+    this.db.transaction(() => {
+      const insert = this.db.query('INSERT OR IGNORE INTO instructions(key,content) VALUES (?,?)');
+      for (const instruction of defaultInstructions) insert.run(instruction.key, instruction.content);
+    })();
+  }
+  instructions(): Instruction[] {
+    const rows = this.db.query('SELECT key,content FROM instructions').all() as Instruction[];
+    return defaultInstructions.map(({key}) => rows.find(row => row.key === key)!);
+  }
+  updateInstruction(key:unknown,content:unknown,expected:unknown) {
+    validateInstruction(key,content);
+    if(typeof expected!=='string')throw Error('expected_content が必要です');
+    const result=this.db.query('UPDATE instructions SET content=? WHERE key=? AND content=?').run(content,key as string,expected);
+    if(result.changes!==1)throw Error('インストラクションが変更されています。最新の本文を確認してください');
+    return {key,content};
   }
   close() {
     this.db.close();
+    if(this.memoryDirectory)rmSync(this.memoryDirectory,{recursive:true,force:true});
   }
   projects(): Project[] {
     const rows = this.db.query('SELECT * FROM projects ORDER BY id DESC').all() as Project[];

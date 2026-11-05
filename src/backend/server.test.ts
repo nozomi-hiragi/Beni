@@ -56,12 +56,12 @@ test('serves SPA entry for supported direct URLs without intercepting API or oth
  const store = new Store(':memory:');
  try {
   const handle = createHandler(store);
-  for (const path of ['/settings', `/project/${generateId('project')}`, `/project/${generateId('project')}?task=${generateId('task')}`]) {
+  for (const path of ['/settings', '/instructions', `/project/${generateId('project')}`, `/project/${generateId('project')}?task=${generateId('task')}`]) {
    const response = await handle(new Request(`http://127.0.0.1:3210${path}`));
    expect(response.status).toBe(200);
    expect(await response.text()).toContain('/ui/build/app.js');
   }
-  for (const path of ['/project', '/project/0', '/project/1', `/project/${generateId('task')}`, '/settings/extra', '/api/missing']) {
+  for (const path of ['/project', '/project/0', '/project/1', `/project/${generateId('task')}`, '/settings/extra', '/instructions/extra', '/api/missing']) {
    expect((await handle(new Request(`http://127.0.0.1:3210${path}`))).status).toBe(404);
   }
  } finally { store.close(); }
@@ -526,11 +526,16 @@ test('knowledgeのリンク拒否でも実装開始を戻しactiveを解放す�
  try {
   await writeFile(join(store.taskDocumentFolder(project.id,task.id),'implementation.md'),'# Plan\nImplement.');
   const outside=join(folder,'outside.md');await writeFile(outside,'preserve');await symlink(outside,join(folder,'.beni','knowledge.md'));
-  expect((await post('start',{phase:'requirements',model:null})).status).toBe(200);
-  for(let i=0;i<100&&store.task(task.id)!.phase==='execution';i++)await Bun.sleep(20);
-  expect(store.task(task.id)!.phase).toBe('requirements');expect(changed).toBeGreaterThan(1);
+  // 送信準備中の知識読み込みで拒否し、実行開始は同期的にロールバックする。
+  expect((await post('start',{phase:'requirements',model:null})).status).toBe(500);
+  expect(store.task(task.id)!.phase).toBe('requirements');expect(changed).toBeGreaterThan(0);
+  expect((await chat.get(project.id,task.id,'execution')).messages).toHaveLength(0);
   expect((await post('phase',{phase:'requirements',target:'documents'})).status).toBe(200);
   expect(await readFile(outside,'utf8')).toBe('preserve');
+  await rm(join(folder,'.beni','knowledge.md'));
+  await chat.send(project.id,task.id,'hello',null,folder,store.taskDocumentFolder(project.id,task.id),'documents');
+  for(let i=0;i<100&&(await chat.get(project.id,task.id,'documents')).messages.at(-1)?.status!=='completed';i++)await Bun.sleep(20);
+  expect((await chat.get(project.id,task.id,'documents')).messages.at(-1)?.status).toBe('completed');
  }finally{store.close();await rm(folder,{recursive:true,force:true})}
 });
 
@@ -604,4 +609,41 @@ test('埋め込みツールの保存成功だけをタスクイベントへ通�
   provider!.capture(project.id,task.id,'requirements',operation.operationId);
   expect(store.taskEvents(project.id,task.id).events.at(-1)).toMatchObject({type:'document.updated',sourcePhase:'requirements',operationId:operation.operationId});
  } finally {store.close();await rm(folder,{recursive:true,force:true})}
+});
+
+test('instruction chat WS scope is accepted only by chat topic',()=>{
+ const store=new Store(':memory:'),chat=new ChatService(()=>{throw Error('project resolution forbidden')});
+ const {websocket}=createServerOptions(store,'/tmp',chat),sent:any[]=[];
+ const socket={data:{ready:true,used:new Set<string>(),subscriptions:new Map()},readyState:1,getBufferedAmount:()=>0,send:(value:string)=>{sent.push(JSON.parse(value));return value.length},close:()=>{}} as any;
+ try{
+  const subscribe=(id:string,topic:string,scope:any)=>{websocket.message(socket,JSON.stringify({type:'subscribe',subscriptionId:id,topic,scope}));return sent.at(-1)};
+  expect(subscribe('chat','chat',{projectId:'instructions',taskId:null}).type).toBe('subscribed');
+  for(const topic of ['terminal','documents','task-events'])expect(subscribe(topic,topic,{projectId:'instructions',taskId:null})).toMatchObject({type:'error',code:'NOT_FOUND'});
+  for(const scope of [{projectId:'instructions',taskId:null,phase:null},{projectId:'instructions',taskId:generateId('task'),phase:'requirements'},{projectId:'instructions',taskId:null,terminalId:'terminal'}])expect(subscribe(JSON.stringify(scope),'chat',scope)).toMatchObject({type:'error',code:'INVALID_MESSAGE'});
+ }finally{websocket.close(socket);store.close()}
+});
+
+
+test('インストラクション反映は64 KiB本文のJSONエスケープを許可し、他APIと反映の上限を守る', async () => {
+ const store=new Store(':memory:'),chat=new ChatService(()=>'/tmp',()=>null);
+ const server=Bun.serve({hostname:'127.0.0.1',port:0,...createServerOptions(store,undefined,chat)});
+ const origin=`http://127.0.0.1:${server.port}`;
+ const post=(path:string,body:string,requestOrigin=origin)=>fetch(origin+path,{method:'POST',headers:{origin:requestOrigin,'content-type':'application/json'},body});
+ try {
+  await chat.instructionEditorState();
+  const content='#'+String.fromCharCode(1).repeat(65535);
+  store.updateInstruction('editor',content,store.instructions().find(item=>item.key==='editor')!.content);
+  const body=JSON.stringify({expected_content:content});
+  expect(Buffer.byteLength(body)).toBeGreaterThan(65536);
+  expect((await post('/api/instructions/apply',body,'https://example.com')).status).toBe(403);
+  expect((await post('/api/instructions/apply',JSON.stringify({expected_content:content.slice(1)}))).status).toBe(409);
+  const applied=await post('/api/instructions/apply',body);
+  expect(applied.status).toBe(200);expect(await applied.json()).toEqual({editorState:{pending:false,busy:false}});
+  expect(await chat.instructionEditorState()).toEqual({pending:false,busy:false});
+  expect((await post('/api/projects',JSON.stringify({name:'x'.repeat(65536),folder:'/tmp/example'}))).status).toBe(413);
+  const oversized=JSON.stringify({expected_content:'x'.repeat(65536*6+1024)});
+  const handle=createHandler(store,undefined,chat);
+  expect((await handle(new Request(origin+'/api/instructions/apply',{method:'POST',headers:{origin,'content-type':'application/json'},body:oversized}))).status).toBe(413);
+  expect((await post('/api/instructions/apply',oversized)).status).toBe(413);
+ } finally {await server.stop(true);store.close()}
 });
