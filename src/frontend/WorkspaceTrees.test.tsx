@@ -36,7 +36,7 @@ describe('Workspace task and document tabs', () => {
       throw new Error(`Unexpected request: ${path}`);
     }));
     render(() => <Workspace taskId={'019a0000-0000-7100-8000-000000000065'} onHome={() => {}} />);
-    await screen.findByRole('tab', { name: '#019a0000-0000-7100-8000-000000000065 設計' });
+    await screen.findByRole('tab', { name: '設計' });
     const taskToggle = () => screen.getByRole('button', { name: 'タスクツリーを開閉' });
     const documentToggle = () => screen.getByRole('button', { name: '文書ツリーを開閉' });
 
@@ -67,10 +67,10 @@ describe('Workspace task and document tabs', () => {
     expect(screen.getByRole('heading',{name:'仕様',level:1})).toBeTruthy();
 
     fireEvent.click(taskToggle());
-    fireEvent.click(await screen.findByRole('button', { name: '#019a0000-0000-7100-8000-000000000066 画面' }));
-    await screen.findByRole('tab', { name: '#019a0000-0000-7100-8000-000000000066 画面' });
+    fireEvent.click(await screen.findByRole('button', { name: '画面' }));
+    await screen.findByRole('tab', { name: '画面' });
     expect(taskToggle().getAttribute('aria-expanded')).toBe('false');
-    expect(screen.getByRole('tab', { name: '#019a0000-0000-7100-8000-000000000066 画面' }).getAttribute('aria-selected')).toBe('true');
+    expect(screen.getByRole('tab', { name: '画面' }).getAttribute('aria-selected')).toBe('true');
     fireEvent.click(documentToggle());
     fireEvent.click(document.body);
     expect(documentToggle().getAttribute('aria-expanded')).toBe('false');
@@ -106,21 +106,21 @@ describe('Workspace task and document tabs', () => {
     }));
     render(() => <Workspace taskId={'019a0000-0000-7100-8000-000000000001'} onHome={() => {}} />);
 
-    await screen.findByRole('tab', { name: '#019a0000-0000-7100-8000-000000000001 設計' });
+    await screen.findByRole('tab', { name: '設計' });
     expect(screen.getByRole('heading',{name:'設計',level:1})).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'タスクツリーを開閉' }));
-    await screen.findByRole('button', { name: '#019a0000-0000-7100-8000-000000000002 画面' });
-    expect(screen.queryByRole('button', { name: '#019a0000-0000-7100-8000-000000000003 別プロジェクト' })).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: '#019a0000-0000-7100-8000-000000000002 画面' }));
+    await screen.findByRole('button', { name: '画面' });
+    expect(screen.queryByRole('button', { name: '別プロジェクト' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: '画面' }));
     await screen.findByRole('heading',{name:'画面',level:1});
-    expect(screen.getByRole('tab', { name: '#019a0000-0000-7100-8000-000000000001 設計' })).toBeTruthy();
-    expect(screen.getByRole('tab', { name: '#019a0000-0000-7100-8000-000000000002 画面' }).getAttribute('aria-selected')).toBe('true');
+    expect(screen.getByRole('tab', { name: '設計' })).toBeTruthy();
+    expect(screen.getByRole('tab', { name: '画面' }).getAttribute('aria-selected')).toBe('true');
 
     // Closing the active task returns to the remaining open task.
-    fireEvent.click(screen.getByRole('button', { name: '#019a0000-0000-7100-8000-000000000002 画面 を閉じる' }));
+    fireEvent.click(screen.getByRole('button', { name: '画面 を閉じる' }));
     await screen.findByRole('heading',{name:'設計',level:1});
-    expect(screen.queryByRole('tab', { name: '#019a0000-0000-7100-8000-000000000002 画面' })).toBeNull();
-    expect(screen.getByRole('tab', { name: '#019a0000-0000-7100-8000-000000000001 設計' }).getAttribute('aria-selected')).toBe('true');
+    expect(screen.queryByRole('tab', { name: '画面' })).toBeNull();
+    expect(screen.getByRole('tab', { name: '設計' }).getAttribute('aria-selected')).toBe('true');
 
     // Documents can be reopened from their own tree without reopening task tabs.
     fireEvent.click(screen.getByRole('button', { name: '文書ツリーを開閉' }));
@@ -134,12 +134,12 @@ describe('Workspace task and document tabs', () => {
     expect(screen.getByRole('heading',{name:'仕様',level:1})).toBeTruthy();
 
     // Closing the last chat empties the pane; tree remains available to reopen.
-    fireEvent.click(screen.getByRole('button', { name: '#019a0000-0000-7100-8000-000000000001 設計 を閉じる' }));
-    expect(screen.queryByRole('tab', { name: '#019a0000-0000-7100-8000-000000000001 設計' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: '設計 を閉じる' }));
+    expect(screen.queryByRole('tab', { name: '設計' })).toBeNull();
     expect(screen.getByRole('tab', { name: 'ジェネラル' }).getAttribute('aria-selected')).toBe('true');
     fireEvent.click(screen.getByRole('button', { name: 'タスクツリーを開閉' }));
-    fireEvent.click(screen.getByRole('button', { name: '#019a0000-0000-7100-8000-000000000001 設計' }));
-    await screen.findByRole('tab', { name: '#019a0000-0000-7100-8000-000000000001 設計' });
+    fireEvent.click(screen.getByRole('button', { name: '設計' }));
+    await screen.findByRole('tab', { name: '設計' });
     expect(screen.getByRole('textbox', { name: '希望や回答を入力' })).toBeTruthy();
   });
 
@@ -164,9 +164,9 @@ describe('Workspace task and document tabs', () => {
     await waitFor(() => expect((screen.getByRole('button', { name: '送信' }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByRole('button', { name: '送信' }));
     fireEvent.input(textbox, { target: { value: '次の依頼' } });
-    fireEvent.click(screen.getByRole('button', { name: '#019a0000-0000-7100-8000-00000000000b 入力 を閉じる' }));
+    fireEvent.click(screen.getByRole('button', { name: '入力 を閉じる' }));
     fireEvent.click(screen.getByRole('button', { name: 'タスクツリーを開閉' }));
-    fireEvent.click(await screen.findByRole('button', { name: '#019a0000-0000-7100-8000-00000000000b 入力' }));
+    fireEvent.click(await screen.findByRole('button', { name: '入力' }));
     const reopened = await screen.findByRole('textbox', { name: '希望や回答を入力' });
     expect((reopened as HTMLTextAreaElement).value).toBe('次の依頼');
     const sending = screen.getByRole('button', { name: '応答中...' }) as HTMLButtonElement;
@@ -197,13 +197,13 @@ describe('Workspace task and document tabs', () => {
     render(() => <Workspace taskId={'019a0000-0000-7100-8000-000000000015'} onHome={() => {}} />);
     await screen.findByText('先の内容');
     fireEvent.click(screen.getByRole('button', { name: 'タスクツリーを開閉' }));
-    fireEvent.click(await screen.findByRole('button', { name: '#019a0000-0000-7100-8000-000000000016 後のタスク' }));
+    fireEvent.click(await screen.findByRole('button', { name: '後のタスク' }));
     expect(screen.queryByRole('textbox', { name: '希望や回答を入力' })).toBeNull();
     expect(screen.queryByText('先の内容')).toBeNull();
-    fireEvent.click(screen.getByRole('tab', { name: '#019a0000-0000-7100-8000-000000000015 先のタスク' }));
+    fireEvent.click(screen.getByRole('tab', { name: '先のタスク' }));
     await screen.findByText('先の内容');
     slow.resolve(json({ task: second, messages: [], documents: [{ name: '後.md', content: '後の内容', version: 1 }] }));
-    await waitFor(() => expect(screen.getByRole('tab', { name: '#019a0000-0000-7100-8000-000000000015 先のタスク' }).getAttribute('aria-selected')).toBe('true'));
+    await waitFor(() => expect(screen.getByRole('tab', { name: '先のタスク' }).getAttribute('aria-selected')).toBe('true'));
     expect(screen.queryByText('後の内容')).toBeNull();
     expect(posts).toBe(0);
   });
@@ -228,13 +228,13 @@ describe('Workspace task and document tabs', () => {
     await waitFor(() => expect((screen.getByRole('button', { name: '送信' }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByRole('button', { name: '送信' }));
     fireEvent.input(textbox, { target: { value: '次の下書き' } });
-    fireEvent.click(screen.getByRole('button', { name: '#019a0000-0000-7100-8000-00000000001f 閉じた後 を閉じる' }));
+    fireEvent.click(screen.getByRole('button', { name: '閉じた後 を閉じる' }));
     messages.push({ id: 1, role: 'user', content: '保存する依頼', provider: 'codex', model: 'test', status: 'completed' } as any);
     post.resolve(json({ id: 1 }));
     FakeWebSocket.instances.filter(event=>!event.closed).forEach(event=>event.change());
     await post.promise;
     fireEvent.click(screen.getByRole('button', { name: 'タスクツリーを開閉' }));
-    fireEvent.click(await screen.findByRole('button', { name: '#019a0000-0000-7100-8000-00000000001f 閉じた後' }));
+    fireEvent.click(await screen.findByRole('button', { name: '閉じた後' }));
     await screen.findByRole('textbox',{name:'希望や回答を入力'});
     FakeWebSocket.instances.filter(event=>!event.closed).forEach(event=>event.change());
     await screen.findByText('保存する依頼', { exact: true });
@@ -257,16 +257,16 @@ describe('Workspace task and document tabs', () => {
       throw new Error(`Unexpected request: ${path}`);
     }));
     render(() => <Workspace taskId={'019a0000-0000-7100-8000-000000000029'} onHome={() => {}} />);
-    fireEvent.click(screen.getByRole('button', { name: '#019a0000-0000-7100-8000-000000000029 を閉じる' }));
+    fireEvent.click(screen.getByRole('button', { name: 'タスク を閉じる' }));
     fireEvent.click(screen.getByRole('button', { name: 'タスクツリーを開閉' }));
     state.resolve(json({ projects: [], tasks: [task] }));
-    fireEvent.click(await screen.findByRole('button', { name: '#019a0000-0000-7100-8000-000000000029 初期' }));
+    fireEvent.click(await screen.findByRole('button', { name: '初期' }));
     await screen.findByRole('textbox', { name: '希望や回答を入力' });
     expect(taskGets).toBe(2);
     firstGet.resolve(json({ task: { ...task, name: '古い応答' }, messages: [], documents: [] }));
     await firstGet.promise;
-    expect(screen.getByRole('tab', { name: '#019a0000-0000-7100-8000-000000000029 初期' })).toBeTruthy();
-    expect(screen.queryByRole('tab', { name: '#019a0000-0000-7100-8000-000000000029 古い応答' })).toBeNull();
+    expect(screen.getByRole('tab', { name: '初期' })).toBeTruthy();
+    expect(screen.queryByRole('tab', { name: '古い応答' })).toBeNull();
   });
 
   it('can reopen the initial task when the list fails and the first task request is still pending', async () => {
@@ -282,11 +282,11 @@ describe('Workspace task and document tabs', () => {
       throw new Error(`Unexpected request: ${path}`);
     }));
     render(() => <Workspace taskId={'019a0000-0000-7100-8000-000000000033'} onHome={() => {}} />);
-    fireEvent.click(screen.getByRole('button', { name: '#019a0000-0000-7100-8000-000000000033 を閉じる' }));
+    fireEvent.click(screen.getByRole('button', { name: 'タスク を閉じる' }));
     fireEvent.click(screen.getByRole('button', { name: 'タスクツリーを開閉' }));
     await screen.findByText('タスク一覧を取得できませんでした');
-    fireEvent.click(screen.getByRole('button', { name: '#019a0000-0000-7100-8000-000000000033' }));
-    await screen.findByRole('tab', { name: '#019a0000-0000-7100-8000-000000000033 復元' });
+    fireEvent.click(screen.getByRole('button', { name: 'タスク' }));
+    await screen.findByRole('tab', { name: '復元' });
     expect(screen.getByRole('textbox', { name: '希望や回答を入力' })).toBeTruthy();
     expect(taskGets).toBe(2);
   });

@@ -41,7 +41,7 @@ async function listFolders(path: string) {
 }
 
 const row = (value: unknown): Record<string, any> => value as Record<string, any>;
-const projectTask = (value: unknown) => { const t = row(value); return {id:t.id, projectId:t.project_id, name:t.name, phase:t.phase, status:t.status}; };
+const projectTask = (value: unknown) => { const t = row(value); return {id:t.id, projectId:t.project_id, name:t.name, phase:t.phase, status:t.status, createdAt:t.createdAt, updatedAt:t.updatedAt}; };
 const documentFolder = (_store:Store,project:any, task:any) => taskDocuments(project.folder,task.id,{requirements:'# '+task.name+'\n'});
 const projectResolver = (store:Store) => (projectId:string) => {
  const project=store.projects().map(row).find(project=>project.id===projectId);

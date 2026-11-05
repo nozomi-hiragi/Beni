@@ -21,6 +21,11 @@ test('project, task, chat and initial document flow', async () => {
   expect((await post(`/api/tasks/${task.id}/messages`,{content:'  原文\n'})).status).toBe(404);
   const detail=await (await handle(new Request(`http://127.0.0.1:3210/api/tasks/${task.id}`))).json();
   expect(detail.messages).toBeUndefined();expect(detail.documents[0].content).toBe('# Sample\n');
+  const metadataPath=join(folder,'.beni','tasks',task.id,'task.json');const metadata=JSON.parse(await readFile(metadataPath,'utf8'));
+  expect(task.createdAt).toBe(metadata.createdAt);expect(detail.task.createdAt).toBe(metadata.createdAt);
+  expect(task.updatedAt).toBe(metadata.updatedAt);expect(detail.task.updatedAt).toBe(metadata.updatedAt);
+  metadata.createdAt=null;metadata.updatedAt=null;await writeFile(metadataPath,JSON.stringify(metadata));
+  const state=await (await handle(new Request('http://127.0.0.1:3210/api/state'))).json();expect(state.tasks[0].createdAt).toBeNull();expect(state.tasks[0].updatedAt).toBeNull();
   expect((await handle(new Request('http://127.0.0.1:3210/api/tasks',{method:'POST',headers:{origin:'https://example.com','content-type':'application/json'},body:'{}'}))).status).toBe(403);
   expect((await handle(new Request('http://example.com/api/state'))).status).toBe(403);
   expect((await post('/api/projects',{name:'x'.repeat(70000),folder:'/tmp/example'})).status).toBe(413);

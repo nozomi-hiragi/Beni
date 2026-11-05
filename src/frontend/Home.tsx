@@ -12,8 +12,13 @@ export interface HomeProps {
 }
 
 /** A stable secondary order is the order immediately before the latest header click. */
-function compare(left: Task, right: Task, key: SortKey): number {
-  return String(left[key]).localeCompare(String(right[key]), 'ja', { numeric: true });
+function compare(left: Task, right: Task, key: SortKey, direction: 1 | -1): number {
+  if (key === 'createdAt' || key === 'updatedAt') {
+    if (!left[key]) return right[key] ? 1 : 0;
+    if (!right[key]) return -1;
+    return direction * (Date.parse(left[key]) - Date.parse(right[key]));
+  }
+  return direction * String(left[key]).localeCompare(String(right[key]), 'ja', { numeric: true });
 }
 
 function confirmationPriority(task: Task): number {
@@ -43,7 +48,7 @@ export default function Home(props: HomeProps) {
   const [folderPickerOpen, setFolderPickerOpen] = createSignal(false);
   const [sortKey, setSortKey] = createSignal<SortKey>('id');
   const [sortDirection, setSortDirection] = createSignal<1 | -1>(-1);
-  const sortDirections = new Map<SortKey, 1 | -1>([['id', -1]]);
+  const sortDirections = new Map<SortKey, 1 | -1>([['id', -1], ['createdAt', 1], ['updatedAt', 1]]);
   let dialog: HTMLDialogElement | undefined;
   let projectSelect: HTMLSelectElement | undefined;
   let projectSelectVersion = 0;
@@ -109,7 +114,7 @@ export default function Home(props: HomeProps) {
     const direction: 1 | -1 = sortDirections.get(key) === 1 ? -1 : 1;
     sortDirections.set(key, direction);
     setTasks(previous => previous.map((task, index) => ({ task, index }))
-      .sort((left, right) => direction * compare(left.task, right.task, key) || left.index - right.index)
+      .sort((left, right) => compare(left.task, right.task, key, direction) || left.index - right.index)
       .map(item => item.task));
     setSortKey(key);
     setSortDirection(direction);

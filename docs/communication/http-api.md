@@ -39,7 +39,7 @@ HTTP による取得・操作と、チャットのパック同期の契約を定
 
 ```ts
 type Project = { id: string; name: string; folder: string };
-type Task = { id: string; projectId: string; name: string; phase: string; status: string };
+type Task = { id: string; projectId: string; name: string; phase: string; status: string; createdAt: string | null; updatedAt: string | null };
 type Document = { name: string; path: string; content: string; version: number };
 type FolderList = {
   path: string; parent: string | null;

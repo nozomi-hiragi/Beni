@@ -32,13 +32,13 @@ it('updates URLs and restores task tabs through history without discarding a dra
   expect(location.search).toBe('?task=019a0000-0000-7100-8000-00000000000b');
   fireEvent.input(screen.getByRole('textbox',{name:'希望や回答を入力'}), {target:{value:'下書き'}});
   fireEvent.click(screen.getByRole('button',{name:'タスクツリーを開閉'}));
-  fireEvent.click(await screen.findByRole('button',{name:'#019a0000-0000-7100-8000-00000000000c 二つ目'}));
+  fireEvent.click(await screen.findByRole('button',{name:'二つ目'}));
   await screen.findByRole('heading',{name:'二つ目',level:1});
   expect(location.search).toBe('?task=019a0000-0000-7100-8000-00000000000c');
-  expect(screen.getByRole('tab',{name:'#019a0000-0000-7100-8000-00000000000b 一つ目'})).toBeTruthy();
+  expect(screen.getByRole('tab',{name:'一つ目'})).toBeTruthy();
   pop('/project/019a0000-0000-7000-8000-000000000001?task=019a0000-0000-7100-8000-00000000000b');
   await waitFor(() => expect((screen.getByRole('textbox',{name:'希望や回答を入力'}) as HTMLTextAreaElement).value).toBe('下書き'));
-  expect(screen.getByRole('tab',{name:'#019a0000-0000-7100-8000-00000000000c 二つ目'})).toBeTruthy();
+  expect(screen.getByRole('tab',{name:'二つ目'})).toBeTruthy();
   pop('/settings');
   expect(await screen.findByRole('heading',{name:'設定'})).toBeTruthy();
   pop('/project/019a0000-0000-7000-8000-000000000001?task=019a0000-0000-7100-8000-00000000000c');
@@ -139,10 +139,10 @@ it('keeps a newly loaded same-project task when the workspace list is newer than
   render(() => <App />);
   await screen.findByRole('heading',{name:'一つ目',level:1});
   fireEvent.click(screen.getByRole('button',{name:'タスクツリーを開閉'}));
-  fireEvent.click(await screen.findByRole('button',{name:'#019a0000-0000-7100-8000-00000000000c 二つ目'}));
+  fireEvent.click(await screen.findByRole('button',{name:'二つ目'}));
   await screen.findByRole('heading',{name:'二つ目',level:1});
   expect(location.search).toBe('?task=019a0000-0000-7100-8000-00000000000c');
-  expect(screen.getByRole('tab',{name:'#019a0000-0000-7100-8000-00000000000b 一つ目'})).toBeTruthy();
+  expect(screen.getByRole('tab',{name:'一つ目'})).toBeTruthy();
   expect(screen.queryByText('このプロジェクトのタスクが見つかりません')).toBeNull();
 });
 

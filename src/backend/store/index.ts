@@ -12,6 +12,8 @@ export type Project = {
 export type TaskRow = {
   id: string;
   project_id: string;
+  createdAt: string | null;
+  updatedAt: string | null;
   name: string;
   phase: string;
   status: string;
@@ -78,6 +80,8 @@ export class Store {
           project_id: project.id,
           name: value.name,
           phase: value.phase,
+          createdAt: value.createdAt,
+          updatedAt: value.updatedAt,
           status: value.status
         };
       });
@@ -104,6 +108,8 @@ export class Store {
       project_id: projectId,
       name: value.name,
       phase: value.phase,
+      createdAt: value.createdAt,
+      updatedAt: value.updatedAt,
       status: value.status
     };
     const root = directory(join(projectRoot(project.folder), 'tasks')),

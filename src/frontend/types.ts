@@ -1,5 +1,5 @@
 export interface Project { id: string; name: string; folder: string }
-export interface Task { id: string; projectId: string; name: string; phase: string; status: string }
+export interface Task { createdAt?: string | null; updatedAt?: string | null; id: string; projectId: string; name: string; phase: string; status: string }
 export interface Document { path?: string; name: string; content: string; version: number }
 export interface TaskDetail { task: Task; documents: Document[] }
 export interface AppState { projects: Project[]; tasks: Task[] }

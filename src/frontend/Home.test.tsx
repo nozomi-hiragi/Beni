@@ -151,7 +151,8 @@ describe('task list sorting', () => {
       throw new Error(`Unexpected request: ${path}`);
     }));
     const view = render(() => <Home query="" onOpenTask={vi.fn()} />);
-    await screen.findByRole('cell', { name: '#019a0000-0000-7100-8000-000000000004' });
+    await screen.findAllByRole('cell', { name: 'B' });
+    expect(screen.queryByRole('columnheader', { name: 'ID' })).toBeNull();
     const ids = () => [...view.container.querySelectorAll('tbody tr')].map(row => row.getAttribute('data-id'));
     fireEvent.click(screen.getByRole('button', { name: 'タスク名' }));
     expect(ids()).toEqual(['019a0000-0000-7100-8000-000000000002', '019a0000-0000-7100-8000-000000000001', '019a0000-0000-7100-8000-000000000004', '019a0000-0000-7100-8000-000000000003']);
@@ -162,4 +163,35 @@ describe('task list sorting', () => {
     fireEvent.click(screen.getByRole('button', { name: 'タスク名' }));
     expect(ids()).toEqual(['019a0000-0000-7100-8000-000000000001', '019a0000-0000-7100-8000-000000000002', '019a0000-0000-7100-8000-000000000003', '019a0000-0000-7100-8000-000000000004']);
   });
+});
+
+it('sorts creation dates newest first, preserves equal dates, and keeps unknown dates last', async () => {
+  const tasks = [
+    { id: '1', name: '古い', createdAt: '2026-01-01T01:00:00Z', updatedAt: '2026-03-01T01:00:00Z' },
+    { id: '2', name: '新しい A', createdAt: '2026-01-02T01:00:00Z', updatedAt: '2026-02-01T01:00:00Z' },
+    { id: '3', name: '新しい B', createdAt: '2026-01-02T01:00:00Z', updatedAt: '2026-02-01T01:00:00Z' },
+    { id: '4', name: '不明', createdAt: null, updatedAt: null },
+    { id: '5', name: '欠落' },
+  ].map(task => ({ ...task, projectId: 'project', phase: 'requirements', status: 'idle' }));
+  vi.stubGlobal('fetch', vi.fn(async () => json({ projects: [], tasks })));
+  const view = render(() => <Home query="" onOpenTask={vi.fn()} />);
+  await screen.findByRole('cell', { name: '古い' });
+  const names = () => [...view.container.querySelectorAll('tbody tr')].map(row => row.firstElementChild!.textContent);
+  const date = view.container.querySelector('time')!;
+  expect(date.getAttribute('datetime')).toBe('2026-01-02T01:00:00Z');
+  expect(date.textContent).toBe(new Intl.DateTimeFormat('ja-JP', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).format(new Date('2026-01-02T01:00:00Z')));
+  fireEvent.click(screen.getByRole('button', { name: '作成日' }));
+  expect(names()).toEqual(['新しい B', '新しい A', '古い', '欠落', '不明']);
+  expect(screen.getByRole('columnheader', { name: '作成日' }).getAttribute('aria-sort')).toBe('descending');
+  fireEvent.click(screen.getByRole('button', { name: '作成日' }));
+  expect(names()).toEqual(['古い', '新しい B', '新しい A', '欠落', '不明']);
+  expect(screen.getByRole('columnheader', { name: '作成日' }).getAttribute('aria-sort')).toBe('ascending');
+  fireEvent.click(screen.getByRole('button', { name: '更新日' }));
+  expect(names()).toEqual(['古い', '新しい B', '新しい A', '欠落', '不明']);
+  expect(screen.getByRole('columnheader', { name: '更新日' }).getAttribute('aria-sort')).toBe('descending');
+  fireEvent.click(screen.getByRole('button', { name: '更新日' }));
+  expect(names()).toEqual(['新しい B', '新しい A', '古い', '欠落', '不明']);
+  fireEvent.click(screen.getByRole('button', { name: '作成日' }));
+  expect(names()).toEqual(['新しい B', '新しい A', '古い', '欠落', '不明']);
+  expect(screen.getByRole('columnheader', { name: '作成日' }).getAttribute('aria-sort')).toBe('descending');
 });

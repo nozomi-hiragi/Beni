@@ -63,10 +63,10 @@ export default function Workspace(props: WorkspaceProps) {
     if (current && current.projectId === project && !list.some(task => task.id === current.id)) list.unshift(current);
     return list;
   });
-  const taskLabel = (task: Task) => `#${task.id} ${task.name}`;
+  const taskLabel = (task: Task) => task.name;
   const taskName = (id: string) => {
     const task = taskOptions().find(item => item.id === id);
-    return task ? taskLabel(task) : `#${id}`;
+    return task ? taskLabel(task) : 'タスク';
   };
   const documents = createMemo(() => detail()?.documents ?? []);
   const documentLabel = (document: Document) => documents().filter(item => item.name === document.name).length > 1 ? `${document.name} · v${document.version}` : document.name;

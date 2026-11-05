@@ -578,3 +578,30 @@ test('clone rejects source data reached through an ancestor alias before creatin
     });
   }
 });
+
+test('task rows expose canonical creation dates including unknown dates', () => {
+  const f = fixture();
+  const store = new Store(f.path);
+  try {
+    const project = store.createProject('Demo', f.folder);
+    const task = store.createTask(project.id, 'Task');
+    const path = join(f.folder, '.beni', 'tasks', task.id, 'task.json');
+    const data = JSON.parse(readFileSync(path, 'utf8'));
+    expect(task.createdAt).toBe(data.createdAt);
+    expect(task.updatedAt).toBe(data.updatedAt);
+    data.createdAt = '2026-01-02T03:04:05.000Z';
+    data.updatedAt = '2026-02-03T04:05:06.000Z';
+    writeFileSync(path, JSON.stringify(data));
+    expect(store.tasks(project.id)[0]!.createdAt).toBe(data.createdAt);
+    expect(store.task(task.id)!.createdAt).toBe(data.createdAt);
+    expect(store.task(task.id)!.updatedAt).toBe(data.updatedAt);
+    data.createdAt = null;
+    data.updatedAt = null;
+    writeFileSync(path, JSON.stringify(data));
+    expect(store.task(task.id)!.createdAt).toBeNull();
+    expect(store.task(task.id)!.updatedAt).toBeNull();
+  } finally {
+    store.close();
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
