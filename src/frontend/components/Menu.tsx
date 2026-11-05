@@ -16,7 +16,7 @@ export interface MenuProps {
 }
 
 export default function Menu(props: MenuProps) {
-  return <header class="flex min-h-16 flex-wrap items-center gap-3 border-b border-base-300 bg-base-100 px-4 py-3 sm:px-6">
+  return <header class="flex min-h-10 flex-wrap items-center gap-3 border-b border-base-300 bg-base-100 px-4 py-2">
     <Show when={props.showHome}>
       <button type="button" class="btn btn-ghost btn-square btn-sm" aria-label="ホームへ戻る" onClick={props.onHome}>
         <MenuIcon><path d="M3 10.5 12 3l9 7.5" /><path d="M5.5 9v11h13V9" /><path d="M9.5 20v-6.5h5V20" /></MenuIcon>

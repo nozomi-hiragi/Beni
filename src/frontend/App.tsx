@@ -53,7 +53,7 @@ function ProjectScreen(props: { id: string; task?: string; invalidTask: boolean;
     <Show when={state() && !project()}><p role="alert">プロジェクトが見つかりません</p></Show>
     <Show when={project()}>
       <Show when={!props.invalidTask && validTask()} fallback={<p role="alert">このプロジェクトのタスクが見つかりません</p>}>
-        <Workspace onTaskDeleted={id => setState(previous => previous && {...previous, tasks: previous.tasks.filter(task => task.id !== id)})} projectId={props.id} taskId={props.task} onTaskChange={changeTask} onHome={props.onHome} />
+        <Workspace onTaskDeleted={id => setState(previous => previous && { ...previous, tasks: previous.tasks.filter(task => task.id !== id) })} projectId={props.id} taskId={props.task} onTaskChange={changeTask} onHome={props.onHome} />
       </Show>
     </Show>
   </>;
@@ -78,9 +78,9 @@ export default function App() {
   });
   return <div classList={{ 'instructions-shell': route().kind === 'instructions' }}>
     <Menu title={route().kind === 'project' ? (projectTitle()?.id === projectId() ? projectTitle()!.name : 'プロジェクト') : route().kind === 'settings' ? '設定' : route().kind === 'instructions' ? 'インストラクション管理' : 'Beni'} showHome={route().kind !== 'home'} query={query()} onHome={home} onQueryChange={setQuery} onInstructions={() => navigate('/instructions')} onSettings={() => navigate('/settings')} />
-    <main class="mx-auto w-full max-w-screen-2xl px-4 py-6 sm:px-6">
-      <Show when={route().kind === 'home'}><Home query={query()} onOpenProject={project => { setProjectTitle({id:project.id,name:project.name}); navigate(`/project/${project.id}`); }} onOpenTask={(task, project) => { setProjectTitle({id:project.id,name:project.name}); navigate(`/project/${project.id}?task=${task.id}`); }} /></Show>
-      <Show when={projectId()} keyed>{id => <ProjectScreen id={id} task={projectRoute()?.task} invalidTask={projectRoute()?.invalidTask ?? false} onHome={home} onTitle={name => setProjectTitle({id,name})} onTaskChange={task => navigate(`/project/${id}${task === undefined ? '' : `?task=${task}`}`)} />}</Show>
+    <main class="mx-auto w-full px-2 py-2">
+      <Show when={route().kind === 'home'}><Home query={query()} onOpenProject={project => { setProjectTitle({ id: project.id, name: project.name }); navigate(`/project/${project.id}`); }} onOpenTask={(task, project) => { setProjectTitle({ id: project.id, name: project.name }); navigate(`/project/${project.id}?task=${task.id}`); }} /></Show>
+      <Show when={projectId()} keyed>{id => <ProjectScreen id={id} task={projectRoute()?.task} invalidTask={projectRoute()?.invalidTask ?? false} onHome={home} onTitle={name => setProjectTitle({ id, name })} onTaskChange={task => navigate(`/project/${id}${task === undefined ? '' : `?task=${task}`}`)} />}</Show>
       <Show when={route().kind === 'settings'}><CodexSettings /></Show>
       <Show when={route().kind === 'instructions'}><Instructions /></Show>
       <Show when={route().kind === 'not-found'}><p role="alert">画面が見つかりません</p></Show>
