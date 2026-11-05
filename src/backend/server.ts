@@ -59,9 +59,14 @@ const projectForScope = (store:Store,projectId:unknown,taskId:unknown) => {
   return project;
  };
 export function createHandler(store: Store, initialFolder = homedir(), chat = new ChatService(projectResolver(store)), publicOrigin?: string, terminals = new TerminalService(), taskEventsChanged:(p:string,t:string)=>void=()=>{}) {
- chat.setImplementationFinished((p,t)=>{const task=store.task(t);if(task?.phase==='implementation'&&task.status!=='completed'){store.selectTaskPhase(p,t,'implementation','retrospective');taskEventsChanged(p,t)}});
+ chat.setExecutionFinished((p,t)=>{const task=store.task(t);if(task?.phase==='execution'&&task.status!=='completed'){store.selectTaskPhase(p,t,'execution','retrospective');taskEventsChanged(p,t)}});
  chat.setTaskActivity((p,t)=>store.touchTask(p,t));
- chat.setTaskEvents({capture:(p,t)=>store.captureTaskHistory(p,t),events:(p,t,after,through,limit)=>store.taskEvents(p,t,after,through,limit)});
+ chat.setTaskEvents({
+  capture:(p,t,phase,operationId)=>store.captureTaskHistory(p,t,phase,operationId),
+  events:(p,t,after,through,limit)=>store.projectEvents(p,{after,through,limit,...(t===null?{}:{taskId:t})}),
+  event:(p,id)=>store.projectEvent(p,id),change:(p,id)=>store.projectFileChange(p,id),version:(p,path,id)=>store.projectFileVersion(p,path,id),
+  append:(p,input)=>{const event=store.recordProjectEvent(p,input);if(event.taskId!==null)taskEventsChanged(p,event.taskId);return event}
+ });
  const access=requestAccess(publicOrigin);
  const scope=(p:unknown,t:unknown)=>projectForScope(store,p,t);
  return async (request: Request): Promise<Response> => {
@@ -80,10 +85,10 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
    const packMatch=url.pathname.match(/^\/api\/chat\/packs(?:\/([^/]+))?$/);
    if(packMatch){const p=url.searchParams.get('projectId');const raw=url.searchParams.get('taskId');const t=raw;if(!scope(p,t))return json({error:'会話が見つかりません'},404);const phase=url.searchParams.get('phase');if(!validChatPhase(t,phase))return json({error:'フェーズを確認してください'},400);try{const id=packMatch[1]===undefined?undefined:decodePackId(packMatch[1]);if(id!==undefined&&!validId(id))return json({error:'入力を確認してください'},400);const after=url.searchParams.get('afterPackId');if(after!==null&&!validId(after))return json({error:'入力を確認してください'},400);return json(id?await chat.pack(p as string,t,id,chatPhase(t,phase)):await chat.packs(p as string,t,url.searchParams.get('afterPackId')??undefined,chatPhase(t,phase)))}catch(error){const m=error instanceof Error?error.message:'';return json({error:m==='not found'?'パックが見つかりません':m==='not closed'?'生成中のパックです':'パックを読み込めませんでした'},m==='not found'?404:m==='not closed'?409:500)}}
    if (url.pathname === '/api/chat') {const p=url.searchParams.get('projectId');const raw=url.searchParams.get('taskId');const t=raw;if(!scope(p,t))return json({error:'会話が見つかりません'},404);const phase=url.searchParams.get('phase');if(!validChatPhase(t,phase))return json({error:'フェーズを確認してください'},400);try{const {packs,...conversation}=await chat.get(p as string,t,chatPhase(t,phase));return json(conversation)}catch{return json({error:'履歴を読み込めませんでした'},500)}}
-   if (url.pathname === '/api/state') {for(const task of store.tasks().map(projectTask))if(task.phase==='implementation')await chat.recoverImplementation(task.projectId,task.id);return json({projects:store.projects(),tasks:store.tasks().map(projectTask)})}
+   if (url.pathname === '/api/state') {for(const task of store.tasks().map(projectTask))if(task.phase==='execution')await chat.recoverExecution(task.projectId,task.id);return json({projects:store.projects(),tasks:store.tasks().map(projectTask)})}
    const eventMatch=url.pathname.match(/^\/api\/tasks\/([^/]+)\/events(?:\/versions\/([^/]+))?$/);
    if(eventMatch){
-    const p=url.searchParams.get('projectId'),t=eventMatch[1]!;if(!scope(p,t))return json({error:'タスクが見つかりません'},404);
+    const p=url.searchParams.get('projectId'),t=eventMatch[1]!;if(!validTaskId(t)||!scope(p,null))return json({error:'タスクが見つかりません'},404);
     try {
      if(eventMatch[2]!==undefined){if(!/^[a-f0-9]{64}$/.test(eventMatch[2]))return json({error:'版を確認してください'},400);return json(store.taskEventVersion(p as string,t,eventMatch[2]))}
      const integer=(name:string,fallback?:number)=>{const value=url.searchParams.get(name);if(value===null)return fallback;if(!/^(0|[1-9][0-9]*)$/.test(value)||!Number.isSafeInteger(Number(value)))throw Error('invalid cursor');return Number(value)};
@@ -92,7 +97,7 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
     }catch(error){const message=error instanceof Error?error.message:'';return json({error:'変更履歴を取得できませんでした'},message==='invalid cursor'?400:message.includes('not found')||message.includes('Unknown')?404:500)}
    }
    const match = url.pathname.match(/^\/api\/tasks\/([^/]+)$/);
-   if (match) { if(!validTaskId(match[1]))return json({error:'タスクが見つかりません'},404);const task=store.task(match[1]); if (!task) return json({error:'タスクが見つかりません'},404); const t=projectTask(task); try {const project=scope(t.projectId,t.id)!;const path=documentFolder(store,project,t);if(t.phase==='implementation')await chat.recoverImplementation(t.projectId,t.id);const documents=readTaskDocuments(path);return json({task:projectTask(store.task(t.id)),documents,canStart:implementationPlanReady(documents)});}catch{return json({error:'文書を読み込めませんでした'},500)} }
+   if (match) { if(!validTaskId(match[1]))return json({error:'タスクが見つかりません'},404);const task=store.task(match[1]); if (!task) return json({error:'タスクが見つかりません'},404); const t=projectTask(task); try {const project=scope(t.projectId,t.id)!;const path=documentFolder(store,project,t);if(t.phase==='execution')await chat.recoverExecution(t.projectId,t.id);const documents=readTaskDocuments(path);return json({task:projectTask(store.task(t.id)),documents,canStart:implementationPlanReady(documents)});}catch{return json({error:'文書を読み込めませんでした'},500)} }
    return json({error:'見つかりません'},404);
    } catch {return json({error:'保存データを読み込めませんでした'},500)}
   }
@@ -114,7 +119,7 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
    if (url.pathname === '/api/chat/send' || url.pathname === '/api/chat/interrupt') {
     const p=input.projectId,t=input.taskId??null;const project=scope(p,t);if(!project)return json({error:'会話が見つかりません'},404);
     if(!validChatPhase(t,input.phase))return json({error:'フェーズを確認してください'},400);
-    if(t!==null&&(store.task(t as string)!.status==='completed'||store.task(t as string)!.phase==='implementation'))return json({error:'現在のタスクには送信できません'},409);
+    if(t!==null&&(store.task(t as string)!.status==='completed'||store.task(t as string)!.phase==='execution'))return json({error:'現在のタスクには送信できません'},409);
     try {if(url.pathname.endsWith('/interrupt')){await chat.interrupt(p as string,t as string|null,chatPhase(t,input.phase));return json({ok:true})}
      if((input.provider!==undefined&&!isProvider(input.provider))||typeof input.content!=='string'||!input.content.trim()||!(input.model===null||(typeof input.model==='string'&&input.model.length<=256)))return json({error:'入力を確認してください'},400);
      if(t!==null&&store.task(t as string)!.phase!==input.phase)return json({error:'フェーズが変更されています'},409);
@@ -130,7 +135,7 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
    if (url.pathname === '/api/projects') {if(typeof input.name!=='string'||typeof input.folder!=='string'||!isAbsolute(input.folder)) return json({error:'名前と絶対パスを入力してください'},400);if(!input.name.trim())return json({error:'名前を入力してください'},400);return json(store.createProject(input.name,input.folder),201)}
    const phaseMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/(phase|start|stop|complete|reopen)$/);
    if (phaseMatch) {
-    if (!isTaskPhase(input.phase) || !validProjectId(input.projectId) || (phaseMatch[2]==='phase'&&(!isTaskPhase(input.target)||!['requirements','documents','implementation-plan'].includes(input.target)))) return json({error:'フェーズを確認してください'},400);
+    if (!isTaskPhase(input.phase) || !validProjectId(input.projectId) || (phaseMatch[2]==='phase'&&(!isTaskPhase(input.target)||!['requirements','documents','implementation'].includes(input.target)))) return json({error:'フェーズを確認してください'},400);
     const taskId=phaseMatch[1]!, projectId=input.projectId, expectedPhase=input.phase;
     if(phaseMatch[2]==='start'&&((input.provider!==undefined&&!isProvider(input.provider))||!(input.model===null||(typeof input.model==='string'&&input.model.length<=256))))return json({error:'入力を確認してください'},400);
     if (!validTaskId(taskId) || !scope(input.projectId, taskId)) return json({error:'タスクが見つかりません'},404);
@@ -140,11 +145,11 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
       const action=phaseMatch[2];
       if(action==='phase'&&input.phase==='retrospective')throw Error('phase conflict');
       if(action==='start'&&input.phase==='retrospective')throw Error('phase conflict');
-      if((action==='stop')!==(input.phase==='implementation'))throw Error('phase conflict');
+      if((action==='stop')!==(input.phase==='execution'))throw Error('phase conflict');
       if(action==='start'&&!implementationPlanReady(readTaskDocuments(store.taskDocumentFolder(projectId,taskId))))throw Error('plan required');
-      return store.selectTaskPhase(projectId,taskId,expectedPhase,action==='start'?'implementation':action==='stop'?'implementation-plan':input.target as TaskPhase);
+      return store.selectTaskPhase(projectId,taskId,expectedPhase,action==='start'?'execution':action==='stop'?'implementation':input.target as TaskPhase);
      };
-     const task=phaseMatch[2]==='complete'||phaseMatch[2]==='reopen'?chat.withIdleTask(projectId,taskId,()=>{if(expectedPhase!=='retrospective')throw Error('phase conflict');return store.setTaskCompleted(projectId,taskId,phaseMatch[2]==='complete')}):phaseMatch[2]==='start'?await chat.startTask(projectId,taskId,change,()=>{if(store.task(taskId)?.phase==='implementation'){store.selectTaskPhase(projectId,taskId,'implementation',expectedPhase);taskEventsChanged(projectId,taskId)}},input.model as string|null,scope(projectId,taskId)!.folder,store.taskDocumentFolder(projectId,taskId),input.provider as Provider|undefined):phaseMatch[2]==='stop'?await chat.stopTask(projectId,taskId,change,()=>{if(expectedPhase!=='implementation'||store.task(taskId)!.phase!==expectedPhase)throw Error('phase conflict')}):chat.withIdleTask(projectId,taskId,change);
+     const task=phaseMatch[2]==='complete'||phaseMatch[2]==='reopen'?chat.withIdleTask(projectId,taskId,()=>{if(expectedPhase!=='retrospective')throw Error('phase conflict');return store.setTaskCompleted(projectId,taskId,phaseMatch[2]==='complete')}):phaseMatch[2]==='start'?await chat.startTask(projectId,taskId,change,()=>{if(store.task(taskId)?.phase==='execution'){store.selectTaskPhase(projectId,taskId,'execution',expectedPhase);taskEventsChanged(projectId,taskId)}},input.model as string|null,scope(projectId,taskId)!.folder,store.taskDocumentFolder(projectId,taskId),input.provider as Provider|undefined):phaseMatch[2]==='stop'?await chat.stopTask(projectId,taskId,change,()=>{if(expectedPhase!=='execution'||store.task(taskId)!.phase!==expectedPhase)throw Error('phase conflict')}):chat.withIdleTask(projectId,taskId,change);
      taskEventsChanged(input.projectId,taskId);
      return json(projectTask(task));
     } catch (error) {
@@ -156,37 +161,37 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
    const deleteMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/delete$/);
    if (deleteMatch) {
     if (!validTaskId(deleteMatch[1]) || !scope(input.projectId, deleteMatch[1])) return json({error:'タスクが見つかりません'},404);
-    try { chat.deleteTask(input.projectId as string, deleteMatch[1]!, () => store.deleteTask(input.projectId as string, deleteMatch[1]!)); return json({ok:true}); }
+    try { chat.deleteTask(input.projectId as string, deleteMatch[1]!, () => store.deleteTask(input.projectId as string, deleteMatch[1]!)); taskEventsChanged(input.projectId as string,deleteMatch[1]!); return json({ok:true}); }
     catch (error) { return error instanceof Error && error.message === 'busy' ? json({error:'チャットの処理中は削除できません'},409) : json({error:'タスクを削除できませんでした'},500); }
    }
    const renameMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/rename$/);
    if (renameMatch) {
     if (typeof input.name !== 'string' || !input.name.trim()) return json({error:'タスク名を入力してください'},400);
     if (!validTaskId(renameMatch[1]) || !scope(input.projectId, renameMatch[1])) return json({error:'タスクが見つかりません'},404);
-    try { return json(projectTask(store.renameTask(input.projectId as string, renameMatch[1]!, input.name))); }
+    try { const task=store.renameTask(input.projectId as string, renameMatch[1]!, input.name); taskEventsChanged(input.projectId as string,renameMatch[1]!); return json(projectTask(task)); }
     catch { return json({error:'タスク名を保存できませんでした'},500); }
    }
    if (url.pathname === '/api/tasks') {if(typeof input.name!=='string'||!validProjectId(input.projectId))return json({error:'タスク名とプロジェクトを確認してください'},400);const project=scope(input.projectId,null);if(!project)return json({error:'プロジェクトが見つかりません'},404);return json(projectTask(store.createTask(input.projectId,input.name)),201)}
    return json({error:'見つかりません'},404);
-  } catch(error) {if(error instanceof Error&&error.message.startsWith('Duplicate live project copy'))return json({error:'同じIDのプロジェクトが登録済みです。別プロジェクトにする場合は bun run clone:project を使って複製してください'},409);return json({error:'入力または保存先を確認してください'},400)}
+  } catch(error) {if(error instanceof Error&&error.message.startsWith('Duplicate live project copy'))return json({error:'同じIDのプロジェクトが登録済みです'},409);return json({error:'入力または保存先を確認してください'},400)}
  };
 }
 export function createServerOptions(store:Store,initialFolder=homedir(),chat=new ChatService(projectResolver(store)),publicOrigin?:string, terminals=new TerminalService()) {
  const eventListeners=new Map<string,Set<(event:any)=>void>>();
- const notifyTaskEvents=(p:string,t:string)=>{const page=store.taskEvents(p,t);for(const listener of eventListeners.get(JSON.stringify([p,t]))??[])listener({name:'task.events.changed',data:{lastEventId:page.through}})};
+ const notifyTaskEvents=(p:string,t:string)=>{const cursor=store.projectEventCursor(p);for(const listener of eventListeners.get(JSON.stringify([p,t]))??[])listener({name:'task.events.changed',data:{lastEventId:cursor}})};
  const access=requestAccess(publicOrigin);
  const scope=(p:string,t:string|null)=>projectForScope(store,p,t);
  const websocket=communicationSocket({
   'task-events':{
-   validate:s=>s.phase===undefined&&s.terminalId===undefined&&s.taskId!==null&&!!scope(s.projectId,s.taskId),
+   validate:s=>s.phase===undefined&&s.terminalId===undefined&&s.taskId!==null&&!!scope(s.projectId,null),
    subscribe:(s,event,failed)=>{
     const t=s.taskId!,k=JSON.stringify([s.projectId,t]);
-    const path=store.taskDocumentFolder(s.projectId,t);
-    const stop=watchTaskDocuments(path,()=>{try{store.captureTaskHistory(s.projectId,t);notifyTaskEvents(s.projectId,t)}catch{failed()}},failed);
+    const task=store.task(t),live=task?.project_id===s.projectId;
+    const stop=live?watchTaskDocuments(store.taskDocumentFolder(s.projectId,t),()=>{try{store.captureTaskHistory(s.projectId,t);notifyTaskEvents(s.projectId,t)}catch{failed()}},failed):()=>{};
     const listeners=eventListeners.get(k)??new Set();
     eventListeners.set(k,listeners);listeners.add(event);
     return {
-     start:()=>{try{store.captureTaskHistory(s.projectId,t);notifyTaskEvents(s.projectId,t)}catch{failed()}},
+     start:()=>{try{if(live)store.captureTaskHistory(s.projectId,t);notifyTaskEvents(s.projectId,t)}catch{failed()}},
      stop:()=>{stop();listeners.delete(event);if(!listeners.size)eventListeners.delete(k)}
     };
    }

@@ -67,12 +67,12 @@ Beni/data/
 └── tasks/<taskId>/
     ├── task.json                タスク情報
     ├── requirements.md
-    └── implementation-plan.md
+    └── implementation.md
 ```
 
 `BENI_DATA_DIR` は `.beni/` の場所を変更しません。会話は平文で保存されます。実データを公開リポジトリへ追加しないでください。
 
-旧形式のDBがある場合、サーバーは移行を案内して停止します。Beniを停止した状態で [データの移行手順](docs/data/migration.md) に従って移行してください。サーバー起動時に旧データを自動移行しません。
+旧形式のDBは非対応です。検出した場合は、内容を変更せず起動を停止します。
 
 保存形式とIDの規則は [データ仕様](docs/data/README.md) を参照してください。
 

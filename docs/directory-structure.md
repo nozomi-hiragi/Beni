@@ -15,16 +15,15 @@ Beni/
 │   │   ├── claude.test.ts            Claude の受信・権限設定・中断・接続失敗のテスト
 │   │   ├── chat.test.ts              会話の保存・再開・中断・分離、接続エラーのテスト
 │   │   ├── data.ts                   メタデータ検証・保存と文書だけ残ったタスクの復元
-│   │   ├── migration.ts              旧データの移行・照合・バックアップと.beniの複製
-│   │   ├── data-cli.ts               データ移行・複製コマンドの入口
 │   │   ├── documents.ts              タスク用 Markdown の作成・読み取り・変更監視
-│   │   ├── task-history.ts           タスクの変更イベント・文書の版・履歴取得
+│   │   ├── project-events.ts         プロジェクトイベント・文書差分・版の復元
+│   │   ├── embedded-tools.ts         LLM向けイベント参照ツールの定義・入力検証
 │   │   ├── terminal.ts               PTY・端末画面・操作権・終了処理
 │   │   ├── terminal.test.ts          シェルの存続・排他・画面復元・HTTP/WSのテスト
 │   │   ├── events.ts                 共通 WS の接続・購読・送信上限と解放処理
 │   │   ├── store/                    データベースへのアクセス
 │   │   │   ├── index.ts              SQLiteの登録情報とプロジェクト内のタスク管理
-│   │   │   └── index.test.ts         メタデータ・復元・移行・複製のテスト
+│   │   │   └── index.test.ts         メタデータ・復元のテスト
 │   │   └── test/                     バックエンドのテスト補助
 │   │       ├── fake-codex.ts          実サービスを使わず Codex 通信を模擬する実行ファイル
 │   │       └── fake-claude.ts         実サービスを使わず Claude 通信を模擬する実行ファイル
@@ -74,16 +73,13 @@ Beni/
 ├── docs/                             仕様書、画面モック、構成の説明
 │   ├── README.md                     ドキュメントの目次
 │   ├── directory-structure.md        この文書
-│   ├── data/                         データの仕様と設計・移行
+│   ├── data/                         データの仕様
 │   │   ├── README.md                 保存責任・正本・データの関係
-│   │   ├── migration.md              全体の設計・移行と検証
-│   │   ├── sqlite/                   SQLite の仕様と設計・移行
-│   │   │   ├── README.md             保存責任と参照の方針
-│   │   │   └── migration.md          現行テーブル・ID・旧履歴
-│   │   └── beni/                     プロジェクト内データの仕様と設計・移行
+│   │   ├── sqlite/                   SQLite の仕様
+│   │   │   └── README.md             保存責任と参照の方針
+│   │   └── beni/                     プロジェクト内データの仕様
 │   │       ├── README.md             文書の正本と復元の方針
-│   │       ├── chat.md               .beni/chat の会話保存仕様
-│   │       └── migration.md          現行配置・会話移行・未登録タスク
+│   │       └── chat.md               .beni/chat の会話保存仕様
 │   ├── communication/                通信仕様
 │   │   ├── README.md                 方針と文書の目次
 │   │   ├── http-api.md               HTTP API とパック同期の契約
@@ -110,8 +106,7 @@ Beni/
 │   └── mockups/                      画面・部品の見た目を検討する HTML と CSS
 │       └── components/               部品ごとのモック
 ├── data/                             [データ] Beni 自身の既定保存先。実行時に作成
-│   ├── beni.sqlite                   プロジェクトの登録情報（関連ファイルも同じ場所）
-│   └── migrations/                   旧データ移行のバックアップとID対応表
+│   └── beni.sqlite                   プロジェクトの登録情報（関連ファイルも同じ場所）
 ├── node_modules/                     [生成] インストールした依存パッケージ
 ├── README.md                         概要、起動方法、保存先、機能、テスト方法
 ├── AGENTS.md                         このリポジトリで作業するエージェント向けの指示

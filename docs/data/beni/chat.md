@@ -1,6 +1,6 @@
 # .beni/chat の会話
 
-保存仕様を定義します。旧形式と移行処理は [会話の移行](migration.md#会話の移行) に分けます。
+保存仕様を定義します。
 
 会話はバックエンドで永続化し、プロジェクトのジェネラル会話とタスクのフェーズごとの会話を区別します。JSONは人が直接開いて確認できる形式とします。
 
@@ -16,9 +16,17 @@
 
 ## フェーズ別の保存
 
-`phase` は `requirements`、`documents`、`implementation-plan`、`implementation`、`retrospective`。各会話は独立した会話ID・発言・パック列・CLIセッション・`lastEventId` を持つ。未送信のフェーズは空の会話として扱い、保存ファイルは必要時に作成する。Generalのphaseはnull。
+`phase` は `requirements`、`documents`、`implementation`、`execution`、`retrospective`。各会話は独立した会話ID・発言・パック列・CLIセッション・`lastEventId` を持つ。未送信のフェーズは空の会話として扱い、保存ファイルは必要時に作成する。Generalのphaseはnull。`lastEventId` はプロジェクトイベントについてLLMが確認完了を通知した上限であり、送信受付だけでは更新しない。
 
-旧タスク会話は要件定義の会話へ引き継ぐ。具体的な移行・競合時の扱いは [会話の移行](migration.md#フェーズ別会話への移行) に定義する。変更イベントと本文の版は [タスクの変更履歴](../../objects/task-events.md) に従う。
+| フェーズ | チャットファイル | 対応するタスク文書 |
+| --- | --- | --- |
+| 要件定義 | `requirements.json` | `requirements.md` |
+| 仕様整理 | `documents.json` | `documents.md` |
+| 実装手順 | `implementation.json` | `implementation.md` |
+| 実装中 | `execution.json` | 専用文書なし |
+| 反省会 | `retrospective.json` | `retrospective.md` |
+
+変更イベントと本文の版は [タスクの変更履歴](../../objects/task-events.md) に従う。
 
 ## 選択モデル
 
@@ -30,4 +38,6 @@
 
 メッセージの `provider` は `codex` または `claude`。`selectedModel.provider` と `sessionProvider` の省略は既存データとの互換のため `codex` として扱う。`sessionProvider` は現在のCLIセッションの接続先を示す。接続先を切り替えて送信するときはセッションIDをリセットし、保存済み本文を参考履歴として新しいセッションへ渡す。元のメッセージとパックは書き換えない。
 
-CLIプロセスの起動成功だけではセッション成立・入力受理と見なさない。Claudeの初期化と入力受理を確認してからセッションと変更イベントのカーソルを進める。新規起動が受理前に失敗した場合は仮のセッションIDを再開に使わず、次の明示的な送信で新規セッションを作る。
+CLIプロセスの起動成功だけではセッション成立・入力受理と見なさない。Claudeの初期化と入力受理を確認してからセッションを保存する。イベントの確認済み位置は、別途 `acknowledge_events` を受けたときだけ進める。新規起動が受理前に失敗した場合は仮のセッションIDを再開に使わず、次の明示的な送信で新規セッションを作る。
+
+`eventToolsVersion: 1` は、イベント参照ツールを登録したセッションであることを示す。未登録のCodexセッションへツールを後付けせず、新しいセッションへ保存済み会話本文を引き継ぐ。

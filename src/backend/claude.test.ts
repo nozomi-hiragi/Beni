@@ -3,6 +3,7 @@ import {mkdtemp,readFile,realpath,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {ClaudeRpc,ClaudeRejected,claudeModels,claudeStatus} from './claude';
+import {eventTools,toolResult} from './embedded-tools';
 
 const fake=join(import.meta.dir,'test/fake-claude.ts');
 async function until(fn:()=>boolean){for(let i=0;i<100;i++){if(fn())return;await Bun.sleep(10)}throw Error('Timed out')}
@@ -91,4 +92,19 @@ test('Claude persists distinct session IDs, resumes the selected session and lim
   for(const call of calls){for(const flag of ['--restricted','--safe-mode','--strict-mcp-config','--no-chrome','--disable-slash-commands'])expect(call.args).toContain(flag);expect(call.args[call.args.indexOf('--permission-mode')+1]).toBe('dontAsk');expect(call.args[call.args.indexOf('--permission-prompts')+1]).toBe('none');expect(call.args).not.toContain('--dangerously-skip-permissions');expect(call.args).toContain('Keep task documents current.');expect(call.cwd).toBe(root)}
   expect(calls[0].args[calls[0].args.indexOf('--tools')+1]).toBe('Read,Glob,Grep,Write,Edit,Bash');expect(calls[1].args).toContain('--resume');expect(calls[2].args[calls[2].args.indexOf('--tools')+1]).toBe('Read,Glob,Grep');
  }finally{delete process.env.FAKE_CLAUDE_LOG;await rm(root,{recursive:true,force:true})}
+});
+
+test('Claude 内部ツールだけを明示許可し、外部設定とコード実行の制限を維持する',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'beni-claude-embedded-')),log=join(root,'calls.jsonl'),rpc=new ClaudeRpc(fake);process.env.FAKE_CLAUDE_LOG=log;let done=false;const calls:any[]=[];
+ try{
+  rpc.onClose=()=>{done=true};rpc.onToolCall=async params=>{calls.push(params);return toolResult({through:0})};
+  const thread=await rpc.request('thread/start',{cwd:root,model:'sonnet',sandbox:'read-only',dynamicTools:eventTools});
+  await rpc.request('turn/start',{threadId:thread.thread.id,model:'sonnet',input:[{type:'text',text:'event tools'}]});await until(()=>done);
+  expect(calls.map(call=>call.tool)).toEqual(['list_events','acknowledge_events']);expect(calls.every(call=>call.threadId===thread.thread.id)).toBe(true);
+  const invocation=JSON.parse((await readFile(log,'utf8')).trim()),args=invocation.args;
+  for(const flag of ['--restricted','--safe-mode','--strict-mcp-config','--no-chrome','--disable-slash-commands'])expect(args).toContain(flag);
+  expect(args[args.indexOf('--setting-sources')+1]).toBe('');expect(args[args.indexOf('--permission-prompts')+1]).toBe('none');expect(args[args.indexOf('--tools')+1]).toBe('Read,Glob,Grep');expect(args[args.indexOf('--input-format')+1]).toBe('stream-json');
+  expect(JSON.parse(args[args.indexOf('--mcp-config')+1])).toEqual({mcpServers:{beni:{type:'sdk',name:'beni'}}});expect(args[args.indexOf('--allowedTools')+1].split(',')).toEqual(['Read','Glob','Grep',...eventTools.map(tool=>`mcp__beni__${tool.name}`)]);
+  expect(JSON.parse(args[args.indexOf('--settings')+1]).disableAllHooks).toBe(true);
+ }finally{rpc.close();delete process.env.FAKE_CLAUDE_LOG;await rm(root,{recursive:true,force:true})}
 });
