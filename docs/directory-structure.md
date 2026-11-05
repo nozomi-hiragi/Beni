@@ -95,6 +95,7 @@ Beni/
 │   │   ├── project.md                プロジェクトの持ち物と操作
 │   │   ├── task.md                   タスクと文書
 │   │   ├── chat.md                   会話・発言・返信パック
+│   │   ├── task-events.md            フェーズ間の変更履歴と文書の版
 │   │   └── terminal.md               ターミナルとシェル
 │   ├── features/                     機能ごとの仕様
 │   │   ├── llm-chat.md               LLM チャット連携

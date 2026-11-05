@@ -14,14 +14,19 @@
 ├── legacy-history.json           旧DBの履歴（移行した場合のみ）
 ├── chat/
 │   ├── general.json              ジェネラル会話
-│   └── <taskId>.json             タスク会話
+│   └── <taskId>/
+│       └── <phase>.json          フェーズ別のタスク会話
 └── tasks/
     └── <taskId>/
         ├── task.json             タスク情報
         ├── requirements.md       要件定義
         ├── documents.md          仕様整理（資料・仕様の目次）
         ├── implementation-plan.md 実装手順
-        └── *.md                  追加文書（資料または仕様）
+        ├── *.md                  追加文書（資料または仕様）
+        └── .history/
+            ├── index.json        変更イベントと観測状態
+            └── versions/
+                └── <sha256>.md   文書の各版
 ```
 
 メタデータと会話はJSON、文書本文はMarkdownの実ファイルに保存します。プロジェクト専用SQLiteは追加しません。会話はタスクフォルダーへ置かず、`chat/` にまとめます。
@@ -30,7 +35,7 @@
 
 ## タスクID
 
-タスクIDは [共通ID規則](../README.md#idの共通規則)に従うUUIDv7ベースのID（第3グループ `7100`）とし、`task.json` のID、タスクフォルダー名、会話JSONのファイル名に同じ値を使います。プロジェクトIDを連結した別のタスクUIDは作りません。
+タスクIDは [共通ID規則](../README.md#idの共通規則)に従うUUIDv7ベースのID（第3グループ `7100`）とし、`task.json` のID、タスクフォルダー名、chat配下のタスクフォルダー名に同じ値を使います。プロジェクトIDを連結した別のタスクUIDは作りません。
 
 UUIDv7は生成時刻を含むため、IDによって時刻順に並べやすい形式です。ただし複数環境の時計や同時生成を含む厳密な操作順序の保証には使いません。作成日時は `createdAt` にも記録します。日時はUTCのISO 8601形式で記録します。
 

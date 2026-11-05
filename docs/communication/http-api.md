@@ -15,7 +15,7 @@ HTTP による取得・操作と、チャットのパック同期の契約を定
 
 ## API 一覧
 
-`projectId` とタスクIDは [データの共通ID規則](../data/README.md#idの共通規則) に従う文字列。プロジェクト用とタスク用を区別し、整数IDは受け付けない。チャットの `taskId` は同じプロジェクトのタスク ID または null。GET の会話指定では `taskId` を省略すると一般会話、POST では null を明示する。
+`projectId` とタスクIDは [データの共通ID規則](../data/README.md#idの共通規則) に従う文字列。プロジェクト用とタスク用を区別し、整数IDは受け付けない。チャットの `taskId` は同じプロジェクトのタスク ID または null。タスク会話では `phase` も必須で、Generalではnullまたは省略とする。GET の会話指定では `taskId` を省略すると一般会話、POST では null を明示する。
 
 | メソッド・パス | 入力 | 成功 | 個別の主なエラー |
 | --- | --- | --- | --- |
@@ -23,15 +23,18 @@ HTTP による取得・操作と、チャットのパック同期の契約を定
 | `POST /api/projects` | `{name: string, folder: string}`。名前は空白のみ不可、folder は絶対パス | 201 `Project` | 400 入力・保存先不正 |
 | `POST /api/tasks` | `{projectId: string, name: string}`。空白のみの名前は保存時に拒否 | 201 `Task` | 400 入力不正、404 プロジェクトなし |
 | `POST /api/tasks/:id/delete` | `{projectId: string}` | 200 `{ok: true}`。タスク・文書・タスク会話を削除 | 404 タスクなし・所属不一致、409 チャット実行中、500 削除失敗 |
+| `POST /api/tasks/:id/phase` | `{projectId: string, phase: string, direction?: "next" | "back"}`。現在のフェーズを指定、既定next | 200 移動後の `Task` | 400 入力不正、404 タスクなし・所属不一致、409 実行中・フェーズ不一致・終端 |
 | `POST /api/tasks/:id/rename` | `{projectId: string, name: string}`。名前の前後の空白を除く | 200 更新後の `Task` | 400 名前不正、404 タスクなし・所属不一致、500 保存失敗 |
 | `GET /api/tasks/:id` | パスのタスク ID | 200 `{task: Task, documents: Document[]}` | 404 タスクなし、500 文書取得失敗 |
 | `POST /api/folders/list` | `{path?: string}`。指定時は絶対パス | 200 `FolderList` | 400 パス不正・開けない |
 | `GET /api/codex/status` | なし | 200 `CodexStatus` | 接続失敗時は一部の情報を unknown/null として返す |
-| `GET /api/chat` | query: `projectId`, 任意の `taskId` | 200 `Conversation` | 404 会話対象なし、500 履歴取得失敗 |
-| `POST /api/chat/send` | `{projectId, taskId, content, model}`。content は空白のみ不可、model は256文字以内の文字列か null | 202 `Conversation` | 409 送信中、400 Codex 利用不可・設定不適合、404 対象なし、500 保存・接続失敗 |
-| `POST /api/chat/interrupt` | `{projectId, taskId}` | 200 `{ok: true}` | 409 停止対象なし、404 対象なし、500 保存・接続失敗 |
+| `GET /api/chat` | query: `projectId`, 任意の `taskId`、タスクでは `phase` | 200 `Conversation` | 404 会話対象なし、500 履歴取得失敗 |
+| `POST /api/chat/send` | `{projectId, taskId, phase, content, model}`。content は空白のみ不可、model は256文字以内の文字列か null | 202 `Conversation` | 409 送信中、400 Codex 利用不可・設定不適合、404 対象なし、500 保存・接続失敗 |
+| `POST /api/chat/interrupt` | `{projectId, taskId, phase}` | 200 `{ok: true}` | 409 停止対象なし、404 対象なし、500 保存・接続失敗 |
 
 `chat/send` の 202 は受け付けであり、返答終了ではない。メッセージの送信は `/api/chat/send` を使う。
+
+フェーズは `requirements` → `documents` → `implementation-plan` → `implementation` の順に進む。変更時にエージェントを自動起動しない。
 
 プロジェクト・タスク作成は対応する文書ディレクトリも初期化する。タスク詳細取得でも必要な文書の初期化処理が走る。`GET /api/chat` は実行中でない pending/streaming メッセージを unknown に更新する場合がある。
 
@@ -59,7 +62,7 @@ type ChatMessage = {
   threadId: string | null; sessionId: string | null;
 };
 type Conversation = {
-  version: 1; id: string; projectId: string; taskId: string | null;
+  version: 1; id: string; projectId: string; taskId: string | null; phase: string | null; lastEventId: number;
   threadId: string | null; sessionId: string | null; messages: ChatMessage[];
 };
 ```
@@ -70,12 +73,12 @@ type Conversation = {
 
 ## パック同期 API
 
-共通の会話指定は `{projectId: string, taskId: string | null}`。パック ID は不透明な文字列であり、文字列の大小で並べない。BE が会話内の順序を管理する。
+共通の会話指定は `{projectId: string, taskId: string | null, phase?: string | null}`。パック ID は不透明な文字列であり、文字列の大小で並べない。BE が会話内の順序を管理する。
 
 | メソッド・パス | 入力 | 成功応答 |
 | --- | --- | --- |
-| `GET /api/chat/packs` | query: projectId、任意の taskId、任意の afterPackId | 200 `{packs: [{packId, state}]}`。指定 ID より後を順序どおり返す。省略時は先頭から |
-| `GET /api/chat/packs/:packId` | query: projectId、任意の taskId | 200 `{pack: Pack}`。終了済みパック全文 |
+| `GET /api/chat/packs` | query: projectId、任意の taskId、タスクではphase、任意の afterPackId | 200 `{packs: [{packId, state}]}`。指定 ID より後を順序どおり返す。省略時は先頭から |
+| `GET /api/chat/packs/:packId` | query: projectId、任意の taskId、タスクではphase | 200 `{pack: Pack}`。終了済みパック全文 |
 | `POST /api/chat/packs/:packId/ack` | 会話指定と `{hash: string}` | 200 `{matched: true}` または `{matched: false, pack: Pack}` |
 
 `state` は `streaming` または `closed`。closed は生成処理がそのパックを閉じた状態で、FE の受け取り確定や生成の正常終了とは別。
@@ -136,3 +139,7 @@ status/state は生成状態を表し、本文のハッシュには含めませ�
 `requestId` は1〜128文字の文字列で、同じプロジェクトと要求IDの組み合わせでは新しいシェルを重複作成しません。作成の応答を受け取れなかった場合は一覧で照合し、明示的な再試行にも同じIDを使います。セッションを削除した後に同じ要求IDを再利用しても、新しいシェルは起動しません。要求IDの保持はサーバーが起動している間です。
 
 終了時の `controlToken` は個別シェルの `terminal.state` が現在の所有者へ返した値です。バックエンドは現在の所有者のトークンを照合し、権限を失効させてから終了処理を待ちます。終了済みセッションを一覧から削除する場合も操作権が必要です。
+
+## タスク変更履歴
+
+イベント一覧・文書の版の取得は [変更履歴の取得契約](../objects/task-events.md#取得と通知の契約) に従う。タスクへの送信は現在phaseとの一致を検証し、古い画面から別フェーズへ送信した場合は409。送信準備・実行中はタスク全体で排他とし、別フェーズからの送信や前後へのフェーズ変更を409で拒否する。取得・パック照合は指定したフェーズの会話に限定する。
