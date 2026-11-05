@@ -35,6 +35,7 @@ HTTP による取得・操作と、チャットのパック同期の契約を定
 | `GET /api/claude/status` | なし | 200 `ClaudeStatus` | 接続失敗時はunknown/nullとして返す |
 | `GET /api/chat` | query: `projectId`, 任意の `taskId`、タスクでは `phase` | 200 `Conversation` | 404 会話対象なし、500 履歴取得失敗 |
 | `POST /api/chat/send` | `{projectId, taskId, phase, content, model, provider?}`。content は空白のみ不可、model は256文字以内の文字列か null | 202 `Conversation` | 409 送信中、400 Codex 利用不可・設定不適合、404 対象なし、500 保存・接続失敗 |
+| `POST /api/chat/commands` | `{projectId, taskId, phase?, command, args?, provider?, model?}` | 202 `{command: ChatCommand}` | 400 未対応コマンド・接続先利用不可、404 対象なし、409 実行中・セッションなし・接続先やフェーズ・状態の不一致、500 保存・接続失敗 |
 | `POST /api/chat/interrupt` | `{projectId, taskId, phase}` | 200 `{ok: true}` | 409 停止対象なし、404 対象なし、500 保存・接続失敗 |
 
 タスクチャットの `phase` は `requirements`・`documents`・`implementation`・`execution`・`retrospective` のいずれかとする。
@@ -71,16 +72,36 @@ type ChatMessage = {
   status: 'pending' | 'streaming' | 'completed' | 'failed' | 'interrupted' | 'unknown';
   threadId: string | null; sessionId: string | null; errorCode?: 'MODEL_UNAVAILABLE';
 };
+type ChatCommand = {
+  id: string; name: 'compact' | 'clear' | 'context' | 'usage';
+  status: 'running' | 'completed' | 'failed' | 'interrupted' | 'unknown';
+  error?: string; output?: string;
+};
 type Conversation = {
   version: 1; id: string; projectId: string; taskId: string | null; phase: string | null; lastEventId: number;
   threadId: string | null; sessionId: string | null; sessionProvider?: 'codex' | 'claude';
   selectedModel: {id: string; name: string; provider?: 'codex' | 'claude'} | null; messages: ChatMessage[];
+  command?: ChatCommand;
 };
 ```
 
 - 一覧のプロジェクト・タスクは ID 降順。会話内のパックは保存された順序に従う。
 - Document の path はファイル名。version はファイルの更新時刻 `mtimeMs` であり、DB 文書の版番号とは別。
 - フォルダー一覧は直下の実ディレクトリのみ、最大 500 件。シンボリックリンクは一覧対象外。省略時はサーバー起動時の初期フォルダー（通常はホーム）。
+
+## チャットのコマンド
+
+`POST /api/chat/commands` は通常の発言とは別の操作で、`command` にスラッシュを除いた名前を指定する。`compact`・`clear` と、Claude用の `context`・`usage` を受け付ける。`new`・`reset` は `clear`、`cost`・`stats` は `usage` の別名。`args` は省略または空文字列のみ。`provider` は `codex` または `claude`、`model` はモデルIDまたはnull。`instructionFocus` は不要。インストラクション編集相談では通常の送信と同じ `projectId: "instructions"`, `taskId: null` を使う。
+
+FEは選択中モデルの `provider` と `model` を送る。`compact`・`context`・`usage` は保存済みの `threadId` と `sessionProvider` に対して実行し、指定した `provider` が一致しなければ409で拒否する。これらの操作で接続先を切り替えたり、新規セッションを作ったりしない。`provider` 省略時は保存済みの接続先を使う。操作中に会話のメッセージとパック列を変更しない。未知の名前や入力不正は400、セッションなし・同じタスクの処理中・タスクの状態不一致は409とする。
+
+`clear` はセッションのない会話でも実行できる。元の会話JSONを `history/<会話ID>.json` に保存してから、新しい会話ID・空のメッセージとパック列へ置き換える。CLIのセッションIDとフォーカス通知の状態も初期化する。保存失敗時は元の会話を維持し、成功後の `GET /api/chat` で新しいIDを取得する。FEは会話IDの変更に合わせてパックのキャッシュを切り替える。
+
+生成を伴う対応コマンドは `/api/chat/send` を使い、選択モデルと元の入力を送る。BEはコマンド名と接続先を照合し、対応するAPIまたは固定の依頼へ変換する。未対応の名前、操作用コマンド、フロントエンド内のコマンドを通常のLLMメッセージへフォールバックしない。
+
+202は要求の受付であり、処理完了を示さない。`Conversation.command` に最新の操作ID・名前・状態を保存する。`context`・`usage` の正常終了時は、最大65,536 UTF-8バイトの `output` を含める。状態が変わるたび既存の `chat.changed` を通知し、FEは `GET /api/chat` で再取得する。操作結果を新しい本文パックにはしない。コマンド専用のWSイベントも作らず、再接続時は同じ取得で同期する。
+
+中断は `POST /api/chat/interrupt` を使う。終了を確認できないまま接続が切れた場合や再起動した場合は `unknown` とする。FEは受付・結果不明を自動再送しない。
 
 ## パック同期 API
 

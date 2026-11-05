@@ -7,7 +7,7 @@ import { type EmbeddedTool, type EmbeddedToolResult, toolResult } from './embedd
 export const CLAUDE_MIN_VERSION = '2.1.292';
 export const claudeModels = [{id:'sonnet',name:'Sonnet'},{id:'opus',name:'Opus'},{id:'haiku',name:'Haiku'}];
 export type ClaudeStatus = {installed:boolean;path:string|null;version:string|null;checkedAt:string;auth:'claude'|'apiKey'|'other'|'none'|'unknown';models:{id:string;name:string}[]|null;usage:'unknown'};
-export class ClaudeRejected extends Error { constructor(public modelUnavailable=false,public interrupted=false) { super('Request rejected'); } }
+export class ClaudeRejected extends Error { constructor(public modelUnavailable=false,public interrupted=false,public code?:string) { super('Request rejected'); } }
 
 const versionSupported=(version:string)=>{const actual=version.split('.').map(Number),minimum=CLAUDE_MIN_VERSION.split('.').map(Number);for(let i=0;i<3;i++){if(actual[i]!==minimum[i])return actual[i]>minimum[i]}return true};
 const foreignAuth=():ClaudeStatus['auth']|null=>{
@@ -32,6 +32,9 @@ export async function claudeStatus(executable:string|null):Promise<ClaudeStatus>
 }
 
 type Options={builtinTools?:false;cwd:string;model:string|null;sandbox:'read-only'|'workspace-write';developerInstructions?:string;dynamicTools?:EmbeddedTool[]};
+const generationCommands=['code-review','simplify','security-review','recap'] as const;
+const localCommands=['context','usage'] as const;
+const maxCommandOutput=64*1024;
 type Block={id:string;type:'text'|'tool_use';text:string;name?:string;input?:unknown;partial?:string;complete:boolean};
 
 // ChatService が使う内部通知に CLI の NDJSON を変換する。CLI はターンごとに起動する。
@@ -53,6 +56,13 @@ export class ClaudeRpc {
  private partials=new Map<number,Block>();
  private sawText=false;
  private initialized=false;
+ private compacting=false;
+ private compactBoundary=false;
+ private localCommand:'context'|'usage'|null=null;
+ private commandFallback=false;
+ private commandOutput:string|null=null;
+ private commandUnavailable=false;
+ private generationCommand:string|null=null;
  private initialPrompt:string|null=null;
  private pending:{resolve:()=>void;reject:(error:Error)=>void;timer:ReturnType<typeof setTimeout>}|null=null;
  constructor(private executable:string){}
@@ -67,27 +77,40 @@ export class ClaudeRpc {
    this.session=method==='thread/resume'?params.threadId:randomUUID();this.resumed=method==='thread/resume';this.options=params;
    return {thread:{id:this.session,sessionId:this.session}};
   }
-  if(method==='turn/start'){
+  if(method==='turn/start'||method==='thread/compact/start'||method==='thread/command/start'){
+   const compacting=method==='thread/compact/start',local=method==='thread/command/start',maintenance=compacting||local;
+   if(!params||typeof params!=='object')throw new ClaudeRejected();
+   if(local&&!localCommands.includes(params.command))throw new ClaudeRejected();
+   const generation=!maintenance&&params.command!==undefined?params.command:null;
+   if(!maintenance&&params.command!==undefined&&(!generation||typeof generation!=='object'||Array.isArray(generation)||!generationCommands.includes(generation.name)||typeof generation.args!=='string'||generation.args.length>16384||/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(generation.args)||Object.keys(generation).some(key=>key!=='name'&&key!=='args')))throw new ClaudeRejected();
+   if(generation?.name==='code-review'&&/(?:^|[\s"'`])(?:ultra|--(?:post|comment))(?:$|[\s="'`])/i.test(generation.args))throw new ClaudeRejected(false,false,'COMMAND_ARGUMENTS_UNSUPPORTED');
    if(!this.session||!this.options||this.child||params.threadId!==this.session)throw new ClaudeRejected();
+   if(maintenance&&!this.resumed)throw new ClaudeRejected();
    const model=params.model??this.options.model;
    if(!claudeModels.some(candidate=>candidate.id===model))throw new ClaudeRejected(true);
    if(foreignAuth())throw new ClaudeRejected();
-   if(!Array.isArray(params.input)||params.input.some((item:any)=>item.type!=='text'||typeof item.text!=='string'))throw new ClaudeRejected();
+   if(!maintenance&&(!Array.isArray(params.input)||params.input.some((item:any)=>!item||item.type!=='text'||typeof item.text!=='string')))throw new ClaudeRejected();
+   if(generation&&params.input.length===0)throw new ClaudeRejected();
+   this.compacting=compacting;this.localCommand=local?params.command:null;this.generationCommand=generation?.name??null;
    this.turn=randomUUID();
    const writable=this.options.sandbox==='workspace-write';
-   const tools=this.options.builtinTools===false?'':writable?'Read,Glob,Grep,Write,Edit,Bash':'Read,Glob,Grep';
+   const tools=maintenance||this.options.builtinTools===false?'':writable?'Read,Glob,Grep,Write,Edit,Bash':'Read,Glob,Grep';
    // Bash の許可は CLI の必須 sandbox と組み合わせ、隔離外への再試行を許可しない。
    // 管理者ポリシーが優先され、CLI 既定の一時領域・worktree の共有 .git は書込可能。
    const settings={disableAllHooks:true,...(writable?{sandbox:{enabled:true,failIfUnavailable:true,autoAllowBashIfSandboxed:true,allowUnsandboxedCommands:false,excludedCommands:[],enableWeakerNestedSandbox:false,enableWeakerNetworkIsolation:false,allowAppleEvents:false,filesystem:{disabled:false,allowWrite:[]},network:{strictAllowlist:true,allowedDomains:[],deniedDomains:['*'],allowUnixSockets:[],allowAllUnixSockets:false,allowLocalBinding:false,allowMachLookup:[]}}}:{})};
-   const args=['--print','--output-format','stream-json','--verbose','--include-partial-messages','--restricted','--safe-mode','--setting-sources','','--strict-mcp-config','--mcp-config','{"mcpServers":{}}','--no-chrome','--disable-slash-commands','--permission-mode','dontAsk','--permission-prompts','none','--tools',tools,'--allowedTools',tools,'--disallowedTools','mcp__*','--settings',JSON.stringify(settings),'--system-prompt-snapshot','off','--model',model,this.resumed?'--resume':'--session-id',this.session];
-   if(this.options.dynamicTools?.length){
+   // 固定 allowlist の専用経路だけ組み込み slash command を有効にする。
+   const args=['--print','--output-format','stream-json','--verbose','--include-partial-messages','--restricted','--safe-mode','--setting-sources','','--strict-mcp-config','--mcp-config','{"mcpServers":{}}','--no-chrome',...(!maintenance&&!generation?['--disable-slash-commands']:[]),'--permission-mode','dontAsk','--permission-prompts','none','--tools',tools,'--allowedTools',tools,'--disallowedTools','mcp__*','--settings',JSON.stringify(settings),'--system-prompt-snapshot','off','--model',model,this.resumed?'--resume':'--session-id',this.session];
+   if(!maintenance&&this.options.dynamicTools?.length){
     // ユーザー設定を読まず、Beni 内部の SDK transport だけを接続する。
     args[args.indexOf('--mcp-config')+1]=JSON.stringify({mcpServers:{beni:{type:'sdk',name:'beni'}}});
     args[args.indexOf('--allowedTools')+1]=[tools,...this.options.dynamicTools.map(tool=>`mcp__beni__${tool.name}`)].join(',');
     args.splice(args.indexOf('--disallowedTools'),2);
     args.push('--input-format','stream-json');
    }
-   if(this.options.developerInstructions)args.push('--append-system-prompt',this.options.developerInstructions);
+   // 追加文脈は slash の引数に連結せず、通常のシステム文脈として別送する。
+   const context=generation?params.input.slice(1).map((item:any)=>item.text).join('\n\n'):'';
+   const instructions=[this.options.developerInstructions,context].filter(Boolean).join('\n\n');
+   if(instructions)args.push('--append-system-prompt',instructions);
    const acceptance=new Promise<void>((resolve,reject)=>{const timer=setTimeout(()=>{this.rejectPending(Error('Claude acceptance timed out'));this.close()},60000);timer.unref();this.pending={resolve,reject,timer}});
    // spawn 失敗時にも acceptance の rejection を未処理にしない。
    void acceptance.catch(()=>{});
@@ -98,13 +121,13 @@ export class ClaudeRpc {
    child.stdin.on('error',()=>{});
    await new Promise<void>((resolve,reject)=>{child.once('spawn',resolve);child.once('error',()=>reject(Error('Claude unavailable')))});
    this.emit('turn/started',{turn:{id:this.turn}});
-   const prompt=params.input.map((item:any)=>item.text).join('\n\n');
-   if(this.options.dynamicTools?.length){
+   const prompt=compacting?'/compact':local?`/${this.localCommand}`:generation?`/${generation.name}${generation.args?' '+generation.args:''}`:params.input.map((item:any)=>item.text).join('\n\n');
+   if(!maintenance&&this.options.dynamicTools?.length){
     child.stdin.write(JSON.stringify({type:'control_request',request_id:'beni-initialize',request:{subtype:'initialize',hooks:null}})+'\n');
     this.initialPrompt=prompt;
    }else child.stdin.end(prompt);
    await acceptance;
-   return {turn:{id:this.turn}};
+   return maintenance?{}:{turn:{id:this.turn}};
   }
   if(method==='turn/interrupt'){
    if(!this.child||params.threadId!==this.session||params.turnId!==this.turn)throw new ClaudeRejected();
@@ -120,8 +143,12 @@ export class ClaudeRpc {
  private text(block:Block,text:string){if(!text)return;this.sawText=true;block.text+=text;this.emit('item/agentMessage/delta',{itemId:block.id,delta:text})}
  private item(block:Block){let input=block.input??{};if(block.partial){try{input=JSON.parse(block.partial)}catch{input=block.partial}}return {id:block.id,type:'dynamicToolCall',name:block.name,arguments:input,status:'inProgress'}}
  private completeText(block:Block){if(block.complete)return;block.complete=true;this.emit('item/completed',{item:{id:block.id,type:'agentMessage',text:block.text}})}
- private finish(status:'completed'|'failed'|'interrupted',modelUnavailable=false){if(this.completed)return;this.completed=true;this.child?.stdin.end();for(const block of this.blocks.values())if(block.type==='text')this.completeText(block);this.emit('turn/completed',{turn:{id:this.turn,status,...(modelUnavailable?{error:{code:'model_not_found'}}:{})}})}
+ private finish(status:'completed'|'failed'|'interrupted',modelUnavailable=false,errorCode?:string){if(this.completed)return;this.completed=true;this.child?.stdin.end();for(const block of this.blocks.values())if(block.type==='text')this.completeText(block);this.emit('turn/completed',{turn:{id:this.turn,status,...(modelUnavailable||errorCode?{error:{code:modelUnavailable?'model_not_found':errorCode}}:{})}})}
  private receive(message:any){
+  if(this.compacting||this.localCommand){
+   if(message.parent_tool_use_id)return;
+   if(message.session_id!==undefined&&message.session_id!==this.session){this.rejectPending(new ClaudeRejected());this.close();return}
+  }
   if(message.type==='control_response'&&message.response?.request_id==='beni-initialize'){
    if(message.response.subtype!=='success'){this.close();return}
    if(this.initialPrompt!==null){this.child?.stdin.write(JSON.stringify({type:'user',session_id:this.session,message:{role:'user',content:this.initialPrompt},parent_tool_use_id:null})+'\n');this.initialPrompt=null}return;
@@ -133,6 +160,52 @@ export class ClaudeRpc {
   if(message.type==='system'&&message.subtype==='init'){
    if(message.session_id!==this.session){this.rejectPending(new ClaudeRejected());this.close();return}
    this.initialized=true;
+   const requestedCommand=this.localCommand??this.generationCommand;
+   if(requestedCommand&&Array.isArray(message.slash_commands)&&!message.slash_commands.includes(requestedCommand)){
+    this.rejectPending(new ClaudeRejected());this.finish('failed',false,'COMMAND_UNAVAILABLE');this.close();return;
+   }
+   if(this.compacting||this.localCommand)this.accept();
+  }
+  if(this.localCommand){
+   // CLI が生成するローカル結果だけを収集し、モデル応答やツールには変換しない。
+   if(message.type==='assistant'){
+    const content=message.message?.content;
+    const text=typeof content==='string'?content:Array.isArray(content)&&content.every((block:any)=>block?.type==='text'&&typeof block.text==='string')?content.map((block:any)=>block.text).join(''):null;
+    const local=this.initialized&&message.session_id===this.session&&message.parent_tool_use_id==null&&message.local_command_run?.command===this.localCommand&&message.local_command_run?.args===''&&typeof message.local_command_source==='string'&&!('local_command_outcome' in message);
+    if(message.local_command_outcome?.kind==='unavailable_headless')this.commandUnavailable=true;
+    if(!local||text===null||!text.trim()||Buffer.byteLength((this.commandOutput??'')+text,'utf8')>maxCommandOutput)this.commandFallback=true;
+    else this.commandOutput=(this.commandOutput??'')+text;
+   }
+   if(message.type==='stream_event')this.commandFallback=true;
+   if(message.type==='result'){
+    // synthetic 本文がある場合は result の重複本文を使わない。旧 CLI の result-only 形式も受ける。
+    const output=this.commandOutput??message.result;
+    const unavailable=this.commandUnavailable||typeof message.result==='string'&&[
+     `/${this.localCommand} isn't available in this environment.`,
+     `Unknown slash command: /${this.localCommand}`,
+     `Unknown command: /${this.localCommand}`,
+    ].includes(message.result.trim());
+    const failed=message.session_id!==this.session||!this.initialized||message.is_error===true||message.subtype!=='success'||unavailable||this.commandFallback||typeof output!=='string'||!output.trim()||Buffer.byteLength(output,'utf8')>maxCommandOutput;
+    if(failed)this.rejectPending(new ClaudeRejected(false,this.interrupted));else{this.accept();if(!this.interrupted)this.emit('thread/command/output',{output})}
+    this.finish(this.interrupted?'interrupted':failed?'failed':'completed',false,failed?(unavailable?'COMMAND_UNAVAILABLE':'COMMAND_NOT_PERFORMED'):undefined);
+   }
+   return;
+  }
+  if(this.compacting){
+   // /compact の本文や要約は通常の応答として保存しない。手動圧縮境界と最終結果の両方が必要。
+   if(message.type==='system'&&message.subtype==='compact_boundary'&&message.session_id===this.session&&this.initialized&&message.compact_metadata?.trigger==='manual'&&!this.compactBoundary){
+    this.compactBoundary=true;const item={id:randomUUID(),type:'contextCompaction'};
+    this.emit('item/started',{item});this.emit('item/completed',{item});
+   }
+   if(message.type==='result'){
+    const failed=message.session_id!==this.session||!this.initialized||message.is_error===true||message.subtype!=='success'||!this.compactBoundary;
+    // 既知の圧縮拒否だけをコードに変換し、CLI の自由記述本文は外へ渡さない。
+    const reason=!this.compactBoundary&&message.is_error!==true&&message.subtype==='success'?message.result:undefined;
+    const errorCode=reason==="/compact isn't available in this environment."?'COMPACTION_UNAVAILABLE':reason==='Not enough messages to compact.'?'COMPACTION_NOT_NEEDED':'COMPACTION_NOT_PERFORMED';
+    if(failed)this.rejectPending(new ClaudeRejected(false,this.interrupted));else this.accept();
+    this.finish(this.interrupted?'interrupted':failed?'failed':'completed',false,failed?errorCode:undefined);
+   }
+   return;
   }
   if(message.type==='stream_event')this.accept();
   if(message.type==='stream_event'){
@@ -181,7 +254,7 @@ export class ClaudeRpc {
  private async control(message:any){
   const request=message.request;
   const reply=(response:unknown)=>{if(!this.closed&&!this.completed)this.child?.stdin.write(JSON.stringify({type:'control_response',response:{subtype:'success',request_id:message.request_id,response}})+'\n')};
-  if(request?.subtype!=='mcp_message'||request.server_name!=='beni'||!this.options?.dynamicTools?.length){
+  if(this.compacting||this.localCommand||request?.subtype!=='mcp_message'||request.server_name!=='beni'||!this.options?.dynamicTools?.length){
    if(!this.closed&&!this.completed)this.child?.stdin.write(JSON.stringify({type:'control_response',response:{subtype:'error',request_id:message.request_id,error:'Unsupported control request'}})+'\n');return;
   }
   const rpc=request.message;if(!rpc||rpc.jsonrpc!=='2.0')throw Error('Invalid SDK request');
@@ -195,6 +268,6 @@ export class ClaudeRpc {
   }else{reply({mcp_response:{jsonrpc:'2.0',id:rpc.id,error:{code:-32601,message:'Unsupported MCP method'}}});return}
   reply({mcp_response:{jsonrpc:'2.0',...(rpc.id!==undefined?{id:rpc.id}:{}),result}});
  }
- private signalClose(){if(this.closed)return;this.closed=true;setImmediate(()=>this.onClose())}
+ private signalClose(){if(this.closed)return;if((this.compacting||this.localCommand)&&this.interrupted&&!this.completed)this.finish('interrupted');this.closed=true;setImmediate(()=>this.onClose())}
  close(){this.rejectPending(this.interrupted?new ClaudeRejected(false,true):Error('Connection closed'));if(this.termination)clearTimeout(this.termination);this.termination=null;if(this.child&&this.child.exitCode===null&&this.child.signalCode===null){this.child.kill('SIGTERM');this.termination=setTimeout(()=>this.child?.kill('SIGKILL'),3000);this.termination.unref()}this.signalClose()}
 }

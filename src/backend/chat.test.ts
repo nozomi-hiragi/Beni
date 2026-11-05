@@ -635,3 +635,191 @@ test('instruction read tools return latest raw data and strictly validate argume
   }finally{delete process.env.FAKE_EMBEDDED_CALLS;delete process.env.FAKE_CODEX_LOG;delete process.env.FAKE_CLAUDE_LOG;store.close();await rm(root,{recursive:true,force:true})}
  }
 });
+
+
+test('スラッシュコマンドを本文から区別して、通常送信での誤送信を防ぐ',async()=>{
+ const {parseChatCommand}=await import('../shared/chat-commands');
+ expect(parseChatCommand('  /compact  ')).toEqual({name:'compact',args:''});expect(parseChatCommand('/unknown value')).toEqual({name:'unknown',args:'value'});
+ for(const text of ['/tmp/example','/Users/example/file.ts','/compact.md','引用 /compact','> /compact'])expect(parseChatCommand(text)).toBeNull();
+ const root=await mkdtemp(join(tmpdir(),'beni-command-')),p='019a0000-0000-7000-8000-000000000001',chat=new ChatService(()=>root,()=>fake);
+ try{await expect(chat.send(p,null,' /compact ',null,root)).rejects.toThrow('chat command');expect((await chat.get(p,null)).messages).toEqual([]);await expect(chat.command(p,null,'compact',root)).rejects.toThrow('no thread')}
+ finally{await rm(root,{recursive:true,force:true})}
+});
+
+test('圧縮は保存したスレッドを再開し、受付と完了を区別して履歴・パックを保持する',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'beni-compact-')),p='019a0000-0000-7000-8000-000000000001',log=join(root,'rpc.jsonl'),chat=new ChatService(()=>root,()=>fake);process.env.FAKE_CODEX_LOG=log;
+ let changed=0;const unsubscribe=chat.subscribe(p,null,event=>{if(event.name==='chat.changed')changed++});
+ try{
+  await chat.send(p,null,'hello',null,root);await waitFor(async()=>(await chat.get(p,null)).messages.at(-1)?.status==='completed');const before=await chat.get(p,null);
+  const result=await chat.command(p,null,'compact',root);expect(result.command.status).toBe('running');expect((await chat.get(p,null)).command?.status).toBe('running');
+  await expect(chat.command(p,null,'compact',root)).rejects.toThrow('busy');await expect(chat.send(p,null,'hello',null,root)).rejects.toThrow('busy');
+  await waitFor(async()=>(await chat.get(p,null)).command?.status==='completed');const after=await chat.get(p,null);expect(after.messages).toEqual(before.messages);expect(after.packs).toEqual(before.packs);expect(after.threadId).toBe(before.threadId);expect(changed).toBeGreaterThan(3);
+  await chat.send(p,null,'hello',null,root);await waitFor(async()=>(await chat.get(p,null)).messages.at(-1)?.status==='completed');expect((await chat.get(p,null)).messages).toHaveLength(4);
+  const records=(await readFile(log,'utf8')).trim().split('\n').map(line=>JSON.parse(line));const compact=records.findIndex(row=>row.method==='thread/compact/start');expect(records[compact].params).toEqual({threadId:'thread-1'});expect(records.slice(0,compact).at(-1)).toMatchObject({method:'thread/resume',params:{threadId:'thread-1',approvalPolicy:'never',sandbox:'read-only'}});expect(records.filter(row=>row.method==='turn/start')).toHaveLength(2);
+ }finally{unsubscribe();delete process.env.FAKE_CODEX_LOG;await rm(root,{recursive:true,force:true})}
+});
+
+test('圧縮の先行イベント・別スレッドの通知・失敗・切断・再起動を区別する',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'beni-compact-states-')),p='019a0000-0000-7000-8000-000000000001',chat=new ChatService(()=>root,()=>fake);
+ try{
+  await chat.send(p,null,'hello',null,root);await waitFor(async()=>(await chat.get(p,null)).messages.at(-1)?.status==='completed');
+  for(const [action,status] of [['early','completed'],['unrelated','completed'],['reject','failed'],['fail','failed'],['disconnect','unknown'],['disconnect-before-ack','unknown'],['missing-boundary','unknown'],['boundary-failure','failed'],['boundary-interrupt','interrupted'],['boundary-disconnect','unknown']] as const){
+   process.env.FAKE_CODEX_COMPACT_ACTION=action;await chat.command(p,null,'compact',root);if(action==='early'||action==='unrelated'){await Bun.sleep(30);expect((await chat.get(p,null)).command?.status).toBe('running')}
+   await waitFor(async()=>(await chat.get(p,null)).command?.status===status);
+  }
+  process.env.FAKE_CODEX_COMPACT_ACTION='wait';await chat.command(p,null,'compact',root);await Bun.sleep(30);await chat.interrupt(p,null);await waitFor(async()=>(await chat.get(p,null)).command?.status==='interrupted');
+  await chat.command(p,null,'compact',root);await Bun.sleep(30);const restarted=new ChatService(()=>root,()=>fake);expect((await restarted.get(p,null)).command?.status).toBe('unknown');await chat.interrupt(p,null);await waitFor(async()=>(await chat.get(p,null)).command?.status==='interrupted');
+  process.env.FAKE_CODEX_COMPACT_ACTION='no-turn';await chat.command(p,null,'compact',root);await Bun.sleep(30);await chat.interrupt(p,null);expect((await chat.get(p,null)).command?.status).toBe('unknown');
+  expect((await chat.get(p,null)).messages).toHaveLength(2);
+ }finally{delete process.env.FAKE_CODEX_COMPACT_ACTION;await rm(root,{recursive:true,force:true})}
+});
+
+test('コマンドAPIはscope・フェーズ・引数・タスク制約を検証して排他する',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'beni-command-api-'));const {Store}=await import('./store/index');const {createHandler}=await import('./server');const store=new Store(':memory:'),project=store.createProject('Example',root) as {id:string},other=store.createProject('Other',projectFolder(root,'other')) as {id:string},task=store.createTask(project.id,'Task') as {id:string},chat=new ChatService(()=>root,()=>fake),handler=createHandler(store,'/tmp',chat);
+ const post=(data:unknown,path='/api/chat/commands',origin='http://127.0.0.1:3210')=>handler(new Request('http://127.0.0.1:3210'+path,{method:'POST',headers:{origin,'content-type':'application/json'},body:JSON.stringify(data)}));const base={projectId:project.id,taskId:task.id,phase:'requirements',command:'compact'};
+ try{
+  expect((await post({...base,projectId:other.id})).status).toBe(404);expect((await post(base,undefined,'http://example.test')).status).toBe(403);expect((await post({...base,command:'unknown'})).status).toBe(400);expect((await post({...base,args:'x'})).status).toBe(400);expect((await post(base)).status).toBe(409);expect((await post({...base,phase:'documents'})).status).toBe(409);
+  expect((await post({...base,content:'/compact',model:null},'/api/chat/send')).status).toBe(400);
+  await chat.send(project.id,task.id,'hello',null,root);await waitFor(async()=>(await chat.get(project.id,task.id)).messages.at(-1)?.status==='completed');
+  process.env.FAKE_CODEX_COMPACT_ACTION='wait';const res=await post(base);expect(res.status).toBe(202);expect(await res.json()).toMatchObject({command:{name:'compact',status:'running'}});expect(()=>chat.withIdleTask(project.id,task.id,()=>{})).toThrow('busy');expect((await post(base)).status).toBe(409);await Bun.sleep(30);expect((await post({...base},'/api/chat/interrupt')).status).toBe(200);await waitFor(async()=>(await chat.get(project.id,task.id)).command?.status==='interrupted');
+  const view=await (await handler(new Request(`http://127.0.0.1:3210/api/chat?projectId=${project.id}&taskId=${task.id}&phase=requirements`))).json();expect(view).toMatchObject({sessionProvider:'codex',command:{status:'interrupted'}});expect((await chat.get(project.id,task.id,'documents')).command).toBeUndefined();
+  store.selectTaskPhase(project.id,task.id,'requirements','execution');expect((await post({...base,phase:'execution'})).status).toBe(409);store.selectTaskPhase(project.id,task.id,'execution','retrospective');store.setTaskCompleted(project.id,task.id,true);expect((await post({...base,phase:'retrospective'})).status).toBe(409);
+ }finally{delete process.env.FAKE_CODEX_COMPACT_ACTION;store.close();await rm(root,{recursive:true,force:true})}
+});
+
+
+test('Claude の圧縮も保存済み接続先を使い、手動境界と成功結果を確認して履歴を維持する',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'beni-claude-compact-')),p='019a0000-0000-7000-8000-000000000001',log=join(root,'claude.jsonl'),chat=new ChatService(()=>root,()=>null,()=>fakeClaude);process.env.FAKE_CLAUDE_LOG=log;
+ try{
+  await chat.send(p,null,'hello','sonnet',root,undefined,null,false,'claude');await waitFor(async()=>(await chat.get(p,null)).messages.at(-1)?.status==='completed');const before=await chat.get(p,null);
+  for(const [action,status] of [['success','completed'],['no-boundary','failed'],['failure','failed'],['foreign-session','unknown'],['disconnect','unknown'],['disconnect-after-boundary','unknown'],['failure-after-boundary','failed']] as const){process.env.FAKE_CLAUDE_COMPACT=action;await chat.command(p,null,'compact',root);await waitFor(async()=>(await chat.get(p,null)).command?.status===status);const current=await chat.get(p,null);expect(current.messages).toEqual(before.messages);expect(current.packs).toEqual(before.packs);expect(current.threadId).toBe(before.threadId)}
+  for(const [index,action] of ['wait','wait-after-boundary'].entries()){
+   process.env.FAKE_CLAUDE_COMPACT=action;await chat.command(p,null,'compact',root);
+   await waitFor(async()=>(await readFile(log,'utf8')).trim().split('\n').map(line=>JSON.parse(line)).filter(row=>row.prompt==='/compact').length===8+index);
+   await chat.interrupt(p,null);await waitFor(async()=>(await chat.get(p,null)).command?.status==='interrupted');
+  }
+  const invocations=(await readFile(log,'utf8')).trim().split('\n').map(line=>JSON.parse(line));const compact=invocations.filter(row=>row.prompt==='/compact');expect(compact).toHaveLength(9);expect(compact.every(row=>row.session===before.threadId&&row.args.includes('--resume'))).toBe(true);expect(compact.every(row=>row.args[row.args.indexOf('--tools')+1]==='')).toBe(true);
+  expect(invocations.filter(row=>row.prompt!=='/compact').every(row=>row.args.includes('--disable-slash-commands'))).toBe(true);expect(compact.every(row=>!row.args.includes('--disable-slash-commands'))).toBe(true);
+  delete process.env.FAKE_CLAUDE_COMPACT;await chat.send(p,null,'after','sonnet',root,undefined,null,false,'claude');await waitFor(async()=>(await chat.get(p,null)).messages.at(-1)?.status==='completed');expect((await chat.get(p,null)).messages).toHaveLength(4);
+ }finally{delete process.env.FAKE_CLAUDE_LOG;delete process.env.FAKE_CLAUDE_COMPACT;await rm(root,{recursive:true,force:true})}
+});
+
+test('Claude 圧縮の拒否理由は既知コードに対応する固定文言だけを保存する',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'beni-claude-compact-reason-')),p='019a0000-0000-7000-8000-000000000001',chat=new ChatService(()=>root,()=>null,()=>fakeClaude);
+ try{
+  await chat.send(p,null,'hello','sonnet',root,undefined,null,false,'claude');await waitFor(async()=>(await chat.get(p,null)).messages.at(-1)?.status==='completed');const before=await chat.get(p,null);
+  for(const [action,error] of [['unavailable','この環境では会話の圧縮を利用できません'],['not-needed','圧縮できる会話がまだありません'],['unknown-reason','会話の圧縮に失敗しました'],['known-failure','会話の圧縮に失敗しました']] as const){
+   process.env.FAKE_CLAUDE_COMPACT=action;await chat.command(p,null,'compact',root);await waitFor(async()=>(await chat.get(p,null)).command?.status==='failed');const current=await chat.get(p,null);
+   expect(current.command?.error).toBe(error);expect(current.messages).toEqual(before.messages);expect(current.packs).toEqual(before.packs);expect(current.threadId).toBe(before.threadId);
+   expect(JSON.stringify(current)).not.toContain('Private compaction failure details');
+  }
+ }finally{delete process.env.FAKE_CLAUDE_COMPACT;await rm(root,{recursive:true,force:true})}
+});
+
+test('コマンド候補は接続先と別名を解決し、未選択では共通の画面操作だけを返す',async()=>{
+ const {commandsForProvider,findChatCommand}=await import('../shared/chat-commands');
+ expect(commandsForProvider(undefined).every(command=>command.kind==='client')).toBe(true);
+ expect(commandsForProvider('codex').map(command=>command.name)).not.toContain('context');
+ expect(findChatCommand('stats','claude')?.name).toBe('usage');expect(findChatCommand('cost','codex')).toBeUndefined();
+ expect(findChatCommand('new','codex')?.name).toBe('clear');expect(findChatCommand('reset','claude')?.name).toBe('clear');
+});
+
+test('clear は元のJSONを保存して会話IDとセッションを切り替え、失敗時は元の会話を保つ',async()=>{
+ const {symlink}=await import('node:fs/promises');
+ const root=await mkdtemp(join(tmpdir(),'beni-clear-')),p='019a0000-0000-7000-8000-000000000001',chat=new ChatService(()=>root,()=>fake);
+ try{
+  await chat.send(p,null,'hello',null,root);await waitFor(async()=>(await chat.get(p,null)).messages.at(-1)?.status==='completed');const before=await chat.get(p,null);
+  let changed=0;const unsubscribe=chat.subscribe(p,null,event=>{if(event.name==='chat.changed')changed++});
+  await chat.command(p,null,'clear',root,undefined,null,{provider:'claude',model:'sonnet'});unsubscribe();const after=await chat.get(p,null);
+  expect(after.id).not.toBe(before.id);expect(after).toMatchObject({lastEventId:0,messages:[],packs:[],threadId:null,sessionId:null,command:{name:'clear',status:'completed'},selectedModel:before.selectedModel});expect(after.sessionProvider).toBeUndefined();expect(changed).toBe(1);
+  expect(JSON.parse(await readFile(join(root,'.beni/chat/history',`${before.id}.json`),'utf8'))).toEqual(before);
+  await chat.command(p,null,'clear',root);const empty=await chat.get(p,null);expect(empty.id).not.toBe(after.id);
+  const archive=join(root,'.beni/chat/history',`${empty.id}.json`),outside=join(root,'outside.json');await writeFile(outside,'{}');await symlink(outside,archive);
+  await expect(chat.command(p,null,'clear',root)).rejects.toThrow('Invalid metadata file');expect(await chat.get(p,null)).toEqual(empty);expect(await readFile(outside,'utf8')).toBe('{}');
+  await rm(archive);await rm(join(root,'.beni/chat/history'),{recursive:true});await symlink(root,join(root,'.beni/chat/history'));
+  await expect(chat.command(p,null,'clear',root)).rejects.toThrow('Invalid managed directory');expect(await chat.get(p,null)).toEqual(empty);
+ }finally{await rm(root,{recursive:true,force:true})}
+});
+
+test('clear 後の履歴は通常のタスク削除に含まれ、不正な履歴リンクは拒否する',async()=>{
+ const {Store}=await import('./store/index');const {symlink}=await import('node:fs/promises');const {validateChatDirectory}=await import('./data');
+ const root=await mkdtemp(join(tmpdir(),'beni-clear-delete-')),store=new Store(':memory:'),project=store.createProject('Example',root) as {id:string},task=store.createTask(project.id,'Example task') as {id:string},chat=new ChatService(()=>root,()=>fake);
+ try{
+  const taskDirectory=join(root,'.beni/chat',task.id);await chat.command(project.id,task.id,'clear',root);validateChatDirectory(taskDirectory);
+  const linked=join(taskDirectory,'history','019a0000-0000-4000-8000-000000000001.json'),outside=join(root,'outside.json');await writeFile(outside,'{}');await symlink(outside,linked);
+  expect(()=>validateChatDirectory(taskDirectory)).toThrow('Invalid metadata file');expect(()=>store.deleteTask(project.id,task.id)).toThrow('Invalid metadata file');
+  await rm(linked);store.deleteTask(project.id,task.id);await expect(readFile(join(taskDirectory,'requirements.json'),'utf8')).rejects.toThrow();expect(store.task(task.id)).toBeNull();expect(await readFile(outside,'utf8')).toBe('{}');
+ }finally{store.close();await rm(root,{recursive:true,force:true})}
+});
+
+test('選択中の接続先がセッションと違う操作や未対応操作は実行せず、clear の排他とフェーズ制約も保つ',async()=>{
+ const {Store}=await import('./store/index');const {createHandler}=await import('./server');
+ const root=await mkdtemp(join(tmpdir(),'beni-provider-command-')),store=new Store(':memory:'),project=store.createProject('Example',root) as {id:string},task=store.createTask(project.id,'Example task') as {id:string},chat=new ChatService(()=>root,()=>fake),handler=createHandler(store,'/tmp',chat);
+ const post=(data:unknown)=>handler(new Request('http://127.0.0.1:3210/api/chat/commands',{method:'POST',headers:{origin:'http://127.0.0.1:3210','content-type':'application/json'},body:JSON.stringify(data)}));
+ const base={projectId:project.id,taskId:task.id,phase:'requirements'};
+ try{
+  await chat.send(project.id,task.id,'hello',null,root);await waitFor(async()=>(await chat.get(project.id,task.id)).messages.at(-1)?.status==='completed');const before=await chat.get(project.id,task.id);
+  for(const command of ['compact','context','usage']){const result=await post({...base,command,provider:'claude'});expect(result.status).toBe(409);expect(await result.json()).toMatchObject({error:expect.stringContaining('接続先')})}
+  expect((await post({...base,command:'context',provider:'codex'})).status).toBe(400);expect((await post({...base,command:'help'})).status).toBe(400);expect(await chat.get(project.id,task.id)).toEqual(before);
+  await chat.send(project.id,task.id,'wait',null,root);await waitFor(async()=>(await chat.get(project.id,task.id)).messages.at(-1)?.status==='streaming');expect((await post({...base,command:'clear'})).status).toBe(409);await chat.interrupt(project.id,task.id);await waitFor(async()=>(await chat.get(project.id,task.id)).messages.at(-1)?.status==='interrupted');
+  expect((await post({...base,command:'reset',provider:'claude'})).status).toBe(202);
+  store.selectTaskPhase(project.id,task.id,'requirements','execution');expect((await post({...base,phase:'execution',command:'clear'})).status).toBe(409);
+  store.selectTaskPhase(project.id,task.id,'execution','retrospective');store.setTaskCompleted(project.id,task.id,true);expect((await post({...base,phase:'retrospective',command:'clear'})).status).toBe(409);
+ }finally{store.close();await rm(root,{recursive:true,force:true})}
+});
+
+test('Codex review はネイティブAPIを使い、recap は固定要約指示に変換してパックには元本文を残す',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'beni-native-commands-')),p='019a0000-0000-7000-8000-000000000001',log=join(root,'rpc.jsonl'),chat=new ChatService(()=>root,()=>fake);process.env.FAKE_CODEX_LOG=log;
+ try{
+  for(const content of ['/review','/review changes in example.ts','/recap decision focus','hello']){await chat.send(p,null,content,'model-a',root);await waitFor(async()=>(await chat.get(p,null)).messages.at(-1)?.status==='completed')}
+  const c=await chat.get(p,null);expect(c.messages.filter(message=>message.role==='user').map(message=>message.content)).toEqual(['/review','/review changes in example.ts','/recap decision focus','hello']);expect(c.packs.filter(pack=>pack.role==='user').map(pack=>pack.content)).toEqual(['/review','/review changes in example.ts','/recap decision focus','hello']);
+  const rows=(await readFile(log,'utf8')).trim().split('\n').map(line=>JSON.parse(line));expect(rows.filter(row=>row.method==='review/start').map(row=>row.params)).toEqual([{threadId:'thread-1',target:{type:'uncommittedChanges'},delivery:'inline'},{threadId:'thread-1',target:{type:'custom',instructions:'changes in example.ts'},delivery:'inline'}]);
+  const turns=rows.filter(row=>row.method==='turn/start');expect(turns).toHaveLength(2);expect(turns[0].params.input[0].text).toBe('会話のここまでの目的、決定事項、未解決事項、次の作業を簡潔に日本語で要約してください。\ndecision focus');expect(turns[1].params.input[0].text).toBe('hello');expect(rows.filter(row=>row.method==='thread/resume').every(row=>row.params.model==='model-a')).toBe(true);
+  for(const content of ['/unknown','/context','/code-review','/help','/compact args'])await expect(chat.send(p,null,content,null,root)).rejects.toThrow('chat command');expect((await chat.get(p,null)).messages).toHaveLength(8);
+ }finally{delete process.env.FAKE_CODEX_LOG;await rm(root,{recursive:true,force:true})}
+});
+
+test('Claude context と usage は成功した操作出力だけを保存し、会話本文とパックを変更しない',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'beni-local-output-')),p='019a0000-0000-7000-8000-000000000001',chat=new ChatService(()=>root,()=>null,()=>fakeClaude);
+ try{
+  await chat.send(p,null,'hello','sonnet',root,undefined,null,false,'claude');await waitFor(async()=>(await chat.get(p,null)).messages.at(-1)?.status==='completed');const before=await chat.get(p,null);
+  for(const [command,output] of [['context','Context usage: 12%\n'],['usage','Usage: 3 fictional requests\n']] as const){
+   await chat.command(p,null,command,root,undefined,null,{provider:'claude',model:'sonnet'});await waitFor(async()=>(await chat.get(p,null)).command?.status==='completed');const current=await chat.get(p,null);expect(current.command?.output).toBe(output);expect(current.messages).toEqual(before.messages);expect(current.packs).toEqual(before.packs);expect(current.threadId).toBe(before.threadId);
+  }
+  for(const [action,status] of [['failure','failed'],['unavailable','failed'],['fallback','failed'],['oversize','failed'],['disconnect','unknown'],['foreign-session','unknown']] as const){process.env.FAKE_CLAUDE_COMMAND=action;await chat.command(p,null,'context',root);await waitFor(async()=>(await chat.get(p,null)).command?.status===status);const current=await chat.get(p,null);expect(current.command?.output).toBeUndefined();expect(current.command?.error).toBeString();expect(current.messages).toEqual(before.messages);expect(current.packs).toEqual(before.packs);expect(JSON.stringify(current)).not.toContain('Private')}
+  process.env.FAKE_CLAUDE_COMMAND='limit';await chat.command(p,null,'context',root);await waitFor(async()=>(await chat.get(p,null)).command?.status==='completed');expect(Buffer.byteLength((await chat.get(p,null)).command!.output!)).toBe(65536);
+  process.env.FAKE_CLAUDE_COMMAND='wait';await chat.command(p,null,'usage',root);await Bun.sleep(50);await chat.interrupt(p,null);await waitFor(async()=>(await chat.get(p,null)).command?.status==='interrupted');expect((await chat.get(p,null)).command?.output).toBeUndefined();
+  await chat.command(p,null,'context',root);await Bun.sleep(50);const restarted=new ChatService(()=>root,()=>null,()=>fakeClaude);expect((await restarted.get(p,null)).command?.status).toBe('unknown');await chat.interrupt(p,null);await waitFor(async()=>(await chat.get(p,null)).command?.status==='interrupted');
+  await expect(chat.command(p,null,'context',root,undefined,null,{args:'extra'})).rejects.toThrow('invalid command');
+ }finally{delete process.env.FAKE_CLAUDE_COMMAND;await rm(root,{recursive:true,force:true})}
+});
+
+test('Claude 生成コマンドは別名と引数を構造化して送り、接続先変更時の参考履歴も保つ',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'beni-claude-message-command-')),p='019a0000-0000-7000-8000-000000000001',log=join(root,'claude.jsonl'),chat=new ChatService(()=>root,()=>fake,()=>fakeClaude);process.env.FAKE_CLAUDE_LOG=log;
+ try{
+  await chat.send(p,null,'hello',null,root);await waitFor(async()=>(await chat.get(p,null)).messages.at(-1)?.status==='completed');
+  for(const content of ['/review example.ts','/code-review','/simplify','/security-review','/recap decisions']){await chat.send(p,null,content,'sonnet',root,undefined,null,false,'claude');await waitFor(async()=>(await chat.get(p,null)).messages.at(-1)?.status==='completed')}
+  const calls=(await readFile(log,'utf8')).trim().split('\n').map(line=>JSON.parse(line));expect(calls.map(call=>call.prompt)).toEqual(['/code-review example.ts','/code-review','/simplify','/security-review','/recap decisions']);
+  const first=calls[0];expect(first.args).not.toContain('--disable-slash-commands');expect(first.args[first.args.indexOf('--append-system-prompt')+1]).toContain('Beni reference conversation history');expect(first.args[first.args.indexOf('--append-system-prompt')+1]).toContain('Hello');expect(first.args[first.args.indexOf('--tools')+1]).toBe('Read,Glob,Grep');
+  const current=await chat.get(p,null);expect(current.messages.filter(message=>message.role==='user').map(message=>message.content)).toEqual(['hello','/review example.ts','/code-review','/simplify','/security-review','/recap decisions']);expect(current.packs.filter(pack=>pack.kind==='tool').length).toBeGreaterThan(0);
+ }finally{delete process.env.FAKE_CLAUDE_LOG;await rm(root,{recursive:true,force:true})}
+});
+
+test('Claude review のクラウド実行と投稿引数はAPIで履歴追加前に拒否する',async()=>{
+ const {Store}=await import('./store/index');const {createHandler}=await import('./server');const root=await mkdtemp(join(tmpdir(),'beni-review-args-')),store=new Store(':memory:'),project=store.createProject('Example',root) as {id:string},chat=new ChatService(()=>root,()=>null,()=>fakeClaude),handler=createHandler(store,'/tmp',chat);
+ try{
+  for(const content of ['/review ultra','/code-review --post','/review --comment=yes','/review "ultra"','/review `--post`']){
+   const result=await handler(new Request('http://127.0.0.1:3210/api/chat/send',{method:'POST',headers:{origin:'http://127.0.0.1:3210','content-type':'application/json'},body:JSON.stringify({projectId:project.id,taskId:null,model:'sonnet',provider:'claude',content})}));expect(result.status).toBe(400);expect(await result.json()).toEqual({error:'クラウド実行やコメント投稿の引数は利用できません'});expect((await chat.get(project.id,null)).messages).toEqual([]);
+  }
+  await chat.send(project.id,null,'/review feature/ultra-ui --fix','sonnet',root,undefined,null,false,'claude');await waitFor(async()=>(await chat.get(project.id,null)).messages.at(-1)?.status==='completed');expect((await chat.get(project.id,null)).messages).toHaveLength(2);
+ }finally{store.close();await rm(root,{recursive:true,force:true})}
+});
+
+test('編集相談の clear は固定済みプロンプトを維持し、生成コマンドは受け付けない',async()=>{
+ const {Store}=await import('./store/index');const {createHandler}=await import('./server');const root=await mkdtemp(join(tmpdir(),'beni-editor-clear-')),store=new Store(join(root,'app.sqlite')),chat=new ChatService(()=>{throw Error('project scope')},()=>fake);createHandler(store,'/tmp',chat);
+ try{
+  await chat.send('instructions',null,'hello','model-a',root,undefined,null,false,'codex','common');await waitFor(async()=>(await chat.get('instructions',null)).messages.at(-1)?.status==='completed');const before=await chat.get('instructions',null),original=store.instructions().find(item=>item.key==='editor')!.content;store.updateInstruction('editor','NEW EDITOR PROMPT',original);
+  for(const provider of ['codex','claude'] as const)for(const content of ['/review','/recap'])await expect(chat.send('instructions',null,content,null,root,undefined,null,false,provider,'common')).rejects.toThrow('chat command');
+  await chat.command('instructions',null,'clear',root);const after=await chat.get('instructions',null);expect(after.id).not.toBe(before.id);expect(after.appliedEditorContent).toBe(original);expect(after.lastInstructionFocus).toBeUndefined();expect(after.instructionToolsVersion).toBeUndefined();expect(after.lastEventId).toBe(0);expect(await chat.instructionEditorState()).toEqual({pending:true,busy:false});expect(JSON.parse(await readFile(join(root,'chat/history',`${before.id}.json`),'utf8'))).toEqual(before);
+ }finally{store.close();await rm(root,{recursive:true,force:true})}
+});

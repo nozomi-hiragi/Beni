@@ -1,5 +1,6 @@
 import { isInstructionKey, type InstructionKey } from './instructions';
 import { Store } from './store/index';
+import { findChatCommand } from '../shared/chat-commands';
 import { ChatService, ModelUnavailable } from './chat';
 import { TerminalService, TerminalError } from './terminal';
 import { communicationSocket, type SocketData } from './events';
@@ -129,6 +130,15 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
    }
    const ackMatch=url.pathname.match(/^\/api\/chat\/packs\/([^/]+)\/ack$/);
    if(ackMatch){const p=input.projectId,t=input.taskId??null;if(!chatScope(p,t))return json({error:'会話が見つかりません'},404);if(!validChatPhase(t,input.phase)||(p===INSTRUCTIONS_CHAT_ID&&input.phase!==undefined))return json({error:'フェーズを確認してください'},400);const id=decodePackId(ackMatch[1]);if(!validId(id)||typeof input.hash!=='string'||! /^[a-f0-9]{64}$/.test(input.hash))return json({error:'入力を確認してください'},400);try{return json(await chat.ack(p as string,t as string|null,id,input.hash,chatPhase(t,input.phase)))}catch(error){const m=error instanceof Error?error.message:'';return json({error:m==='not found'?'パックが見つかりません':m==='not closed'?'生成中のパックです':'パックを読み込めませんでした'},m==='not found'?404:m==='not closed'?409:500)}}
+   if(url.pathname==='/api/chat/commands'){
+    const p=input.projectId,t=input.taskId??null,project=chatScope(p,t);if(!project)return json({error:'会話が見つかりません'},404);
+    if(!validChatPhase(t,input.phase)||(p===INSTRUCTIONS_CHAT_ID&&input.phase!==undefined))return json({error:'フェーズを確認してください'},400);
+    if(typeof input.command!=='string'||(input.args!==undefined&&typeof input.args!=='string')||(typeof input.args==='string'&&input.args.trim())||(input.provider!==undefined&&!isProvider(input.provider))||(input.model!==undefined&&input.model!==null&&(typeof input.model!=='string'||input.model.length>256))||Object.keys(input).some(key=>!['projectId','taskId','phase','command','args','provider','model'].includes(key)))return json({error:'コマンドを確認してください'},400);
+    const command=findChatCommand(input.command,input.provider as Provider|undefined??'claude');if(command?.kind!=='operation')return json({error:'コマンドを確認してください'},400);
+    if(t!==null&&(store.task(t as string)!.status==='completed'||store.task(t as string)!.phase==='execution'))return json({error:'現在のタスクには送信できません'},409);
+    if(t!==null&&store.task(t as string)!.phase!==input.phase)return json({error:'フェーズが変更されています'},409);
+    try{return json(await chat.command(p as string,t as string|null,command.name,project.folder,t===null?undefined:documentFolder(store,project,projectTask(store.task(t as string))),chatPhase(t,input.phase),{args:input.args as string|undefined,provider:input.provider as Provider|undefined,model:input.model as string|null|undefined}),202)}catch(error){const message=error instanceof Error?error.message:'';return json({error:message==='busy'?'送信中です':message==='no thread'?'操作できる会話がありません':message==='provider mismatch'?'選択中の接続先と会話の接続先が異なります。会話を送信するか /clear で新しい会話を開始してください':message==='invalid command'?'この接続先ではコマンドを利用できません':message==='unavailable'?'接続状態を確認してください':message==='unsafe configuration'?'Codex の外部ツールを無効にできませんでした':'コマンドを開始できませんでした'},['busy','no thread','provider mismatch'].includes(message)?409:['unavailable','unsafe configuration','invalid command'].includes(message)?400:500)}
+   }
    if (url.pathname === '/api/chat/send' || url.pathname === '/api/chat/interrupt') {
     const p=input.projectId,t=input.taskId??null;const project=chatScope(p,t);if(!project)return json({error:'会話が見つかりません'},404);
     if(!validChatPhase(t,input.phase)||(p===INSTRUCTIONS_CHAT_ID&&input.phase!==undefined))return json({error:'フェーズを確認してください'},400);
@@ -137,7 +147,7 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
      if((p===INSTRUCTIONS_CHAT_ID&&!isInstructionKey(input.instructionFocus))||(input.provider!==undefined&&!isProvider(input.provider))||typeof input.content!=='string'||!input.content.trim()||!(input.model===null||(typeof input.model==='string'&&input.model.length<=256)))return json({error:'入力を確認してください'},400);
      if(t!==null&&store.task(t as string)!.phase!==input.phase)return json({error:'フェーズが変更されています'},409);
      const {packs,...conversation}=await chat.send(p as string,t as string|null,input.content,input.model as string|null,project.folder,t===null?undefined:documentFolder(store,project,projectTask(store.task(t as string))),chatPhase(t,input.phase),false,input.provider as Provider|undefined,input.instructionFocus as InstructionKey|undefined);return json(conversation,202);
-    } catch(e) {const message=e instanceof Error?e.message:'';return json({...(e instanceof ModelUnavailable ? {code:'MODEL_UNAVAILABLE'} : {}),error:e instanceof ModelUnavailable?'選択したモデルを利用できません':message==='busy'?'送信中です':message==='unavailable'?`${input.provider==='claude'?'Claude Code':'Codex'} の接続状態を確認してください`:message==='unsafe configuration'?'Codex の外部ツールを無効にできませんでした':message==='not running'?'停止できる処理がありません':'保存または接続に失敗しました'},message==='busy'||message==='not running'?409:e instanceof ModelUnavailable||message==='unavailable'||message==='unsafe configuration'?400:500)}
+    } catch(e) {const message=e instanceof Error?e.message:'';return json({...(e instanceof ModelUnavailable ? {code:'MODEL_UNAVAILABLE'} : {}),error:e instanceof ModelUnavailable?'選択したモデルを利用できません':message==='chat command arguments'?'クラウド実行やコメント投稿の引数は利用できません':message==='chat command'?'スラッシュコマンドはコマンド API を使ってください':message==='busy'?'送信中です':message==='unavailable'?`${input.provider==='claude'?'Claude Code':'Codex'} の接続状態を確認してください`:message==='unsafe configuration'?'Codex の外部ツールを無効にできませんでした':message==='not running'?'停止できる処理がありません':'保存または接続に失敗しました'},message==='busy'||message==='not running'?409:e instanceof ModelUnavailable||message==='chat command'||message==='chat command arguments'||message==='unavailable'||message==='unsafe configuration'?400:500)}
    }
    if (url.pathname === '/api/folders/list') {
     const path = input.path === undefined ? initialFolder : input.path;

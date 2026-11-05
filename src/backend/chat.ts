@@ -2,7 +2,7 @@ import { instructionNames, instructionVariables, composeInstructions, defaultIns
 import { projectKnowledge } from './documents';
 import { spawn, execFile, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createInterface } from 'node:readline';
-import { join, relative, isAbsolute } from 'node:path';
+import { join, dirname, relative, isAbsolute } from 'node:path';
 import { eventTools, eventToolArguments, toolResult, type EmbeddedTool, type EmbeddedToolResult } from './embedded-tools';
 import { readFileSync, lstatSync } from 'node:fs';
 import { isTaskPhase, type TaskPhase } from '../shared/task-phase';
@@ -11,12 +11,14 @@ import { directory, projectRoot, readJson, writeJson } from './data';
 import { validProjectId, validTaskId } from '../shared/ids';
 import { INSTRUCTIONS_CHAT_ID, packHash, packHeader, validPack, isProvider, type Provider, type Pack, type TopicEvent } from '../shared/communication';
 
+import { chatCommands, findChatCommand, parseChatCommand, type ChatCommand, type ChatCommandName } from '../shared/chat-commands';
+
 import { ClaudeRpc, ClaudeRejected, claudeStatus } from './claude';
 
 type ChatRpc = Pick<Rpc,'request'|'init'|'onEvent'|'onClose'|'close'|'onToolCall'>;
 type State = 'pending'|'streaming'|'completed'|'failed'|'interrupted'|'unknown';
 type Message = {errorCode?:'MODEL_UNAVAILABLE';id:string;sendId:string;role:'user'|'assistant';content:string;provider:Provider;model:string|null;createdAt:string;updatedAt:string;status:State;threadId:string|null;sessionId:string|null};
-type Conversation = {appliedEditorContent?:string;lastInstructionFocusThreadId?:string;lastInstructionFocus?:InstructionKey;lastInstructionFocusHash?:string;instructionToolsVersion?:1;eventToolsVersion?:1;sessionProvider?:Provider;selectedModel:{id:string;name:string;provider?:Provider}|null;phase:TaskPhase|null;lastEventId:number;packs:Pack[];version:1;id:string;projectId:string;taskId:string|null;threadId:string|null;sessionId:string|null;messages:Message[]};
+type Conversation = {command?:ChatCommand;appliedEditorContent?:string;lastInstructionFocusThreadId?:string;lastInstructionFocus?:InstructionKey;lastInstructionFocusHash?:string;instructionToolsVersion?:1;eventToolsVersion?:1;sessionProvider?:Provider;selectedModel:{id:string;name:string;provider?:Provider}|null;phase:TaskPhase|null;lastEventId:number;packs:Pack[];version:1;id:string;projectId:string;taskId:string|null;threadId:string|null;sessionId:string|null;messages:Message[]};
 type Status = {installed:boolean;path:string|null;version:string|null;checkedAt:string;auth:'chatgpt'|'apiKey'|'other'|'none'|'unknown';models:{id:string;name:string}[]|null;usage:'unknown'};
 const key = (p:string,t:string|null) => {if(!(validProjectId(p)||p===INSTRUCTIONS_CHAT_ID)||(p===INSTRUCTIONS_CHAT_ID&&t!==null)||(t!==null&&!validTaskId(t)))throw Error('Invalid chat scope');return JSON.stringify([p,t])};
 const conversationKey = (p:string,t:string|null,phase:TaskPhase|null) => {key(p,t);if(t===null?phase!==null:!isTaskPhase(phase))throw Error('Invalid chat phase');return JSON.stringify([p,t,phase])};
@@ -78,7 +80,7 @@ export class ChatService {
  private taskEvents?:TaskEventsProvider;
  setTaskEvents(provider:TaskEventsProvider){this.taskEvents=provider}
  private busy(p:string,t:string|null){const k=key(p,t);return this.preparing.has(k)||[...this.active.keys()].some(value=>{const [project,task]=JSON.parse(value);return project===p&&task===t})}
- private active=new Map<string,{rpc:ChatRpc;threadId:string|null;turnId:string|null}>();
+ private active=new Map<string,{rpc:ChatRpc;threadId:string|null;turnId:string|null;interrupt?:()=>Promise<void>}>();
  withIdleTask<T>(p:string,t:string,change:()=>T):T{key(p,t);if(this.stopping.has(key(p,t))||this.busy(p,t)||[...this.locks.keys()].some(value=>{const [project,task]=JSON.parse(value);return project===p&&task===t}))throw Error('busy');return change();}
  async startTask<T>(p:string,t:string,change:()=>T,rollback:()=>void,model:string|null,cwd:string,documents:string,provider:Provider='codex'):Promise<T>{
   const task=this.withIdleTask(p,t,change),taskKey=key(p,t);
@@ -103,8 +105,8 @@ export class ChatService {
     if(Date.now()>deadline)throw Error('stop timeout');
     for(const [conversation,active] of this.active){
      const [project,task]=JSON.parse(conversation);
-     if(project===p&&task===t&&active.threadId&&active.turnId&&!interrupted.has(active)){
-      await active.rpc.request('turn/interrupt',{threadId:active.threadId,turnId:active.turnId});
+     if(project===p&&task===t&&(active.interrupt||(active.threadId&&active.turnId))&&!interrupted.has(active)){
+      if(active.interrupt)await active.interrupt();else await active.rpc.request('turn/interrupt',{threadId:active.threadId,turnId:active.turnId});
       interrupted.add(active);
      }
     }
@@ -129,6 +131,7 @@ export class ChatService {
   if(c.lastInstructionFocusHash!==undefined&&(typeof c.lastInstructionFocusHash!=='string'||!/^[a-f0-9]{64}$/.test(c.lastInstructionFocusHash)))throw Error('Invalid history');
   if(c.lastInstructionFocus!==undefined&&!isInstructionKey(c.lastInstructionFocus))throw Error('Invalid history');
   if((c.sessionProvider!==undefined&&!isProvider(c.sessionProvider))||c.messages.some(m=>!isProvider(m.provider)))throw Error('Invalid history');
+  if(c.command!==undefined&&(!c.command||typeof c.command.id!=='string'||!c.command.id||!chatCommands.some(command=>command.name===c.command!.name&&command.kind==='operation')||!['running','completed','failed','interrupted','unknown'].includes(c.command.status)||(c.command.error!==undefined&&typeof c.command.error!=='string')||(c.command.output!==undefined&&(typeof c.command.output!=='string'||Buffer.byteLength(c.command.output)>65536))))throw Error('Invalid history');
   if(!Array.isArray(c.packs)||c.packs.some((pack,i)=>!validPack(pack)||pack.sequence!==i+1)||new Set(c.packs.map(pack=>pack.packId)).size!==c.packs.length)throw Error('Invalid history');
   return c;
  }
@@ -137,7 +140,7 @@ export class ChatService {
   try {const raw=readJson(path);const needsSave=raw.phase===undefined||raw.lastEventId===undefined||(p===INSTRUCTIONS_CHAT_ID&&raw.appliedEditorContent===undefined);const c=this.validateHistory(raw,p,t,phase);if(p===INSTRUCTIONS_CHAT_ID)c.appliedEditorContent??=this.savedEditor();if(needsSave)await this.save(c);return c}
   catch(e:any){if(e.code!=='ENOENT')throw e;const c:Conversation={selectedModel:null,version:1,id:randomUUID(),projectId:p,taskId:t,phase,lastEventId:0,threadId:null,sessionId:null,messages:[],packs:[]};if(p===INSTRUCTIONS_CHAT_ID){c.appliedEditorContent=this.savedEditor();await this.save(c)}return c}
  }
- async get(p:string,t:string|null,phase:TaskPhase|null=t===null?null:'requirements'){const k=conversationKey(p,t,phase);return this.locked(k,async()=>{const c=await this.load(p,t,phase);if(!this.active.has(k)){let changed=false;const events:TopicEvent[]=[];for(const m of c.messages)if(m.status==='pending'||m.status==='streaming'){m.status='unknown';m.updatedAt=now();changed=true}for(const pack of c.packs)if(pack.state==='streaming'){this.closePack(pack,pack.role==='user'?'completed':'unknown',events);changed=true}if(changed){await this.save(c);if(t!==null&&phase==='execution')this.finishExecution(p,t);for(const event of events)this.emit(c,event);this.emit(c,{name:'chat.changed',data:{}})}}return c})}
+ async get(p:string,t:string|null,phase:TaskPhase|null=t===null?null:'requirements'){const k=conversationKey(p,t,phase);return this.locked(k,async()=>{const c=await this.load(p,t,phase);if(!this.active.has(k)){let changed=false;if(c.command?.status==='running'){c.command.status='unknown';c.command.error='コマンドの結果を確認できませんでした';changed=true;}const events:TopicEvent[]=[];for(const m of c.messages)if(m.status==='pending'||m.status==='streaming'){m.status='unknown';m.updatedAt=now();changed=true}for(const pack of c.packs)if(pack.state==='streaming'){this.closePack(pack,pack.role==='user'?'completed':'unknown',events);changed=true}if(changed){await this.save(c);if(t!==null&&phase==='execution')this.finishExecution(p,t);for(const event of events)this.emit(c,event);this.emit(c,{name:'chat.changed',data:{}})}}return c})}
 
  private savedEditor(){return this.instructionSource().find(item=>item.key==='editor')!.content}
  async instructionEditorState(){const c=await this.get(INSTRUCTIONS_CHAT_ID,null);return {pending:c.appliedEditorContent!==this.savedEditor(),busy:this.busy(INSTRUCTIONS_CHAT_ID,null)}}
@@ -172,7 +175,100 @@ export class ChatService {
   const page=this.taskEvents.events(p,null,conversation.lastEventId,undefined,1);
   return {after:conversation.lastEventId,through:page.through};
  }
+ private async codexRpc(executable:string,cwd:string,writable:boolean){
+  const probe=new Rpc(executable,true);let servers:string[];
+  try{await probe.init();const config=(await probe.request('config/read',{cwd})).config;servers=Object.keys(config.mcp_servers??{});if(!servers.every(name=>/^[A-Za-z0-9_-]+$/.test(name)))throw Error('unsafe configuration')}finally{probe.close()}
+  const rpc=new Rpc(executable,true,servers,writable);
+  try{await rpc.init();const config=(await rpc.request('config/read',{cwd})).config;if((config.model_provider!=null&&config.model_provider!=='openai')||Object.values(config.mcp_servers??{}).some((server:any)=>server?.enabled!==false)||config.features?.shell_tool!==writable||config.features?.apps!==false||config.features?.plugins!==false||config.features?.multi_agent!==false||config.features?.browser_use!==false||config.features?.computer_use!==false||config.features?.code_mode_host!==writable||config.features?.hooks!==false||config.features?.skill_mcp_dependency_install!==false||config.web_search!=='disabled')throw Error('unsafe configuration');return rpc}catch(error){rpc.close();throw error}
+ }
+ async command(p:string,t:string|null,command:ChatCommandName,cwd:string,documentDirectory?:string,phase:TaskPhase|null=t===null?null:'requirements',options:{args?:string;provider?:Provider;model?:string|null}={}){
+  if(options.args?.trim()||(options.provider!==undefined&&!isProvider(options.provider)))throw Error('invalid command');
+  if(p===INSTRUCTIONS_CHAT_ID){if(t!==null||phase!==null||documentDirectory||!this.instructionEditor)throw Error('Invalid chat scope');cwd=directory(join(this.instructionEditor.directory,'instruction-editor'))}
+  const taskKey=key(p,t),k=conversationKey(p,t,phase);
+  if(this.stopping.has(taskKey)||this.busy(p,t))throw Error('busy');
+  this.preparing.add(taskKey);
+  try{return await this.locked(k,async()=>{
+   const c=await this.load(p,t,phase),provider=options.provider??c.sessionProvider??'codex';
+   if(findChatCommand(command,provider)?.kind!=='operation')throw Error('invalid command');
+   if(command==='clear'){
+    // 履歴を先に保存し、新しい会話の置換が成功するまで元の会話を維持する。
+    if(!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(c.id))throw Error('Invalid history id');
+    const history=directory(join(dirname(this.path(p,t,phase)),'history'));
+    writeJson(join(history,`${c.id}.json`),c);
+    const current:Conversation={version:1,id:randomUUID(),projectId:p,taskId:t,phase,lastEventId:0,selectedModel:c.selectedModel,threadId:null,sessionId:null,messages:[],packs:[],...(c.appliedEditorContent!==undefined?{appliedEditorContent:c.appliedEditorContent}:{}),command:{id:randomUUID(),name:'clear',status:'completed'}};
+    await this.save(current);this.emit(current,{name:'chat.changed',data:{}});
+    return {command:{...current.command!}};
+   }
+   if(options.provider!==undefined&&options.provider!==(c.sessionProvider??'codex'))throw Error('provider mismatch');
+   if(typeof c.threadId!=='string'||!c.threadId||!c.messages.length)throw Error('no thread');
+   const executable=provider==='claude'?this.claudeExecutable():this.executable();
+   if(!executable)throw Error('unavailable');
+   const status=provider==='claude'?await this.claudeStatus():await this.status();
+   if(status.auth!==(provider==='claude'?'claude':'chatgpt'))throw Error('unavailable');
+   const workingDirectory=documentDirectory&&(phase==='execution'||phase==='retrospective')?cwd:documentDirectory??cwd;
+   const rpc:ChatRpc=provider==='claude'?new ClaudeRpc(executable):await this.codexRpc(executable,workingDirectory,false);
+   if(provider==='claude')try{await rpc.init()}catch(error){rpc.close();throw error}
+   c.command={id:randomUUID(),name:command,status:'running'};
+   try{await this.save(c)}catch(error){rpc.close();throw error}
+   const active={rpc,threadId:c.threadId,turnId:null as string|null,interrupt:undefined as (()=>Promise<void>)|undefined};this.active.set(k,active);
+   this.emit(c,{name:'chat.changed',data:{}});
+   void this.runCommand(k,c,active,workingDirectory,!!documentDirectory,options.model);
+   return {command:{...c.command}};
+  })}finally{this.preparing.delete(taskKey)}
+ }
+ private async runCommand(k:string,c:Conversation,active:{rpc:ChatRpc;threadId:string|null;turnId:string|null;interrupt?:()=>Promise<void>},cwd:string,writable:boolean,model?:string|null){
+  let finished=false,dispatched=false,accepted=false,compacted=false,queue=Promise.resolve();
+  const commandId=c.command!.id,commandName=c.command!.name,label=commandName==='compact'?'圧縮':commandName==='context'?'コンテキスト表示':'使用量表示';
+  let output='';
+  let timeout:ReturnType<typeof setTimeout>|undefined;
+  const finish=async(status:ChatCommand['status'],error?:string)=>{
+   if(finished)return;finished=true;clearTimeout(timeout);
+   try{await this.locked(k,async()=>{const current=await this.load(c.projectId,c.taskId,c.phase);if(current.command?.id!==commandId)return;current.command={...current.command,status,...(error?{error}:{}),...(status==='completed'&&commandName!=='compact'?{output}:{})};await this.save(current);this.emit(current,{name:'chat.changed',data:{}})})}
+   finally{if(this.active.get(k)===active)this.active.delete(k);active.rpc.close()}
+  };
+  const enqueue=(job:()=>Promise<void>)=>{queue=queue.then(job).catch(()=>finish('unknown',`${label}の結果を保存できませんでした`)).catch(()=>{})};
+  // 応答より先に届いた完了通知も、受付が確認できるまで保留する。
+  let release=()=>{};const acknowledgement=new Promise<void>(resolve=>{release=resolve});
+  active.rpc.onEvent=(method,params)=>{
+   if(finished||!dispatched||params?.threadId!==active.threadId)return;
+   if(method==='turn/started'&&typeof params.turn?.id==='string'&&params.turn.id&&!active.turnId)active.turnId=params.turn.id;
+   enqueue(async()=>{
+    await acknowledgement;if(finished||!accepted)return;
+    if(params.turnId!==undefined&&(typeof params.turnId!=='string'||(active.turnId&&params.turnId!==active.turnId)))return;
+    if(method==='thread/command/output'&&commandName!=='compact'&&typeof params.output==='string'){if(!params.turnId||!active.turnId||params.turnId!==active.turnId)return;output=Buffer.from(output+params.output).subarray(0,65536).toString('utf8');while(Buffer.byteLength(output)>65536)output=output.slice(0,-1)}
+    if((method==='item/started'||method==='item/completed')&&params.item?.type==='contextCompaction'&&typeof params.turnId==='string'&&params.turnId&&typeof params.item.id==='string'&&params.item.id){
+     active.turnId??=params.turnId;
+     // 圧縮項目の後に turn が失敗する場合もあるため、ここでは成功を確定しない。
+     if(method==='item/completed')compacted=true;
+    }
+    if(method==='turn/completed'&&active.turnId&&params.turn?.id===active.turnId){
+     const status=params.turn.status,code=params.turn.error?.code;
+     const error=code==='COMPACTION_UNAVAILABLE'?'この環境では会話の圧縮を利用できません':code==='COMPACTION_NOT_NEEDED'?'圧縮できる会話がまだありません':commandName==='compact'?'会話の圧縮に失敗しました':`${label}に失敗しました`;
+     await finish(status==='interrupted'?'interrupted':status==='failed'?'failed':status==='completed'&&(commandName!=='compact'||compacted)?'completed':'unknown',status==='failed'?error:status==='completed'&&commandName==='compact'&&!compacted?'圧縮の完了を確認できませんでした':undefined);
+    }
+   });
+  };
+  active.rpc.onClose=()=>{release();enqueue(()=>finish(dispatched?'unknown':'failed',`${label}中に接続が終了しました`))};
+  active.interrupt=async()=>{
+   if(finished)return;
+   if(active.turnId)await active.rpc.request('turn/interrupt',{threadId:active.threadId,turnId:active.turnId});
+   else {release();await finish('unknown',`${label}を停止しましたが、結果を確認できませんでした`)}
+  };
+  timeout=setTimeout(()=>{release();enqueue(()=>finish('unknown',`${label}の完了を待機中に時間切れになりました`))},60000);
+  try{
+   const result=await active.rpc.request('thread/resume',{threadId:active.threadId,excludeTurns:true,cwd,approvalPolicy:'never',sandbox:writable?'workspace-write':'read-only',model:model??c.selectedModel?.id??null,...(c.sessionProvider==='claude'?{builtinTools:false}:{})});
+   if(result?.thread?.id!==active.threadId)throw Error('Invalid resumed thread');
+   if(finished)return;
+   dispatched=true;
+   const response=await active.rpc.request(commandName==='compact'?'thread/compact/start':'thread/command/start',{threadId:active.threadId,...(commandName!=='compact'?{command:commandName}:{})});
+   if(response?.turn?.id!==undefined){if(typeof response.turn.id!=='string'||(active.turnId&&active.turnId!==response.turn.id))throw Error('Invalid compact turn');active.turnId=response.turn.id}
+   accepted=true;release();
+  }catch(error){release();await finish(error instanceof ClaudeRejected&&error.interrupted?'interrupted':!dispatched||error instanceof Rejected||error instanceof ClaudeRejected?'failed':'unknown',`${label}を開始できませんでした`).catch(()=>{})}
+ }
  async send(p:string,t:string|null,content:string,model:string|null,cwd:string,documentDirectory?:string,phase:TaskPhase|null=t===null?null:'requirements',reserved=false,provider:Provider='codex',instructionFocus?:InstructionKey){
+  const parsedCommand=parseChatCommand(content),messageCommand=parsedCommand?findChatCommand(parsedCommand.name,provider):undefined;
+  if(parsedCommand&&(messageCommand?.kind!=='message'||p===INSTRUCTIONS_CHAT_ID))throw Error('chat command');
+  if(provider==='claude'&&(messageCommand?.name==='review'||messageCommand?.name==='code-review')&&/(?:^|[\s"'`])(?:ultra|--(?:post|comment))(?:$|[\s="'`])/i.test(parsedCommand!.args))throw Error('chat command arguments');
   if(p===INSTRUCTIONS_CHAT_ID&&(t!==null||phase!==null||documentDirectory||!this.instructionEditor))throw Error('Invalid chat scope');
   if(p===INSTRUCTIONS_CHAT_ID&&!isInstructionKey(instructionFocus))throw Error('Invalid instruction focus');
   if(p===INSTRUCTIONS_CHAT_ID)cwd=directory(join(this.instructionEditor!.directory,'instruction-editor'));
@@ -207,10 +303,7 @@ export class ChatService {
     if(provider==='claude'){
      rpc=new ClaudeRpc(executable);await rpc.init();
     }else{
-     const probe=new Rpc(executable,true);let servers:string[];
-     try{await probe.init();const config=(await probe.request('config/read',{cwd:workingDirectory})).config;servers=Object.keys(config.mcp_servers??{});if(!servers.every(name=>/^[A-Za-z0-9_-]+$/.test(name)))throw Error('unsafe configuration')}finally{probe.close()}
-     rpc=new Rpc(executable,true,servers,!!documentDirectory);
-     try{await rpc.init();const config=(await rpc.request('config/read',{cwd:workingDirectory})).config;if((config.model_provider!=null&&config.model_provider!=='openai')||Object.values(config.mcp_servers??{}).some((server:any)=>server?.enabled!==false)||config.features?.shell_tool!==!!documentDirectory||config.features?.apps!==false||config.features?.plugins!==false||config.features?.multi_agent!==false||config.features?.browser_use!==false||config.features?.computer_use!==false||config.features?.code_mode_host!==!!documentDirectory||config.features?.hooks!==false||config.features?.skill_mcp_dependency_install!==false||config.web_search!=='disabled')throw Error('unsafe configuration')}catch(error){rpc.close();throw error}
+     rpc=await this.codexRpc(executable,workingDirectory,!!documentDirectory);
     }
     let c:Conversation;try{c=await this.load(p,t,phase)}catch(error){rpc.close();throw error}
     const source=this.instructionSource();
@@ -222,6 +315,7 @@ export class ChatService {
     const focusHash=focusContent===undefined?undefined:createHash('sha256').update(focusContent).digest('hex');
     const focusNotice=p===INSTRUCTIONS_CHAT_ID&&(!c.threadId||c.lastInstructionFocusThreadId!==c.threadId||c.lastInstructionFocus!==instructionFocus||c.lastInstructionFocusHash!==focusHash)?`現在ユーザーが注目しているインストラクション: ${instructionFocus}\n対象の本文（未展開の編集対象）:\n${focusContent}`:undefined;
     c.sessionProvider=provider;
+    if(c.command?.status==='running'){c.command.status='unknown';c.command.error='コマンドの結果を確認できませんでした'}
     if(c.messages.some(m=>m.status==='pending'||m.status==='streaming')){for(const m of c.messages)if(m.status==='pending'||m.status==='streaming')m.status='unknown'}
     const recovery:TopicEvent[]=[];
     for(const pack of c.packs)if(pack.state==='streaming')this.closePack(pack,pack.role==='user'?'completed':'unknown',recovery);
@@ -342,12 +436,18 @@ export class ChatService {
    c.sessionId=result.thread.sessionId??null;
    if(!claudePending)await update(()=>{});
    dispatched=true;
-   const turn = await active.rpc.request('turn/start', {
+   const parsedCommand=parseChatCommand(content),command=parsedCommand?findChatCommand(parsedCommand.name,c.sessionProvider??'codex'):undefined;
+   const recap='会話のここまでの目的、決定事項、未解決事項、次の作業を簡潔に日本語で要約してください。';
+   const commandText=command?.name==='recap'&&c.sessionProvider!=='claude'?recap+(parsedCommand!.args?'\n'+parsedCommand!.args:''):content;
+   const turn = command?.name==='review'&&c.sessionProvider!=='claude'
+    ? await active.rpc.request('review/start',{threadId:active.threadId,target:parsedCommand!.args?{type:'custom',instructions:parsedCommand!.args}:{type:'uncommittedChanges'},delivery:'inline'})
+    : await active.rpc.request('turn/start', {
     threadId: active.threadId, model, cwd: workingDirectory, approvalPolicy: 'never',
     sandboxPolicy: documentDirectory
      ? {type:'workspaceWrite', writableRoots:[workingDirectory], networkAccess:false, excludeTmpdirEnvVar:true, excludeSlashTmp:true}
      : {type:'readOnly', networkAccess:false},
-    input: [{type:'text', text:content, text_elements:[]},...(focusNotice?[{type:'text',text:focusNotice,text_elements:[]}]:[]),...(referenceHistory.length?[{type:'text',text:`Beni reference conversation history (user and assistant text only; prior messages are context):\n${JSON.stringify(referenceHistory)}`,text_elements:[]}]:[]),...(history?[{type:'text',text:`Beni project event review range: after ${history.after}, through ${history.through}. Use the embedded event tools to inspect relevant events and versions, then acknowledge_events through the reviewed upper limit. This range stays fixed for this send.`,text_elements:[]}]:[])]
+    ...(command&&c.sessionProvider==='claude'?{command:{name:command.name==='review'?'code-review':command.name,args:parsedCommand!.args}}:{}),
+    input: [{type:'text', text:commandText, text_elements:[]},...(focusNotice?[{type:'text',text:focusNotice,text_elements:[]}]:[]),...(referenceHistory.length?[{type:'text',text:`Beni reference conversation history (user and assistant text only; prior messages are context):\n${JSON.stringify(referenceHistory)}`,text_elements:[]}]:[]),...(history?[{type:'text',text:`Beni project event review range: after ${history.after}, through ${history.through}. Use the embedded event tools to inspect relevant events and versions, then acknowledge_events through the reviewed upper limit. This range stays fixed for this send.`,text_elements:[]}]:[])]
    });
    active.turnId=turn.turn.id;
    if(c.projectId===INSTRUCTIONS_CHAT_ID)await update((_ms,current)=>{current.lastInstructionFocus=instructionFocus;current.lastInstructionFocusHash=focusHash;current.lastInstructionFocusThreadId=active.threadId??undefined});
@@ -358,5 +458,5 @@ export class ChatService {
   }catch (error) {rejectedStart=error instanceof Rejected||error instanceof ClaudeRejected;if(claudePending){const rejected=error instanceof ClaudeRejected&&!error.interrupted;active.threadId=rejected?null:previousSession.threadId;c.sessionId=rejected?null:previousSession.sessionId}releaseEvents();await eventQueue.catch(()=>{});await finish(error instanceof ClaudeRejected&&error.interrupted?'interrupted':dispatched && !(error instanceof Rejected||error instanceof ClaudeRejected)?'unknown':'failed',(error instanceof Rejected||error instanceof ClaudeRejected)&&error.modelUnavailable?'MODEL_UNAVAILABLE':undefined).catch(()=>{});active.rpc.close();this.active.delete(k);return}
   // Completion arrives asynchronously after turn/start; the process remains open until then.
  }
- async interrupt(p:string,t:string|null,phase:TaskPhase|null=t===null?null:'requirements'){const active=this.active.get(conversationKey(p,t,phase));if(!active?.threadId||!active.turnId)throw Error('not running');await active.rpc.request('turn/interrupt',{threadId:active.threadId,turnId:active.turnId});}
+ async interrupt(p:string,t:string|null,phase:TaskPhase|null=t===null?null:'requirements'){const active=this.active.get(conversationKey(p,t,phase));if(active?.interrupt){await active.interrupt();return}if(!active?.threadId||!active.turnId)throw Error('not running');await active.rpc.request('turn/interrupt',{threadId:active.threadId,turnId:active.turnId});}
 }

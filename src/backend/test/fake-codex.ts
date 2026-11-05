@@ -21,8 +21,27 @@ for await (const line of createInterface({input:process.stdin})) {
  else if(msg.method==='config/read')send({id:msg.id,result:{config:{web_search:'disabled',mcp_servers:{},features:{shell_tool:process.argv.some((arg,index)=>arg==='--enable'&&process.argv[index+1]==='shell_tool'),apps:false,plugins:false,multi_agent:false,browser_use:false,computer_use:false,code_mode_host:process.argv.some((arg,index)=>arg==='--enable'&&process.argv[index+1]==='code_mode_host'),hooks:false,skill_mcp_dependency_install:false}}}});
  else if(msg.method==='model/list')send({id:msg.id,result:{data:[{model:'model-a',displayName:'Model A'}],nextCursor:null}});
  else if(msg.method==='thread/start'||msg.method==='thread/resume')send({id:msg.id,result:{thread:{id:msg.params.threadId??'thread-1',sessionId:'session-1'}}});
- else if(msg.method==='turn/start'){
-  const text=process.env.FAKE_CODEX_TURN_ACTION??msg.params.input[0].text;
+ else if(msg.method==='thread/compact/start'){
+  const action=process.env.FAKE_CODEX_COMPACT_ACTION??'complete';
+  if(action==='reject'){send({id:msg.id,error:{code:-32600,message:'rejected'}});continue}
+  if(action==='disconnect-before-ack')process.exit(0);
+  const threadId=msg.params.threadId;
+  const event=(method:string,extra:Record<string,unknown>)=>send({method,params:{threadId,turnId:turn,...extra}});
+  if(action!=='no-turn')event('turn/started',{turn:{id:turn}});
+  const complete=()=>{event('item/completed',{item:{id:'compact-1',type:'contextCompaction'}});if(action==='boundary-disconnect'){setTimeout(()=>process.exit(0),10);return}event('turn/completed',{turn:{id:turn,status:action==='boundary-failure'?'failed':action==='boundary-interrupt'?'interrupted':'completed'}})};
+  if(action==='early'){complete();setTimeout(()=>send({id:msg.id,result:{}}),100);continue}
+  send({id:msg.id,result:{}});
+  if(action==='disconnect'){setTimeout(()=>process.exit(0),20);continue}
+  if(action==='wait'||action==='no-turn')continue;
+  if(action==='unrelated'){
+   send({method:'item/completed',params:{threadId:'wrong-thread',turnId:turn,item:{id:'wrong-thread',type:'contextCompaction'}}});
+   event('item/completed',{turnId:'wrong-turn',item:{id:'wrong-turn',type:'contextCompaction'}});
+  }
+  event('item/started',{item:{id:'compact-1',type:'contextCompaction'}});
+  setTimeout(()=>{if(action==='fail')event('turn/completed',{turn:{id:turn,status:'failed'}});else if(action==='missing-boundary')event('turn/completed',{turn:{id:turn,status:'completed'}});else complete()},120);
+ }
+ else if(msg.method==='turn/start'||msg.method==='review/start'){
+  const text=process.env.FAKE_CODEX_TURN_ACTION??(msg.method==='review/start'?'review':msg.params.input[0].text);
   if(text==='write documents'&&!['shell_tool','code_mode_host'].every(feature=>process.argv.some((arg,index)=>arg==='--enable'&&process.argv[index+1]===feature))){send({id:msg.id,error:{code:-32600,message:'Required tools disabled'}});continue}
   if(text==='write documents'){writeFileSync(join(msg.params.cwd,'requirements.md'),'# Updated requirements\n');writeFileSync(join(msg.params.cwd,'implementation.md'),'# Updated plan\n')}
   if(text==='disconnect')process.exit(0);

@@ -162,6 +162,14 @@ export function cleanDeletedTask(staged: string) {
 export function validateChatDirectory(path: string) {
   directory(path);
   for (const name of readdirSync(path)) {
+    if (name === 'history') {
+      const history = directory(join(path, name));
+      for (const entry of readdirSync(history)) {
+        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.json$/.test(entry)) throw Error('Invalid chat history file');
+        readJson(join(history, entry));
+      }
+      continue;
+    }
     if (!name.endsWith('.json') || !isTaskPhase(name.slice(0, -5))) throw Error('Invalid phase chat file');
     readJson(join(path, name));
   }
