@@ -16,7 +16,7 @@
 
 ## フェーズ別の保存
 
-`phase` は `requirements`、`documents`、`implementation-plan`、`implementation`。各会話は独立した会話ID・発言・パック列・CLIセッション・`lastEventId` を持つ。未送信のフェーズは空の会話として扱い、保存ファイルは必要時に作成する。Generalのphaseはnull。
+`phase` は `requirements`、`documents`、`implementation-plan`、`implementation`、`retrospective`。各会話は独立した会話ID・発言・パック列・CLIセッション・`lastEventId` を持つ。未送信のフェーズは空の会話として扱い、保存ファイルは必要時に作成する。Generalのphaseはnull。
 
 旧タスク会話は要件定義の会話へ引き継ぐ。具体的な移行・競合時の扱いは [会話の移行](migration.md#フェーズ別会話への移行) に定義する。変更イベントと本文の版は [タスクの変更履歴](../../objects/task-events.md) に従う。
 

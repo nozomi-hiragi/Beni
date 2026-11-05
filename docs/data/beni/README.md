@@ -11,6 +11,7 @@
 ```text
 .beni/
 ├── project.json                  プロジェクト情報
+├── knowledge.md                  プロジェクト共通のナレッジ（必要時）
 ├── legacy-history.json           旧DBの履歴（移行した場合のみ）
 ├── chat/
 │   ├── general.json              ジェネラル会話
@@ -22,6 +23,7 @@
         ├── requirements.md       要件定義
         ├── documents.md          仕様整理（資料・仕様の目次）
         ├── implementation-plan.md 実装手順
+        ├── retrospective.md      反省会の記録（反省会から）
         ├── *.md                  追加文書（資料または仕様）
         └── .history/
             ├── index.json        変更イベントと観測状態
@@ -96,3 +98,9 @@ UUIDv7は生成時刻を含むため、IDによって時刻順に並べやすい
 `task.json` がなく文書が残ったフォルダーは、名前を `Unknown` として自動登録・復元します。ユーザーの確認や名前入力を待ちません。元の文書は維持し、本文からタスク名を推測しません。復元済みのタスクを再検出しても重複登録しません。過去のフェーズ・状態・日時を文書から推測して埋めません。復元後の操作を始める初期値は `phase: requirements`・`status: idle` とし、過去の状態を復元できたとは扱いません。不明な過去日時は `null` とします。
 
 [データ設計の全体像](../README.md)
+
+## 反省会と完了状態
+
+反省会のphaseは `retrospective`。初回到達時にタスクフォルダの `retrospective.md` を用意し、既存本文は上書きしない。通常のタスク文書として変更履歴を保存する。タスクの完了は `status: completed`、再開後は `status: idle` とし、phaseは反省会のまま維持する。完了・再開で更新日時を更新する。
+
+プロジェクト共通の `.beni/knowledge.md` は反省会で蓄積し、次のタスクに引き継ぐ。タスクの文書変更イベントには含めず、送信時に最新版を参照する。

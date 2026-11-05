@@ -39,7 +39,7 @@ Beni/
 │       ├── Home.tsx                  プロジェクト・タスク作成、タスク一覧の検索・並べ替え
 │       ├── Workspace.tsx             チャット・タスク・文書の表示とタブ管理
 │       ├── api.ts                    バックエンドへの JSON リクエストとエラー処理
-│       ├── model-cache.ts            接続先別のモデル一覧とフェーズ別選択のキャッシュ
+│       ├── model-cache.ts            接続先別モデル一覧・フェーズ別チャットモデル・タスク別実装モデルの記憶
 │       ├── communication.ts          共通 WS、購読の共有、再接続
 │       ├── chat-sync.ts              チャットのパック照合・順序付き確定・再同期
 │       ├── chat-scroll.ts            最下部にいる間のスクロール追従
@@ -60,7 +60,7 @@ Beni/
 │           ├── ChatPanel.tsx         Codex との会話、モデル選択、送信・中断、過去の履歴表示
 │           ├── CodexSettings.tsx     Codex のインストール・認証・モデルなどの状態確認
 │           ├── ChatComposer.tsx      テキスト入力と送信フォーム
-│           ├── PhaseIndicator.tsx    フェーズ表示。現状は「タスク内容」の操作に対応
+│           ├── PhaseIndicator.tsx    フェーズ表示と実装開始・停止・タスク完了・再開
 │           ├── TabBar.tsx            タブの選択と閉じる操作
 │           ├── TreeView.tsx          項目の階層表示と選択
 │           └── *.test.tsx            部品の表示・操作のテスト
