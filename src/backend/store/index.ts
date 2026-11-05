@@ -1,4 +1,4 @@
-import { taskDocuments, taskDocumentSnapshot, documentContentsKey } from '../documents';
+import { taskDocuments, taskDocumentSnapshot, documentContentsKey, retrospectiveDocument } from '../documents';
 import { Database } from 'bun:sqlite';
 import { existsSync, lstatSync, mkdirSync, readdirSync, renameSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -176,7 +176,8 @@ export class Store {
   selectTaskPhase(projectId: string, taskId: string, expectedPhase: string, target: TaskPhase): TaskRow {
     const {file, value} = this.scopedTask(projectId, taskId);
     if (!taskPhases.includes(target)) throw Error('invalid phase');
-    if (value.phase !== expectedPhase) throw Error('phase conflict');
+    if (value.phase !== expectedPhase || value.status==='completed') throw Error('phase conflict');
+    if(target==='retrospective')retrospectiveDocument(join(file,'..'));
     if(value.phase===target)return {id:value.id,project_id:projectId,name:value.name,phase:value.phase,status:value.status,createdAt:value.createdAt,updatedAt:value.updatedAt};
     captureTaskHistory(join(file, '..'), value.phase);
     value.phase = target;
@@ -184,6 +185,14 @@ export class Store {
     writeJson(file, value);
     captureTaskHistory(join(file, '..'), target, expectedPhase as TaskPhase);
     return {id: value.id, project_id: projectId, name: value.name, phase: value.phase, status: value.status, createdAt: value.createdAt, updatedAt: value.updatedAt};
+  }
+  setTaskCompleted(projectId:string,taskId:string,completed:boolean):TaskRow {
+    const {file,value}=this.scopedTask(projectId,taskId);
+    if(value.phase!=='retrospective'||value.status!==(completed?'idle':'completed'))throw Error('phase conflict');
+    value.status=completed?'completed':'idle';
+    value.updatedAt=new Date(Math.max(Date.now(),(Date.parse(value.updatedAt??'')||0)+1)).toISOString();
+    writeJson(file,value);
+    return {id:value.id,project_id:projectId,name:value.name,phase:value.phase,status:value.status,createdAt:value.createdAt,updatedAt:value.updatedAt};
   }
   advanceTaskPhase(projectId: string, taskId: string, expectedPhase: string, direction: 'next' | 'back' = 'next'): TaskRow {
     const {file, value} = this.scopedTask(projectId, taskId);

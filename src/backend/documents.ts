@@ -84,3 +84,15 @@ export function watchTaskDocuments(path:string, changed:()=>void, failed:()=>voi
  watcher.on('error',failed);
  return ()=>{clearTimeout(timer);watcher.close()};
 }
+
+export function retrospectiveDocument(path:string) {
+ const file=join(path,'retrospective.md');
+ try {writeFileSync(file,'# 反省会\n\n## 未達・意図との差\n\n## 原因\n\n## 次回への改善\n',{flag:'wx',mode:0o600})} catch(error:any){if(error.code!=='EEXIST')throw error}
+ regularFile(file);
+}
+export function projectKnowledge(folder:string) {
+ const root=realpathSync(folder), path=join(directory(join(root,'.beni')),'knowledge.md');
+ try {writeFileSync(path,'# プロジェクトの学び\n',{flag:'wx',mode:0o600})}catch(error:any){if(error.code!=='EEXIST')throw error}
+ if(regularFile(path).size>1024*1024)throw Error('Knowledge too large');
+ return path;
+}

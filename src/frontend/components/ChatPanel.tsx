@@ -20,7 +20,7 @@ const restoreDraft = (draft: Draft, content: string) => {
 };
 const stateLabel: Record<ChatMessage['status'], string> = { pending: '送信待ち', streaming: '応答中', completed: '完了', failed: '失敗', interrupted: '中断', unknown: '結果不明' };
 
-export default function ChatPanel(props: { projectId: string; taskId?: string; phase?: TaskPhase; onModelChange?: (model: Model | null) => void }) {
+export default function ChatPanel(props: { projectId: string; taskId?: string; phase?: TaskPhase; readOnly?: boolean; onModelUnavailable?: (model: string, provider?: Model['provider']) => void; onBusyChange?: (busy: boolean) => void; onModelChange?: (model: Model | null) => void }) {
   const [conversationState,setConversationState]=createStore<{value?:Conversation}>({});
   const conversation=()=>conversationState.value;
   const setConversation=(value:Conversation|undefined)=>setConversationState('value',value===undefined?undefined:reconcile(value,{key:'id'}));
@@ -89,6 +89,7 @@ export default function ChatPanel(props: { projectId: string; taskId?: string; p
     const rejected = value?.messages.filter(message => message.errorCode === 'MODEL_UNAVAILABLE') ?? [];
     const draft = draftFor(scope);
     for (const message of rejected) {
+      if (message.model) props.onModelUnavailable?.(message.model, message.provider);
       if (!draft.pending?.sendId || draft.pending.sendId !== message.sendId || draft.restored.has(message.sendId)) continue;
       draft.restored.add(message.sendId);
       if (message.model) rejectModel(scope, message.model, message.provider);
@@ -106,10 +107,11 @@ export default function ChatPanel(props: { projectId: string; taskId?: string; p
     return message && (message.status === 'failed' || message.status === 'interrupted' || message.status === 'unknown') ? stateLabel[message.status] : undefined;
   };
   const busy = () => sending() || !!conversation()?.messages.some(message => message.status === 'pending' || message.status === 'streaming');
+  createEffect(() => props.onBusyChange?.(busy()));
   async function send(event: SubmitEvent) {
     event.preventDefault();
     const currentKey = key(), draft = draftFor(currentKey), content = draft.text, version = draft.version, sentModel = selection();
-    if (draft.sending || busy() || !conversation() || loadError() || !content.trim() || !modelAvailable()) return;
+    if (props.readOnly || draft.sending || busy() || !conversation() || loadError() || !content.trim() || !modelAvailable()) return;
     draft.sending = true; draft.error = ''; draft.listeners.forEach(listener => listener());
     try {
       draft.pending = {content, version};
@@ -148,9 +150,9 @@ export default function ChatPanel(props: { projectId: string; taskId?: string; p
     <Show when={busy()}><div role="status" class="mx-4 mb-3 self-start"><div class="aura text-primary motion-reduce:animate-none"><div class="card bg-base-100 px-4 py-2 text-sm text-base-content">作業中…</div></div></div></Show>
     <Show when={latestOutcome()}><p role="status" class="mx-4 mb-2 text-sm">直近の応答: {latestOutcome()}</p></Show>
     <Show when={error()}><p role="alert" class="mx-4 mb-2 text-sm text-error">{error()}</p></Show>
-    <form class="border-t border-base-300 p-4" onSubmit={send}>
+    <Show when={!props.readOnly}><form class="border-t border-base-300 p-4" onSubmit={send}>
       <textarea class="textarea textarea-bordered min-h-24 w-full resize-y" aria-label="希望や回答を入力" placeholder="希望や回答を入力" required value={text()} onInput={event => { const draft = draftFor(key()); draft.text = event.currentTarget.value; draft.version++; setText(draft.text); }} />
-      <div class="mt-2 flex items-center justify-end gap-2"><select ref={modelSelect} class="select select-bordered select-sm" aria-label="モデル" value={model()} disabled={busy() || !models().length} onChange={event => selectModel(event.currentTarget.value)}><Show when={model() && !modelAvailable()}><option value={model()} selected disabled>⚠️ {modelLabel(selection()?.name ?? model(), selection()?.provider)}</option></Show><Show when={models().length} fallback={<Show when={!model()}><option value="">未確認</option></Show>}><For each={models().filter(item => modelAvailable() || modelValue(item) !== model())}>{item => <option value={modelValue(item)} selected={modelValue(item) === model()} disabled={!providerReady(item.provider)}>{modelLabel(item.name, item.provider)}</option>}</For></Show></select><Show when={busy()}><button type="button" class="btn btn-sm" disabled={interrupting()} onClick={interrupt}>中断</button></Show><button class="btn btn-primary btn-sm" type="submit" disabled={busy() || !text().trim() || !modelAvailable() || !conversation() || !!loadError()}>{busy() ? '応答中...' : '送信'}</button></div>
-    </form>
+      <div class="mt-2 flex items-center justify-end gap-2"><select ref={modelSelect} class="select select-bordered select-sm w-auto" style={{ 'field-sizing': 'content' }} aria-label="モデル" value={model()} disabled={busy() || !models().length} onChange={event => selectModel(event.currentTarget.value)}><Show when={model() && !modelAvailable()}><option value={model()} selected disabled>⚠️ {modelLabel(selection()?.name ?? model(), selection()?.provider)}</option></Show><Show when={models().length} fallback={<Show when={!model()}><option value="">未確認</option></Show>}><For each={models().filter(item => modelAvailable() || modelValue(item) !== model())}>{item => <option value={modelValue(item)} selected={modelValue(item) === model()} disabled={!providerReady(item.provider)}>{modelLabel(item.name, item.provider)}</option>}</For></Show></select><Show when={busy()}><button type="button" class="btn btn-sm" disabled={interrupting()} onClick={interrupt}>中断</button></Show><button class="btn btn-primary btn-sm" type="submit" disabled={busy() || !text().trim() || !modelAvailable() || !conversation() || !!loadError()}>{busy() ? '応答中...' : '送信'}</button></div>
+    </form></Show>
   </>;
 }

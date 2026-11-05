@@ -472,6 +472,101 @@ test('Claude の状態・送信と実装開始は接続先を検証して引き�
   await writeFile(join(store.taskDocumentFolder(project.id,task.id),'implementation-plan.md'),'# 実装手順\n\n1. 仕様を実装する');
   const started=await post(`/api/tasks/${task.id}/start`,{phase:'implementation-plan',model:'haiku',provider:'claude'});expect(started.status).toBe(200);expect((await started.json()).phase).toBe('implementation');
   await wait('implementation');expect((await chat.get(project.id,task.id,'implementation')).messages[0]).toMatchObject({provider:'claude',model:'haiku'});
-  expect((await post(`/api/tasks/${task.id}/stop`,{phase:'implementation'})).status).toBe(200);
+  expect(store.task(task.id)!.phase).toBe('retrospective');
+  expect((await post(`/api/tasks/${task.id}/stop`,{phase:'implementation'})).status).toBe(409);
  }finally{store.close();await rm(folder,{recursive:true,force:true})}
+});
+
+test('反省会の完了と再開はidle時のみ許可し、実装中と完了後の送信を拒否する',async()=>{
+ const folder=await mkdtemp(join(tmpdir(),'beni-retro-')),store=new Store(':memory:');
+ const project=store.createProject('Example',folder),task=store.createTask(project.id,'Task');
+ const chat=new ChatService(()=>folder,()=>join(import.meta.dir,'test/fake-codex.ts'));
+ let notifications=0;const handle=createHandler(store,folder,chat,undefined,undefined,()=>notifications++);
+ const post=(path:string,input:object)=>handle(new Request(`http://127.0.0.1:3210${path}`,{method:'POST',headers:{origin:'http://127.0.0.1:3210','content-type':'application/json'},body:JSON.stringify({projectId:project.id,...input})}));
+ try {
+  await writeFile(join(store.taskDocumentFolder(project.id,task.id),'implementation-plan.md'),'# Plan\nImplement and test.');
+  expect((await post(`/api/tasks/${task.id}/start`,{phase:'requirements',model:null})).status).toBe(200);
+  expect((await post('/api/chat/send',{taskId:task.id,phase:'implementation',content:'hello',model:null})).status).toBe(409);
+  expect((await post('/api/chat/interrupt',{taskId:task.id,phase:'implementation'})).status).toBe(409);
+  for(let i=0;i<100&&store.task(task.id)!.phase==='implementation';i++)await Bun.sleep(20);
+  expect(store.task(task.id)!.phase).toBe('retrospective');expect(notifications).toBeGreaterThan(1);
+  expect(await readFile(join(store.taskDocumentFolder(project.id,task.id),'retrospective.md'),'utf8')).toContain('原因');
+  expect((await post(`/api/tasks/${task.id}/phase`,{phase:'retrospective',target:'requirements'})).status).toBe(409);
+  expect((await post(`/api/tasks/${task.id}/complete`,{phase:'retrospective'})).status).toBe(200);
+  expect(store.task(task.id)!.status).toBe('completed');
+  expect((await post('/api/chat/send',{taskId:task.id,phase:'retrospective',content:'hello',model:null})).status).toBe(409);
+  expect((await post(`/api/tasks/${task.id}/complete`,{phase:'retrospective'})).status).toBe(409);
+  expect((await post(`/api/tasks/${task.id}/reopen`,{phase:'retrospective'})).status).toBe(200);
+  expect(store.task(task.id)!.status).toBe('idle');
+  expect((await post('/api/chat/send',{taskId:task.id,phase:'retrospective',content:'hello',model:null})).status).toBe(202);
+  for(let i=0;i<100;i++){if((await chat.get(project.id,task.id,'retrospective')).messages.at(-1)?.status==='completed')break;await Bun.sleep(20)}
+  expect((await chat.get(project.id,task.id,'retrospective')).messages.at(-1)?.status).toBe('completed');
+  expect(await readFile(join(folder,'.beni','knowledge.md'),'utf8')).toContain('学び');
+  store.selectTaskPhase(project.id,task.id,'retrospective','implementation');
+  const restarted=createHandler(store,folder,new ChatService(()=>folder,()=>null));
+  const state=await (await restarted(new Request('http://127.0.0.1:3210/api/state'))).json();
+  expect(state.tasks.find((value:any)=>value.id===task.id).phase).toBe('retrospective');
+ }finally{store.close();await rm(folder,{recursive:true,force:true})}
+});
+
+test('knowledgeのリンク拒否でも実装開始を戻しactiveを解放する',async()=>{
+ const folder=await mkdtemp(join(tmpdir(),'beni-knowledge-')),store=new Store(':memory:');
+ const project=store.createProject('Example',folder),task=store.createTask(project.id,'Task');
+ const chat=new ChatService(()=>folder,()=>join(import.meta.dir,'test/fake-codex.ts'));let changed=0;
+ const handle=createHandler(store,folder,chat,undefined,undefined,()=>changed++);
+ const post=(action:string,input:object)=>handle(new Request(`http://127.0.0.1:3210/api/tasks/${task.id}/${action}`,{method:'POST',headers:{origin:'http://127.0.0.1:3210','content-type':'application/json'},body:JSON.stringify({projectId:project.id,...input})}));
+ try {
+  await writeFile(join(store.taskDocumentFolder(project.id,task.id),'implementation-plan.md'),'# Plan\nImplement.');
+  const outside=join(folder,'outside.md');await writeFile(outside,'preserve');await symlink(outside,join(folder,'.beni','knowledge.md'));
+  expect((await post('start',{phase:'requirements',model:null})).status).toBe(200);
+  for(let i=0;i<100&&store.task(task.id)!.phase==='implementation';i++)await Bun.sleep(20);
+  expect(store.task(task.id)!.phase).toBe('requirements');expect(changed).toBeGreaterThan(1);
+  expect((await post('phase',{phase:'requirements',target:'documents'})).status).toBe(200);
+  expect(await readFile(outside,'utf8')).toBe('preserve');
+ }finally{store.close();await rm(folder,{recursive:true,force:true})}
+});
+
+test('実装の自然なfailedとunknownは反省会へ通知し停止競合は実装手順へ戻す',async()=>{
+ const folder=await mkdtemp(join(tmpdir(),'beni-retro-terminal-')),store=new Store(':memory:');
+ const project=store.createProject('Example',folder),fake=join(import.meta.dir,'test/fake-codex.ts');
+ const chat=new ChatService(()=>folder,()=>fake,()=>join(import.meta.dir,'test/fake-claude.ts'));let changed=0;
+ const handle=createHandler(store,folder,chat,undefined,undefined,()=>changed++);
+ const post=(id:string,action:string,input:object)=>handle(new Request(`http://127.0.0.1:3210/api/tasks/${id}/${action}`,{method:'POST',headers:{origin:'http://127.0.0.1:3210','content-type':'application/json'},body:JSON.stringify({projectId:project.id,...input})}));
+ try {
+  for(const [action,status] of [['fail','failed'],['disconnect','unknown']] as const){
+   const task=store.createTask(project.id,action);await writeFile(join(store.taskDocumentFolder(project.id,task.id),'implementation-plan.md'),'# Plan\nImplement.');
+   process.env.FAKE_CODEX_TURN_ACTION=action;
+   expect((await post(task.id,'start',{phase:'requirements',model:null})).status).toBe(200);
+   for(let i=0;i<100&&store.task(task.id)!.phase==='implementation';i++)await Bun.sleep(20);
+   expect(store.task(task.id)!.phase).toBe('retrospective');
+   expect((await chat.get(project.id,task.id,'implementation')).messages.at(-1)?.status).toBe(status);
+  }
+  delete process.env.FAKE_CODEX_TURN_ACTION;
+  const task=store.createTask(project.id,'Stop pending');await writeFile(join(store.taskDocumentFolder(project.id,task.id),'implementation-plan.md'),'# Plan\nImplement.');
+  process.env.FAKE_CLAUDE_ACCEPT_DELAY_MS='500';process.env.FAKE_CLAUDE_LOG=join(folder,'claude.jsonl');
+  expect((await post(task.id,'start',{phase:'requirements',model:'sonnet',provider:'claude'})).status).toBe(200);
+  for(let i=0;i<100;i++){try{if((await readFile(process.env.FAKE_CLAUDE_LOG,'utf8')).length)break}catch{}await Bun.sleep(10)}
+  expect((await post(task.id,'stop',{phase:'implementation'})).status).toBe(200);
+  expect(store.task(task.id)!.phase).toBe('implementation-plan');
+  expect((await chat.get(project.id,task.id,'implementation')).messages.at(-1)?.status).toBe('interrupted');
+  expect(changed).toBe(6);
+ }finally{delete process.env.FAKE_CODEX_TURN_ACTION;delete process.env.FAKE_CLAUDE_ACCEPT_DELAY_MS;delete process.env.FAKE_CLAUDE_LOG;store.close();await rm(folder,{recursive:true,force:true})}
+});
+
+test('次回準備の知識本文と反省会のproject cwdをCLIへ渡す',async()=>{
+ const folder=await mkdtemp(join(tmpdir(),'beni-retro-context-')),store=new Store(':memory:');
+ const project=store.createProject('Example',folder),task=store.createTask(project.id,'Preparation'),retro=store.createTask(project.id,'Review');
+ const chat=new ChatService(()=>folder,()=>join(import.meta.dir,'test/fake-codex.ts')),log=join(folder,'rpc.jsonl');
+ try {
+  await writeFile(join(folder,'.beni','knowledge.md'),'# 学び\n確認済み: 検証は段階ごとに実施する。');process.env.FAKE_CODEX_LOG=log;
+  const wait=async(id:string,phase:'requirements'|'retrospective')=>{for(let i=0;i<100;i++){if((await chat.get(project.id,id,phase)).messages.at(-1)?.status==='completed')return;await Bun.sleep(20)}throw Error('timed out')};
+  await chat.send(project.id,task.id,'hello',null,folder,store.taskDocumentFolder(project.id,task.id),'requirements');await wait(task.id,'requirements');
+  store.selectTaskPhase(project.id,retro.id,'requirements','retrospective');
+  await chat.send(project.id,retro.id,'hello',null,folder,store.taskDocumentFolder(project.id,retro.id),'retrospective');await wait(retro.id,'retrospective');
+  const records=(await readFile(log,'utf8')).trim().split('\n').map(line=>JSON.parse(line)),starts=records.filter(record=>record.method==='thread/start'),turns=records.filter(record=>record.method==='turn/start');
+  expect(starts[0].params.developerInstructions).toContain('確認済み: 検証は段階ごとに実施する。');
+  expect(starts[0].params.cwd).toBe(store.taskDocumentFolder(project.id,task.id));
+  expect(starts[1].params.cwd).toBe(folder);expect(starts[1].params.developerInstructions).toContain('implementation.json');
+  expect(turns[1].params.sandboxPolicy.writableRoots).toEqual([folder]);
+ }finally{delete process.env.FAKE_CODEX_LOG;store.close();await rm(folder,{recursive:true,force:true})}
 });

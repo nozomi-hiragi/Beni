@@ -38,7 +38,7 @@ export function chooseModel(scope: string, model: Selection) {
 }
 export function rejectModel(scope: string, id: string, provider: Provider = 'codex') {
   const selected = selectedModel(scope);
-  if (selected?.id === id && (selected.provider ?? 'codex') === provider) chooseModel(scope, {...selected, rejected: true});
+  if (!selected?.rejected && selected?.id === id && (selected.provider ?? 'codex') === provider) chooseModel(scope, {...selected, rejected: true});
 }
 export function modelIsAvailable(scope: string) {
   const selected = selectedModel(scope);

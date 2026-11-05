@@ -1,5 +1,5 @@
-import { modelScope, rejectModel } from './model-cache';
-import { batch, createEffect, createMemo, createSignal, onCleanup, onMount, Show } from 'solid-js';
+import { availableModels, chooseModel, loadModels, modelIsAvailable, modelLabel, modelScope, modelValue, providerReady, rejectModel, selectedModel as cachedModel } from './model-cache';
+import { batch, createEffect, createMemo, createSignal, For, onCleanup, onMount, Show, untrack } from 'solid-js';
 import { createStore, reconcile } from 'solid-js/store';
 import { api, ApiError } from './api';
 import { isTaskPhase, type TaskPhase } from '../shared/task-phase';
@@ -11,7 +11,7 @@ import TabBar from './components/TabBar';
 import TreeView from './components/TreeView';
 import TerminalPanel from './components/TerminalPanel';
 import ResizeHandle from './components/ResizeHandle';
-import type { AppState, Document, Model, Task, TaskDetail } from './types';
+import type { AppState, Document, Task, TaskDetail } from './types';
 
 export interface WorkspaceProps {
   taskId?: string;
@@ -25,7 +25,22 @@ const documentId = (document: Document) => document.path ?? JSON.stringify([docu
 type DocumentTabs = { known: string[]; open: string[]; selected?: string };
 
 export default function Workspace(props: WorkspaceProps) {
-  const [selectedModel, setSelectedModel] = createSignal<Model | null>(null);
+  const [chatBusy, setChatBusy] = createSignal(false);
+  const implementationScope = () => modelScope(detail()?.task.projectId ?? '', activeTask(), 'implementation-assignee');
+  const implementationModel = () => cachedModel(implementationScope());
+  const implementationAvailable = () => modelIsAvailable(implementationScope());
+  createEffect(() => {
+    const task = detail()?.task;
+    if (!task) return;
+    const scope = implementationScope();
+    void loadModels(false).catch(() => {});
+    untrack(() => { if (cachedModel(scope) && !modelIsAvailable(scope)) void loadModels(true, cachedModel(scope)?.provider).catch(() => {}); });
+  });
+  createEffect(() => {
+    if (!detail()) return;
+    const candidate = availableModels().find(item => providerReady(item.provider));
+    if (!implementationModel() && candidate) chooseModel(implementationScope(), candidate);
+  });
   const [detailState,setDetailState]=createStore<{value?:TaskDetail}>({});
   const detail=()=>detailState.value;
   const setDetail=(value:TaskDetail|undefined)=>setDetailState('value',value===undefined?undefined:reconcile(value,{key:'id'}));
@@ -122,7 +137,8 @@ export default function Workspace(props: WorkspaceProps) {
     const open = previous
       ? [...previous.open.filter(id => available.includes(id)), ...available.filter(id => !previous.known.includes(id))]
       : available;
-    const initialName = values.some(document => document.name === 'requirements.md') ? 'requirements.md' : values.some(document => document.name === '指示書.md') ? '指示書.md' : values[0]?.name;
+    const phaseDocument = phaseDocuments.find(item => item.phase === detail()?.task.phase)?.name;
+    const initialName = phaseDocument && values.some(document => document.name === phaseDocument) ? phaseDocument : values.some(document => document.name === 'requirements.md') ? 'requirements.md' : values.some(document => document.name === '指示書.md') ? '指示書.md' : values[0]?.name;
     const newest = values.filter(document => document.name === initialName).reduce<Document | undefined>(
       (latest, document) => !latest || document.version > latest.version ? document : latest, undefined,
     );
@@ -156,6 +172,10 @@ export default function Workspace(props: WorkspaceProps) {
           setTasks(previous => previous.map(item => item.id === data.task.id ? data.task : item));
           setProjectId(data.task.projectId);
           adoptDocuments(taskId, data.documents);
+          if (previousPhase !== data.task.phase && data.task.phase === 'retrospective') {
+            const retrospective = data.documents.filter(item => item.name === 'retrospective.md').reduce<Document | undefined>((latest, item) => !latest || item.version > latest.version ? item : latest, undefined);
+            if (retrospective) openDocument(documentId(retrospective));
+          }
           setLoadError('');
         });
         if (!unsubscribeEvents) {
@@ -251,12 +271,16 @@ export default function Workspace(props: WorkspaceProps) {
             <Show when={loadError()}><div role="alert" class="alert alert-error text-sm">{loadError()}</div></Show>
             <Show when={loading() && !detail()}><p class="p-4 text-sm text-base-content/60">読み込み中...</p></Show>
             <Show when={detail() && detail()?.task.id === activeTask()}>
-              <PhaseIndicator phase={detail()!.task.phase} advancing={advancing()} canStart={!!detail()?.canStart && !!selectedModel()} onChange={async target => {
-                const current = detail(), requestedModel = selectedModel();
-                if (!current || advancing() || (target === 'start' && !selectedModel())) return;
+              <PhaseIndicator phase={detail()!.task.phase} advancing={advancing()} canStart={!!detail()?.canStart && implementationAvailable()} completed={detail()?.task.status === 'completed'} busy={chatBusy()} modelSelect={<select class="select select-bordered select-sm w-auto" style={{ 'field-sizing': 'content' }} aria-label="実装担当モデル" value={implementationModel() ? modelValue(implementationModel()!) : ''} disabled={advancing() || !availableModels().length} onChange={event => { const model = availableModels().find(item => modelValue(item) === event.currentTarget.value); if (model) chooseModel(implementationScope(), model); }}>
+                <Show when={implementationModel() && !implementationAvailable()}><option value={modelValue(implementationModel()!)} disabled>⚠️ {modelLabel(implementationModel()!.name, implementationModel()!.provider)}</option></Show>
+                <Show when={!implementationModel()}><option value="">未確認</option></Show>
+                <For each={availableModels().filter(item => implementationAvailable() || modelValue(item) !== (implementationModel() ? modelValue(implementationModel()!) : ''))}>{item => <option value={modelValue(item)} selected={modelValue(item) === (implementationModel() ? modelValue(implementationModel()!) : '')} disabled={!providerReady(item.provider)}>{modelLabel(item.name, item.provider)}</option>}</For>
+              </select>} onChange={async target => {
+                const current = detail(), requestedModel = implementationModel();
+                if (!current || advancing() || (target === 'start' && !implementationAvailable())) return;
                 setAdvancing(true); setPhaseError('');
                 try {
-                  const result = await api<Task>(`/api/tasks/${current.task.id}/${target === 'start' || target === 'stop' ? target : 'phase'}`, {projectId: current.task.projectId, phase: current.task.phase, ...(target === 'start' ? {model: requestedModel?.id, provider: requestedModel?.provider ?? 'codex'} : target === 'stop' ? {} : {target})});
+                  const result = await api<Task>(`/api/tasks/${current.task.id}/${['start', 'stop', 'complete', 'reopen'].includes(target) ? target : 'phase'}`, {projectId: current.task.projectId, phase: current.task.phase, ...(target === 'start' ? {model: requestedModel?.id, provider: requestedModel?.provider ?? 'codex'} : ['stop', 'complete', 'reopen'].includes(target) ? {} : {target})});
                   if (detail()?.task.id === current.task.id) {
                     setDetail({...detail()!, task: result, canStart: false});
                     setTasks(previous => previous.map(item => item.id === result.id ? result : item));
@@ -271,7 +295,7 @@ export default function Workspace(props: WorkspaceProps) {
                     }
                   }
                 } catch (error) {
-                  if (error instanceof ApiError && error.code === 'MODEL_UNAVAILABLE' && requestedModel) rejectModel(modelScope(current.task.projectId, current.task.id, current.task.phase), requestedModel.id, requestedModel.provider);
+                  if (error instanceof ApiError && error.code === 'MODEL_UNAVAILABLE' && requestedModel) rejectModel(modelScope(current.task.projectId, current.task.id, 'implementation-assignee'), requestedModel.id, requestedModel.provider);
                   if (error instanceof ApiError && error.status === 409) {
                     try { const refreshed = await api<TaskDetail>(`/api/tasks/${current.task.id}`); if (alive && detail()?.task.id === current.task.id) { batch(() => { setDetail(refreshed); adoptDocuments(current.task.id, refreshed.documents); setTasks(previous => previous.map(item => item.id === refreshed.task.id ? refreshed.task : item)); }); props.onTaskChange?.(refreshed.task.id, refreshed.task); } } catch { /* 元のエラーを表示する。 */ }
                   }
@@ -280,7 +304,7 @@ export default function Workspace(props: WorkspaceProps) {
                 finally { setAdvancing(false); }
               }} />
               <Show when={phaseError()}><p role="alert" class="p-2 text-sm text-error">{phaseError()}</p></Show>
-              <Show when={isTaskPhase(detail()?.task.phase)}><ChatPanel onModelChange={setSelectedModel} projectId={detail()!.task.projectId} taskId={activeTask()} phase={isTaskPhase(detail()?.task.phase) ? detail()?.task.phase as TaskPhase : undefined} /></Show>
+              <Show when={isTaskPhase(detail()?.task.phase)}><ChatPanel readOnly={detail()?.task.phase === 'implementation' || detail()?.task.status === 'completed'} onBusyChange={setChatBusy} onModelUnavailable={(model, provider) => { if (detail()?.task.phase === 'implementation') rejectModel(implementationScope(), model, provider); }} projectId={detail()!.task.projectId} taskId={activeTask()} phase={isTaskPhase(detail()?.task.phase) ? detail()?.task.phase as TaskPhase : undefined} /></Show>
             </Show>
           </Show>
         </div>

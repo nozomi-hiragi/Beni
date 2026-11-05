@@ -13,7 +13,7 @@ for await (const line of createInterface({input:process.stdin})) {
  else if(msg.method==='model/list')send({id:msg.id,result:{data:[{model:'model-a',displayName:'Model A'}],nextCursor:null}});
  else if(msg.method==='thread/start'||msg.method==='thread/resume')send({id:msg.id,result:{thread:{id:msg.params.threadId??'thread-1',sessionId:'session-1'}}});
  else if(msg.method==='turn/start'){
-  const text=msg.params.input[0].text;
+  const text=process.env.FAKE_CODEX_TURN_ACTION??msg.params.input[0].text;
   if(text==='write documents'&&!['shell_tool','code_mode_host'].every(feature=>process.argv.some((arg,index)=>arg==='--enable'&&process.argv[index+1]===feature))){send({id:msg.id,error:{code:-32600,message:'Required tools disabled'}});continue}
   if(text==='write documents'){writeFileSync(join(msg.params.cwd,'requirements.md'),'# Updated requirements\n');writeFileSync(join(msg.params.cwd,'implementation-plan.md'),'# Updated plan\n')}
   if(text==='disconnect')process.exit(0);

@@ -1,7 +1,8 @@
+import { projectKnowledge } from './documents';
 import { spawn, execFile, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { join } from 'node:path';
-import { rmSync } from 'node:fs';
+import { rmSync, readFileSync } from 'node:fs';
 import { isDeepStrictEqual } from 'node:util';
 import { isTaskPhase, type TaskPhase } from '../shared/task-phase';
 import { randomUUID } from 'node:crypto';
@@ -61,6 +62,11 @@ export class ChatService {
  private locks=new Map<string,Promise<unknown>>();
  private preparing=new Set<string>();
  private stopping=new Set<string>();
+ private explicitStops=new Set<string>();
+ private startRollbacks=new Map<string,()=>void>();
+ private implementationFinished:(p:string,t:string)=>void=()=>{};
+ setImplementationFinished(callback:(p:string,t:string)=>void){this.implementationFinished=callback}
+ private finishImplementation(p:string,t:string){if(!this.explicitStops.has(key(p,t)))this.implementationFinished(p,t)}
  private taskEvents?:TaskEventsProvider;
  setTaskEvents(provider:TaskEventsProvider){this.taskEvents=provider}
  private busy(p:string,t:string|null){const k=key(p,t);return this.preparing.has(k)||[...this.active.keys()].some(value=>{const [project,task]=JSON.parse(value);return project===p&&task===t})}
@@ -69,15 +75,17 @@ export class ChatService {
  async startTask<T>(p:string,t:string,change:()=>T,rollback:()=>void,model:string|null,cwd:string,documents:string,provider:Provider='codex'):Promise<T>{
   const task=this.withIdleTask(p,t,change),taskKey=key(p,t);
   this.stopping.add(taskKey);
+  this.startRollbacks.set(taskKey,rollback);
   try {
-   await this.send(p,t,'実装手順に従って実装と検証を開始してください。仕様整理の「仕様」にリンクされた仕様は、既存の文書と整合させてリポジトリの docs に配置してください。',model,cwd,documents,'implementation',true,provider);
+   await this.send(p,t,'実装手順に従って、ゴールに到達するまで実装と検証を完走してください。未達や実行できなかった検証は終了時に明記してください。仕様整理の「仕様」にリンクされた仕様は、既存の文書と整合させてリポジトリの docs に配置してください。',model,cwd,documents,'implementation',true,provider);
    return task;
-  }catch(error){rollback();throw error}finally{this.stopping.delete(taskKey)}
+  }catch(error){this.startRollbacks.delete(taskKey);rollback();throw error}finally{this.stopping.delete(taskKey)}
  }
  async stopTask<T>(p:string,t:string,change:()=>T,validate:()=>void=()=>{}):Promise<T>{
   const taskKey=key(p,t);
   if(this.stopping.has(taskKey))throw Error('busy');
   this.stopping.add(taskKey);
+  this.explicitStops.add(taskKey);
   try {
    validate();
    // 送信準備と turn/start の完了も待ち、停止中の新しい送信を拒否する。
@@ -95,8 +103,9 @@ export class ChatService {
     await Bun.sleep(10);
    }
    return change();
-  } finally {this.stopping.delete(taskKey)}
+  } finally {this.stopping.delete(taskKey);this.explicitStops.delete(taskKey)}
  }
+ async recoverImplementation(p:string,t:string){if(this.stopping.has(key(p,t))||this.busy(p,t))return;await this.get(p,t,'implementation');if(!this.busy(p,t))this.finishImplementation(p,t)}
  deleteTask(p:string,t:string,remove:()=>void){this.withIdleTask(p,t,remove)}
  private activity:(projectId:string,taskId:string)=>void=()=>{};
  constructor(private resolveProjectFolder:(projectId:string)=>string,private executable=()=>Bun.which('codex'),private claudeExecutable=()=>Bun.which('claude')) {}
@@ -130,7 +139,7 @@ export class ChatService {
   try {const raw=readJson(path);const needsSave=raw.packs===undefined||raw.phase===undefined||raw.lastEventId===undefined;const c=this.validateHistory(raw,p,t,phase,t===null);if(needsSave)await this.save(c);return c}
   catch(e:any){if(e.code!=='ENOENT')throw e;return {selectedModel:null,version:1,id:randomUUID(),projectId:p,taskId:t,phase,lastEventId:0,threadId:null,sessionId:null,messages:[],packs:[]}}
  }
- async get(p:string,t:string|null,phase:TaskPhase|null=t===null?null:'requirements'){const k=conversationKey(p,t,phase);return this.locked(k,async()=>{const c=await this.load(p,t,phase);if(!this.active.has(k)){let changed=false;const events:TopicEvent[]=[];for(const m of c.messages)if(m.status==='pending'||m.status==='streaming'){m.status='unknown';m.updatedAt=now();changed=true}for(const pack of c.packs)if(pack.state==='streaming'){this.closePack(pack,pack.role==='user'?'completed':'unknown',events);changed=true}if(changed){await this.save(c);for(const event of events)this.emit(c,event);this.emit(c,{name:'chat.changed',data:{}})}}return c})}
+ async get(p:string,t:string|null,phase:TaskPhase|null=t===null?null:'requirements'){const k=conversationKey(p,t,phase);return this.locked(k,async()=>{const c=await this.load(p,t,phase);if(!this.active.has(k)){let changed=false;const events:TopicEvent[]=[];for(const m of c.messages)if(m.status==='pending'||m.status==='streaming'){m.status='unknown';m.updatedAt=now();changed=true}for(const pack of c.packs)if(pack.state==='streaming'){this.closePack(pack,pack.role==='user'?'completed':'unknown',events);changed=true}if(changed){await this.save(c);if(t!==null&&phase==='implementation')this.finishImplementation(p,t);for(const event of events)this.emit(c,event);this.emit(c,{name:'chat.changed',data:{}})}}return c})}
 
  async packs(p:string,t:string|null,after?:string,phase:TaskPhase|null=t===null?null:'requirements'){const c=await this.get(p,t,phase);const index=after===undefined?-1:c.packs.findIndex(pack=>pack.packId===after);if(after!==undefined&&index<0)throw Error('not found');return {packs:c.packs.slice(index+1).map(({packId,state})=>({packId,state}))}}
  async pack(p:string,t:string|null,id:string,phase:TaskPhase|null=t===null?null:'requirements'){const c=await this.get(p,t,phase);const pack=c.packs.find(pack=>pack.packId===id);if(!pack)throw Error('not found');if(pack.state!=='closed')throw Error('not closed');return {pack}}
@@ -158,7 +167,7 @@ export class ChatService {
   if((this.stopping.has(taskKey)&&!reserved)||this.busy(p,t))throw Error('busy');
   this.preparing.add(taskKey);
   try {
-   const workingDirectory=documentDirectory&&phase==='implementation'?cwd:documentDirectory??cwd;
+   const workingDirectory=documentDirectory&&(phase==='implementation'||phase==='retrospective')?cwd:documentDirectory??cwd;
    const k=conversationKey(p,t,phase);
    return await this.locked(k,async()=>{
     if(this.active.has(k))throw Error('busy');
@@ -203,14 +212,14 @@ export class ChatService {
   }finally{this.preparing.delete(taskKey)}
  }
  private async run(k:string,c:Conversation,sendId:string,content:string,model:string|null,cwd:string,active:{rpc:ChatRpc;threadId:string|null;turnId:string|null},documentDirectory?:string,phase:TaskPhase|null=null,history?:{events:unknown[];through:number},referenceHistory:{role:'user'|'assistant';content:string}[]=[]){
-  let dispatched=false,finished=false,claudePending=c.sessionProvider==='claude',closedWhilePending=false;
+  let dispatched=false,rejectedStart=false,finished=false,claudePending=c.sessionProvider==='claude',closedWhilePending=false;
   const previousSession={threadId:active.threadId,sessionId:c.sessionId};
   let releaseEvents=()=>{};
   // Claude は OS の起動ではなく CLI の受理を確認してからセッションとイベントを保存する。
   let eventQueue=claudePending?new Promise<void>(resolve=>{releaseEvents=resolve}):Promise.resolve();
   const itemPacks=new Map<string,string>();let textPackId:string|undefined;
   const update=async(fn:(messages:Message[],current:Conversation,events:TopicEvent[])=>void,changed=false)=>this.locked(k,async()=>{const current=await this.load(c.projectId,c.taskId,c.phase);const events:TopicEvent[]=[];fn(current.messages.filter(m=>m.sendId===sendId),current,events);current.sessionProvider=c.sessionProvider;current.threadId=active.threadId;current.sessionId=c.sessionId;for(const m of current.messages.filter(m=>m.sendId===sendId)){m.threadId=active.threadId;m.sessionId=c.sessionId}await this.save(current,events.length>0||changed);for(const event of events)this.emit(current,event);if(changed)this.emit(current,{name:'chat.changed',data:{}})});
-  const finish=async(status:State,errorCode?:'MODEL_UNAVAILABLE')=>{if(finished)return;finished=true;try{await update((ms,current,events)=>{ms.forEach(m=>{m.status=status;m.updatedAt=now();if(errorCode&&m.role==='assistant')m.errorCode=errorCode});if(!current.packs.some(pack=>pack.sendId===sendId&&pack.role==='assistant')){const a=ms.find(m=>m.role==='assistant');if(a)this.newPack(current,a)}for(const pack of current.packs)if(pack.sendId===sendId)this.closePack(pack,status,events)},true)}finally{if(this.active.get(k)===active)this.active.delete(k);active.rpc.close()}};
+  const finish=async(status:State,errorCode?:'MODEL_UNAVAILABLE')=>{if(finished)return;finished=true;try{await update((ms,current,events)=>{ms.forEach(m=>{m.status=status;m.updatedAt=now();if(errorCode&&m.role==='assistant')m.errorCode=errorCode});if(!current.packs.some(pack=>pack.sendId===sendId&&pack.role==='assistant')){const a=ms.find(m=>m.role==='assistant');if(a)this.newPack(current,a)}for(const pack of current.packs)if(pack.sendId===sendId)this.closePack(pack,status,events)},true)}finally{if(this.active.get(k)===active)this.active.delete(k);active.rpc.close();if(phase==='implementation'&&c.taskId!==null){const taskKey=key(c.projectId,c.taskId),rollback=this.startRollbacks.get(taskKey);this.startRollbacks.delete(taskKey);if((!dispatched||rejectedStart)&&rollback&&!this.explicitStops.has(taskKey))rollback();else this.finishImplementation(c.projectId,c.taskId)}}};
   const toolTypes=new Set(['commandExecution','fileChange','mcpToolCall','dynamicToolCall','functionCallOutput','webSearch','imageView','imageGeneration']);
   const toolData=(item:any)=>{const name=item.type==='commandExecution'?'command':typeof item.tool==='string'?item.tool:typeof item.name==='string'?item.name:item.type;const input=item.command??item.arguments??item.changes??null;const output=item.aggregatedOutput??item.contentItems??item.output??item.result??item.error??null;const encode=(v:unknown)=>typeof v==='string'?v:JSON.stringify(v);return {name,input:encode(input),output:encode(output)}};
   active.rpc.onEvent=(method,params)=>{if(claudePending&&method==='turn/started'&&params?.threadId===active.threadId&&typeof params.turn?.id==='string')active.turnId=params.turn.id;eventQueue=eventQueue.then(async()=>{if(finished||params?.threadId!==active.threadId)return;if(method==='turn/started'&&typeof params.turn?.id==='string')active.turnId=params.turn.id;if(params.turnId&&active.turnId&&params.turnId!==active.turnId)return;
@@ -223,8 +232,12 @@ export class ChatService {
   }).catch(()=>{active.rpc.close()})};
   active.rpc.onClose=()=>{if(claudePending){closedWhilePending=true;return}if(!finished)void eventQueue.then(()=>finish(dispatched?'unknown':'failed')).catch(()=>{}).finally(()=>{if(this.active.get(k)===active)this.active.delete(k)})};
   const implementation = !!documentDirectory && phase === 'implementation';
-  const workingDirectory = implementation ? cwd : documentDirectory ?? cwd;
+  const retrospective=!!documentDirectory&&phase==='retrospective';
+  const workingDirectory = implementation||retrospective ? cwd : documentDirectory ?? cwd;
   try {
+   const knowledge=documentDirectory?projectKnowledge(cwd):undefined;
+   const knowledgeContent=knowledge?readFileSync(knowledge,'utf8'):undefined;
+   const implementationHistory=retrospective&&c.taskId!==null?this.path(c.projectId,c.taskId,'implementation'):undefined;
    const instructions = documentDirectory ? [
     `This is Beni task ${c.taskId}. Project reference directory: ${cwd}. Current phase: ${phase}.`,
     `Your working and writable directory is ${workingDirectory}. Task documents are in ${documentDirectory}.`,
@@ -233,8 +246,9 @@ export class ChatService {
     'Use documents.md as the specification organization index, with separate Japanese headings ## 資料 and ## 仕様 and relative Markdown links to additional task documents.',
     'Classify every additional document under exactly one heading: 資料 for research and alternatives kept within this task, or 仕様 for accepted behavior written for repository readers without conversation context.',
     'Use implementation-plan.md for implementation steps and verification, and English kebab-case .md filenames for additional task documents.',
-    'The intended phase order is 要件定義, 仕様整理, 実装手順, 実装中.',
-    implementation
+    'The intended phase order is 要件定義, 仕様整理, 実装手順, 実装中, 反省会.',
+    `Project knowledge content: ${JSON.stringify(knowledgeContent)}. Read project knowledge at ${knowledge} before preparation or implementation. During retrospective, append only confirmed reusable lessons there; distinguish hypotheses and preserve existing content.`,
+    retrospective ? `Read the implementation conversation and terminal message statuses at ${implementationHistory} as read-only context before reviewing. Review unmet requirements, differences from user intent, causes, and improvements for next time in retrospective.md. You may edit and verify project code to address feedback. Preserve existing documents and decisions.` : implementation
      ? 'Implement source code according to the accepted specification and implementation plan. Place only specifications linked under documents.md の ## 仕様 into the repository docs, reconciling existing content. Keep research and alternatives under ## 資料 inside the task folder. Do not copy task conversation or progress reports into repository docs.'
      : 'Only update documents for this task; do not implement source code or change repository files. Phase changes are controlled by the user interface; do not claim they occurred.',
     'Do not overwrite existing decisions without a user change. Ask about genuinely unresolved requirements. Report files actually changed and failures accurately.'
@@ -263,7 +277,7 @@ export class ChatService {
    claudePending=false;releaseEvents();
    await eventQueue;
    if(closedWhilePending&&!finished)await finish('unknown');
-  }catch (error) {if(claudePending){const rejected=error instanceof ClaudeRejected&&!error.interrupted;active.threadId=rejected?null:previousSession.threadId;c.sessionId=rejected?null:previousSession.sessionId}releaseEvents();await eventQueue.catch(()=>{});await finish(error instanceof ClaudeRejected&&error.interrupted?'interrupted':dispatched && !(error instanceof Rejected||error instanceof ClaudeRejected)?'unknown':'failed',(error instanceof Rejected||error instanceof ClaudeRejected)&&error.modelUnavailable?'MODEL_UNAVAILABLE':undefined).catch(()=>{});active.rpc.close();this.active.delete(k);return}
+  }catch (error) {rejectedStart=error instanceof Rejected||error instanceof ClaudeRejected;if(claudePending){const rejected=error instanceof ClaudeRejected&&!error.interrupted;active.threadId=rejected?null:previousSession.threadId;c.sessionId=rejected?null:previousSession.sessionId}releaseEvents();await eventQueue.catch(()=>{});await finish(error instanceof ClaudeRejected&&error.interrupted?'interrupted':dispatched && !(error instanceof Rejected||error instanceof ClaudeRejected)?'unknown':'failed',(error instanceof Rejected||error instanceof ClaudeRejected)&&error.modelUnavailable?'MODEL_UNAVAILABLE':undefined).catch(()=>{});active.rpc.close();this.active.delete(k);return}
   // Completion arrives asynchronously after turn/start; the process remains open until then.
  }
  async interrupt(p:string,t:string|null,phase:TaskPhase|null=t===null?null:'requirements'){const active=this.active.get(conversationKey(p,t,phase));if(!active?.threadId||!active.turnId)throw Error('not running');await active.rpc.request('turn/interrupt',{threadId:active.threadId,turnId:active.turnId});}

@@ -227,7 +227,7 @@ it.each(['codex','claude'] as const)('starts with the selected %s model and refr
     throw Error(path);
   }));
   render(() => <Workspace taskId={task.id} onHome={() => {}} />);
-  const model = await screen.findByRole('combobox',{name:'モデル'});
+  const model = await screen.findByRole('combobox',{name:'実装担当モデル'});
   await waitFor(() => expect((model as HTMLSelectElement).value).toBe('codex:first'));
   await waitFor(() => expect((screen.getByRole('button',{name:'開始'}) as HTMLButtonElement).disabled).toBe(false));
   fireEvent.change(model,{target:{value:`${provider}:chosen`}});
@@ -239,7 +239,7 @@ it.each(['codex','claude'] as const)('starts with the selected %s model and refr
   await waitFor(() => expect((screen.getByRole('button',{name:'停止'}) as HTMLButtonElement).disabled).toBe(false));
   fireEvent.click(screen.getByRole('button',{name:'停止'}));
   await waitFor(() => expect((screen.getByRole('button',{name:'開始'}) as HTMLButtonElement).disabled).toBe(true));
-  await waitFor(() => expect((screen.getByRole('combobox',{name:'モデル'}) as HTMLSelectElement).value).toBe(`${provider}:chosen`));
+  await waitFor(() => expect((screen.getByRole('combobox',{name:'実装担当モデル'}) as HTMLSelectElement).value).toBe(`${provider}:chosen`));
 });
 
 it('利用不可の保存モデルを表示して送信を止め、有効モデルの保存で解除する',async()=>{
@@ -263,4 +263,80 @@ it('利用不可の保存モデルを表示して送信を止め、有効モデ�
  await waitFor(()=>expect((screen.getByRole('button',{name:'送信'}) as HTMLButtonElement).disabled).toBe(false));
  expect(post).not.toHaveBeenCalled();
  expect(screen.queryByRole('option',{name:'⚠️ Codex/Saved model'})).toBeNull();
+});
+
+it('実装担当モデルをチャットと独立して記憶し、実装から反省会・完了・再開へ進む', async () => {
+  const projectId = '019a0000-0000-7000-8000-000000000001', taskId = '019a0000-0000-7100-8000-000000000089';
+  let task = {id: taskId, projectId, name: 'サンプル', phase: 'requirements', status: 'idle'};
+  const posted: {path: string; body: any}[] = [];
+  const fetchMock = vi.fn(async (path: string, init?: RequestInit) => {
+    if (path === '/api/state') return json({projects: [], tasks: [task]});
+    if (path === `/api/tasks/${taskId}`) return json({task, documents: [], canStart: true});
+    if (path === '/api/codex/status') return json({installed: true, auth: 'chatgpt', models: [{id:'c', name:'Codex model'}]});
+    if (path === '/api/claude/status') return json({installed: true, auth: 'claude', models: [{id:'a', name:'Claude model'}]});
+    if (path.startsWith('/api/chat?')) return json({id:'conversation', messages: []});
+    const pack = packResponse(path, []); if (pack) return pack;
+    if (path.startsWith(`/api/tasks/${taskId}/`)) {
+      const body = JSON.parse(String(init?.body)); posted.push({path, body});
+      if (path.endsWith('/start')) task = {...task, phase: 'implementation', status: 'running'};
+      if (path.endsWith('/stop')) task = {...task, phase: 'implementation-plan', status: 'idle'};
+      if (path.endsWith('/phase')) task = {...task, phase: body.target};
+      if (path.endsWith('/complete')) task = {...task, status:'completed'};
+      if (path.endsWith('/reopen')) task = {...task, status:'idle'};
+      return json(task);
+    }
+    return json({sessions: []});
+  });
+  vi.stubGlobal('fetch', fetchMock);
+  const view = render(() => <Workspace taskId={taskId} onHome={() => {}} />);
+  const select = await screen.findByRole('combobox', {name:'実装担当モデル'});
+  await waitFor(() => expect((select as HTMLSelectElement).value).toBe('codex:c'));
+  fireEvent.change(select, {target:{value:'claude:a'}});
+  expect((screen.getByRole('combobox', {name:'モデル'}) as HTMLSelectElement).value).toBe('codex:c');
+  fireEvent.click(screen.getByRole('button', {name:'仕様整理'}));
+  await waitFor(() => expect(posted.at(-1)?.body.target).toBe('documents'));
+  await waitFor(() => expect((screen.getByRole('button', {name:'開始'}) as HTMLButtonElement).disabled).toBe(false));
+  expect((screen.getByRole('combobox', {name:'実装担当モデル'}) as HTMLSelectElement).value).toBe('claude:a');
+  fireEvent.click(screen.getByRole('button', {name:'開始'}));
+  await waitFor(() => expect((screen.getByRole('button', {name:'停止'}) as HTMLButtonElement).disabled).toBe(false));
+  expect(posted.at(-1)?.body).toMatchObject({model:'a',provider:'claude'});
+  expect(screen.queryByRole('textbox', {name:'希望や回答を入力'})).toBeNull();
+  expect(screen.queryByRole('combobox', {name:'モデル'})).toBeNull();
+  fireEvent.click(screen.getByRole('button', {name:'停止'}));
+  await screen.findByRole('button', {name:'開始'});
+  view.unmount(); task = {...task, phase:'retrospective'};
+  const second = render(() => <Workspace taskId={taskId} onHome={() => {}} />);
+  await screen.findByRole('textbox', {name:'希望や回答を入力'});
+  expect((screen.getByRole('button', {name:'要件定義'}) as HTMLButtonElement).disabled).toBe(true);
+  fireEvent.click(screen.getByRole('button', {name:'タスク完了'}));
+  await screen.findByRole('button', {name:'再開'});
+  expect(posted.at(-1)?.body).toEqual({projectId, phase:'retrospective'});
+  expect(screen.queryByRole('textbox', {name:'希望や回答を入力'})).toBeNull();
+  await waitFor(() => expect((screen.getByRole('button', {name:'再開'}) as HTMLButtonElement).disabled).toBe(false));
+  fireEvent.click(screen.getByRole('button', {name:'再開'}));
+  await screen.findByRole('textbox', {name:'希望や回答を入力'});
+  second.unmount(); task = {...task, phase:'requirements'};
+  render(() => <Workspace taskId={taskId} onHome={() => {}} />);
+  await waitFor(() => expect((screen.getByRole('combobox', {name:'実装担当モデル'}) as HTMLSelectElement).value).toBe('claude:a'));
+});
+
+it('保存した実装担当モデルが利用不可なら警告を表示し開始を防ぐ', async () => {
+ const projectId='019a0000-0000-7000-8000-000000000001', taskId='019a0000-0000-7100-8000-000000000090';
+ const task={id:taskId,projectId,name:'サンプル',phase:'implementation-plan',status:'idle'};
+ localStorage.setItem(`beni:model:${projectId}:${taskId}:implementation-assignee`,JSON.stringify({id:'removed',name:'Old',provider:'claude'}));
+ vi.stubGlobal('fetch',vi.fn(async (path:string) => {
+  if(path==='/api/state')return json({projects:[],tasks:[task]});
+  if(path===`/api/tasks/${taskId}`)return json({task,documents:[],canStart:true});
+  if(path==='/api/codex/status')return json({installed:true,auth:'chatgpt',models:[{id:'new',name:'New'}]});
+  if(path==='/api/claude/status')return json({installed:true,auth:'claude',models:[]});
+  if(path.startsWith('/api/chat?'))return json({id:'c',messages:[]});
+  const pack=packResponse(path,[]);if(pack)return pack;
+  return json({sessions:[]});
+ }));
+ render(()=><Workspace taskId={taskId} onHome={()=>{}} />);
+ await screen.findByRole('option',{name:'⚠️ Claude/Old'});
+ await waitFor(()=>expect(screen.getAllByRole('option',{name:'Codex/New'}).length).toBeGreaterThan(0));
+ expect((screen.getByRole('button',{name:'開始'}) as HTMLButtonElement).disabled).toBe(true);
+ fireEvent.change(screen.getByRole('combobox',{name:'実装担当モデル'}),{target:{value:'codex:new'}});
+ await waitFor(()=>expect((screen.getByRole('button',{name:'開始'}) as HTMLButtonElement).disabled).toBe(false));
 });
