@@ -18,8 +18,10 @@
 └── tasks/
     └── <taskId>/
         ├── task.json             タスク情報
-        ├── requirements.md       要件
-        └── implementation-plan.md 実装計画
+        ├── requirements.md       要件定義
+        ├── documents.md          仕様整理（資料・仕様の目次）
+        ├── implementation-plan.md 実装手順
+        └── *.md                  追加文書（資料または仕様）
 ```
 
 メタデータと会話はJSON、文書本文はMarkdownの実ファイルに保存します。プロジェクト専用SQLiteは追加しません。会話はタスクフォルダーへ置かず、`chat/` にまとめます。

@@ -90,6 +90,12 @@ Beni/
 │   │   ├── project-detail.md         プロジェクト詳細画面
 │   │   ├── project-settings.md       プロジェクト設定・作成
 │   │   └── settings.md               設定画面
+│   ├── objects/                      オブジェクト仕様
+│   │   ├── README.md                 目次と各要素の関係
+│   │   ├── project.md                プロジェクトの持ち物と操作
+│   │   ├── task.md                   タスクと文書
+│   │   ├── chat.md                   会話・発言・返信パック
+│   │   └── terminal.md               ターミナルとシェル
 │   ├── features/                     機能ごとの仕様
 │   │   ├── llm-chat.md               LLM チャット連携
 │   │   ├── terminal.md               ターミナルの機能仕様

@@ -10,6 +10,7 @@
 ## 次期版の仕様
 
 - [全体仕様](next-agent-plan.md)
+- [オブジェクト別の仕様と操作](objects/README.md)
 - 画面
   - [ホーム画面](screens/home.md)
   - [プロジェクト詳細画面](screens/project-detail.md)
