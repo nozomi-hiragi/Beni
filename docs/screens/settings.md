@@ -16,3 +16,5 @@
 詳細は [LLM チャット連携](../features/llm-chat.md)を参照する。
 
 関連：[ホーム画面](home.md) / [プロジェクト詳細画面](project-detail.md)
+
+インストラクションは独立した [管理画面](../features/instructions.md) で閲覧します。ヘッダーの設定ボタンの左から開けます。

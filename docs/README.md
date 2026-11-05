@@ -16,6 +16,7 @@
   - [プロジェクト設定・作成](screens/project-settings.md)
   - [設定画面](screens/settings.md)
 - 機能
+  - [インストラクション管理](features/instructions.md)
   - [LLM チャット連携](features/llm-chat.md)
   - [タスク検索](features/task-search.md)
   - [プロジェクト内ターミナル](features/terminal.md)

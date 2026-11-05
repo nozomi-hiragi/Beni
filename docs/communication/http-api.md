@@ -135,7 +135,7 @@ status/state は生成状態を表し、本文のハッシュには含めませ�
 
 ## 静的配信
 
-`/`、`/settings`、`/project/:id`（プロジェクト用ID文字列）、`/ui/index.html` は同じ HTML を返す。`/ui/build/app.js` と `/ui/generated.css` は dist の生成物を返す。HTML と生成物には CSP、nosniff、no-store を設定する。画像は同一 origin と data URL を許可し、daisyUI の吹き出しが使う埋め込み SVG を表示する。スクリプト・スタイル・通信先は同一 origin に限定する。この配信は HTTP のまま。
+`/`、`/settings`、`/instructions`、`/project/:id`（プロジェクト用ID文字列）、`/ui/index.html` は同じ HTML を返す。`/ui/build/app.js` と `/ui/generated.css` は dist の生成物を返す。HTML と生成物には CSP、nosniff、no-store を設定する。画像は同一 origin と data URL を許可し、daisyUI の吹き出しが使う埋め込み SVG を表示する。スクリプト・スタイル・通信先は同一 origin に限定する。この配信は HTTP のまま。
 
 ## ターミナル管理
 
@@ -164,3 +164,19 @@ status/state は生成状態を表し、本文のハッシュには含めませ�
 送信・実装開始の `provider` は `codex` または `claude`。省略時は既存クライアント互換として `codex`。モデルIDは接続先の生IDを送り、画面表示の接頭辞は含めない。選択した接続先だけへ送信し、他方へ自動変更しない。
 
 実装中の一般の `chat/send`・`chat/interrupt` は409で拒否する。開始の定型送信とタスクのstopだけを使う。完了中も送信・中断・フェーズ変更・開始を409で拒否し、reopenで反省会を再開する。実装の終了はBEが反省会への遷移を保存して通知する。完了はLLMの応答終了と区別し、ユーザーのcomplete操作だけで確定する。
+
+## インストラクション
+
+`GET /api/instructions` は `{instructions: [{key, content}], editorState: {pending, busy}}` を返します。Markdownテンプレートを変数未展開で取得します。`pending` は保存された編集用プロンプトと会話に適用済みの本文の差、`busy` は編集相談の送信準備・生成中を示します。
+
+`POST /api/instructions/apply` は `{expected_content: string}` を受け取り、保存された編集用本文と一致し、会話が実行中でないときに新しい空の会話へ切り替えます。成功時は `{editorState: {pending: false, busy: false}}` を返します。同一originを必須とし、本文の競合や実行中は409です。変更なしなら会話をリセットしません。成功時は `chat.changed` で各クライアントに通知します。適用リクエストだけは64KiBの本文がJSONエスケープで膨らむ場合に対応し、リクエスト上限を `65536 * 6 + 1024` バイトとします。他のAPIは64KiBの上限を維持します。本文自体のHTTP更新APIはありません。詳細は [インストラクション管理](../features/instructions.md) を参照してください。
+
+### インストラクション編集相談
+
+既存のチャットAPIで `projectId: "instructions"`、`taskId: null`、phaseなしをアプリ共通の編集相談スコープとして扱います。これはプロジェクトIDではなく、プロジェクト登録やタスク、ターミナル、イベントAPIでは使えません。会話取得・送信・中断・パック一覧と取得・ハッシュ確認は既存の契約に従います。
+
+WebSocketも `chat` トピックに限りこのスコープを許可します。指示保存後は `chat.changed` を受けて指示一覧を再取得します。
+
+編集相談の送信では `instructionFocus`（`common`、各フェーズのキー、`editor` のいずれか）を必須とします。未選択・未知の対象は履歴追加前に拒否します。会話の `lastInstructionFocus` は最後に受理された送信の対象を表し、クリックによる選択とは別です。
+
+フォーカス対象のキー・本文は初回、対象変更、保存本文変更、新しいLLMセッション開始時に渡します。全テンプレートを毎回送信せず、編集相談専用の `list_instructions`・`get_instruction` で必要な指示を取得します。これらはLLMの埋め込みツールであり、追加のHTTPエンドポイントではありません。

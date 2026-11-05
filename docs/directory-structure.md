@@ -10,6 +10,7 @@ Beni/
 │   ├── backend/                      Bun で動くサーバー側の処理
 │   │   ├── server.ts                 サーバー起動、API、フロントエンド配信、保存先設定
 │   │   ├── server.test.ts            API・配信・文書管理・変更通知・保存先のテスト
+│   │   ├── instructions.ts           指示テンプレートの初期値と変数の置換
 │   │   ├── chat.ts                   エージェント通信、会話の保存・再開・受信・中断
 │   │   ├── claude.ts                 Claude Code CLI の状態確認とストリーム変換
 │   │   ├── claude.test.ts            Claude の受信・権限設定・中断・接続失敗のテスト
@@ -22,7 +23,7 @@ Beni/
 │   │   ├── terminal.test.ts          シェルの存続・排他・画面復元・HTTP/WSのテスト
 │   │   ├── events.ts                 共通 WS の接続・購読・送信上限と解放処理
 │   │   ├── store/                    データベースへのアクセス
-│   │   │   ├── index.ts              SQLiteの登録情報とプロジェクト内のタスク管理
+│   │   │   ├── index.ts              SQLiteの登録情報・指示テンプレートとタスク管理
 │   │   │   └── index.test.ts         メタデータ・復元のテスト
 │   │   └── test/                     バックエンドのテスト補助
 │   │       ├── fake-codex.ts          実サービスを使わず Codex 通信を模擬する実行ファイル
@@ -34,7 +35,8 @@ Beni/
 │   └── frontend/                     ブラウザーで動く SolidJS の画面
 │       ├── index.html                アプリの表示先と JavaScript・CSS の読み込み
 │       ├── main.tsx                  SolidJS のアプリを HTML に取り付ける入口
-│       ├── App.tsx                   URL に応じたホーム・設定・プロジェクト画面の切り替え
+│       ├── Instructions.tsx          インストラクション管理画面
+│       ├── App.tsx                   URL に応じたホーム・設定・指示管理・プロジェクト画面の切り替え
 │       ├── Home.tsx                  プロジェクト・タスク作成、タスク一覧の検索・並べ替え
 │       ├── Workspace.tsx             チャット・タスク・文書の表示とタブ管理
 │       ├── api.ts                    バックエンドへの JSON リクエストとエラー処理
@@ -51,6 +53,7 @@ Beni/
 │           ├── ResizeHandle.tsx      作業領域の左右・上下比率を調整するハンドル
 │           ├── TerminalPanel.tsx     ターミナルタブ・描画・操作権・再接続
 │           ├── MarkdownPreview.tsx   Markdown の変換・サニタイズ・装飾表示
+│           ├── InstructionsSettings.tsx  指示テンプレートの閲覧
 │           ├── Menu.tsx              ホーム・設定への移動と検索のメニュー
 │           ├── TaskCreate.tsx        プロジェクトを選び、タスクを作成するフォーム
 │           ├── TaskList.tsx          タスク一覧と並べ替え操作
@@ -106,7 +109,11 @@ Beni/
 │   └── mockups/                      画面・部品の見た目を検討する HTML と CSS
 │       └── components/               部品ごとのモック
 ├── data/                             [データ] Beni 自身の既定保存先。実行時に作成
-│   └── beni.sqlite                   プロジェクトの登録情報（関連ファイルも同じ場所）
+│   ├── beni.sqlite                   プロジェクトの登録情報と指示テンプレート（関連ファイルも同じ場所）
+│   ├── chat/
+│   │   ├── instructions.json         インストラクション編集相談の会話
+│   │   └── instruction-history/      編集用指示の適用前の会話（会話ID.json）
+│   └── instruction-editor/           編集相談CLIの作業先（書き込み不可）
 ├── node_modules/                     [生成] インストールした依存パッケージ
 ├── README.md                         概要、起動方法、保存先、機能、テスト方法
 ├── AGENTS.md                         このリポジトリで作業するエージェント向けの指示
