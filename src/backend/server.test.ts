@@ -188,8 +188,12 @@ test('shared WebSocket validates handshake/scopes, streams document changes and 
   ws.send(JSON.stringify({type:'subscribe',subscriptionId:'swapped-id',topic:'chat',scope:{projectId:task.id,taskId:null}}));expect(await inbox.next()).toMatchObject({code:'INVALID_MESSAGE'});
   ws.send(JSON.stringify({type:'subscribe',subscriptionId:'bad',topic:'documents',scope:{projectId:other.id,taskId:task.id}}));expect(await inbox.next()).toMatchObject({code:'NOT_FOUND',subscriptionId:'bad'});
   ws.send(JSON.stringify({type:'subscribe',subscriptionId:'doc',topic:'documents',scope:{projectId:project.id,taskId:task.id}}));expect(await inbox.next()).toEqual({type:'subscribed',subscriptionId:'doc'});
+  ws.send(JSON.stringify({type:'subscribe',subscriptionId:'doc-two',topic:'documents',scope:{projectId:project.id,taskId:task.id}}));expect(await inbox.next()).toEqual({type:'subscribed',subscriptionId:'doc-two'});
   const path=join(folder,'.beni','tasks',String(task.id));await writeFile(join(path,'replacement.tmp'),'# Atomic replacement');await rename(join(path,'replacement.tmp'),join(path,'requirements.md'));
-  expect(await inbox.next()).toMatchObject({type:'event',subscriptionId:'doc',name:'documents.changed',data:{}});
+  const updates=[await inbox.next(),await inbox.next()];expect(updates.map(message=>message.subscriptionId).sort()).toEqual(['doc','doc-two']);expect(updates.every(message=>message.name==='documents.changed')).toBe(true);
+  const timestamp=store.task(task.id)!.updatedAt;expect(timestamp).not.toBe(task.updatedAt);
+  await writeFile(join(path,'ignored.tmp'),'ignored');await Bun.sleep(200);expect(inbox.messages).toHaveLength(0);expect(store.task(task.id)!.updatedAt).toBe(timestamp);
+  ws.send(JSON.stringify({type:'unsubscribe',subscriptionId:'doc-two'}));expect(await inbox.next()).toEqual({type:'unsubscribed',subscriptionId:'doc-two'});
   ws.send(JSON.stringify({type:'unsubscribe',subscriptionId:'doc'}));expect(await inbox.next()).toEqual({type:'unsubscribed',subscriptionId:'doc'});
   ws.send(JSON.stringify({type:'subscribe',subscriptionId:'doc',topic:'documents',scope:{projectId:project.id,taskId:task.id}}));expect(await inbox.next()).toMatchObject({code:'SUBSCRIPTION_CONFLICT'});
   await writeFile(join(path,'requirements.md'),'# Disconnected');await Bun.sleep(120);expect(inbox.messages).toHaveLength(0);
@@ -292,5 +296,25 @@ test('HTTP scopes accept kind-correct IDs and reject numeric or swapped identifi
   expect((await get('/api/tasks/1')).status).toBe(404);
   expect((await post('/api/tasks',{projectId:task.id,name:'Wrong kind'})).status).toBe(400);
   expect((await post('/api/chat/send',{projectId:project.id,taskId:project.id,content:'test',model:null})).status).toBe(404);
+ }finally{store.close();await rm(folder,{recursive:true,force:true})}
+});
+
+test('HTTP task chat records activity while GET recovery and general chat preserve task dates', async () => {
+ const folder=await mkdtemp(join(tmpdir(),'beni-activity-'));const store=new Store(':memory:');
+ const project=store.createProject('Example',folder),task=store.createTask(project.id,'Task');
+ const chat=new ChatService(()=>folder,()=>join(import.meta.dir,'test/fake-codex.ts'));
+ const handle=createHandler(store,'/tmp',chat);
+ const post=(taskId:string|null,content:string)=>handle(new Request('http://127.0.0.1:3210/api/chat/send',{method:'POST',headers:{origin:'http://127.0.0.1:3210','content-type':'application/json'},body:JSON.stringify({projectId:project.id,taskId,content,model:null})}));
+ try{
+  const path=join(folder,'.beni','tasks',task.id,'task.json');const value=JSON.parse(await readFile(path,'utf8'));value.createdAt=null;value.updatedAt=null;await writeFile(path,JSON.stringify(value));
+  expect((await post(null,'hello')).status).toBe(202);
+  for(let i=0;i<100&&(await chat.get(project.id,null)).messages[1]?.status!=='completed';i++)await Bun.sleep(20);
+  expect(store.task(task.id)!.updatedAt).toBeNull();
+  expect((await post(task.id,'hello')).status).toBe(202);
+  for(let i=0;i<100&&(await chat.get(project.id,task.id)).messages[1]?.status!=='completed';i++)await Bun.sleep(20);
+  const completed=store.task(task.id)!;expect(completed.createdAt).toBeNull();expect(completed.updatedAt).not.toBeNull();
+  await handle(new Request(`http://127.0.0.1:3210/api/chat?projectId=${project.id}&taskId=${task.id}`));
+  await handle(new Request(`http://127.0.0.1:3210/api/tasks/${task.id}`));
+  expect(store.task(task.id)!.updatedAt).toBe(completed.updatedAt);
  }finally{store.close();await rm(folder,{recursive:true,force:true})}
 });

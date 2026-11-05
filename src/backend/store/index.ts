@@ -1,4 +1,4 @@
-import { taskDocuments } from '../documents';
+import { taskDocuments, taskDocumentSnapshot, documentContentsKey } from '../documents';
 import { Database } from 'bun:sqlite';
 import { existsSync, readdirSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -67,14 +67,14 @@ export class Store {
       folder: normalized
     };
   }
-  tasks(projectId?: string): TaskRow[] {
+  tasks(projectId?: string, reconcile = true): TaskRow[] {
     if (projectId !== undefined && !validProjectId(projectId)) throw Error('Invalid project');
     const projects = this.projects().filter(p => projectId === undefined || p.id === projectId);
     return projects.flatMap(project => {
       if (!existsSync(project.folder)) return [];
       const root = recoverTasks(project.folder);
       return readdirSync(root).filter(validTaskId).map(id => {
-        const value = metadata(join(root, id, 'task.json'), 'task') as TaskMetadata;
+        const value = reconcile ? this.reconcileDocuments(project, id) : metadata(join(root, id, 'task.json'), 'task') as TaskMetadata;
         return {
           id: value.id,
           project_id: project.id,
@@ -89,9 +89,64 @@ export class Store {
   }
   task(id: string): TaskRow | null {
     if (!validTaskId(id)) throw Error('Invalid task');
-    const matches = this.tasks().filter(task => task.id === id);
+    const matches = this.tasks(undefined, false).filter(task => task.id === id);
     if (matches.length > 1) throw Error('Duplicate task ID');
     return matches[0] ?? null;
+  }
+  // 文書の内容を比較する。初回は基準だけを保存し、移行・復元日時を活動にしない。
+  private reconcileDocuments(project: Project, taskId: string, initialize = false): TaskMetadata {
+    const root = directory(join(projectRoot(project.folder), 'tasks')), path = directory(join(root, taskId));
+    const file = join(path, 'task.json');
+    const value = metadata(file, 'task') as TaskMetadata;
+    if (value.id !== taskId) throw Error('Task directory ID mismatch');
+    const baseline = taskDocumentSnapshot(path);
+    const previous = initialize ? undefined : value.documentBaseline;
+    if (previous !== undefined && (!previous || typeof previous !== 'object' || Array.isArray(previous) || Object.entries(previous).some(([name, entry]) => !/^[a-z][a-z0-9-]*\.md$/.test(name) || !entry || !/^[a-f0-9]{64}$/.test(entry.hash) || !Number.isFinite(entry.modifiedAt)))) throw Error('Invalid document baseline');
+    const changed = Object.keys(baseline).filter(name => previous && previous[name]?.hash !== baseline[name]!.hash);
+    const removed = previous && Object.keys(previous).some(name => !(name in baseline));
+    if (previous && (changed.length || removed)) {
+      // 変更時刻が保存されている編集はその時刻を使う。削除・時刻保存編集は検出時刻になる。
+      const time = removed || changed.some(name => (previous[name]?.modifiedAt ?? -Infinity) >= baseline[name]!.modifiedAt)
+        ? Date.now() : Math.max(...changed.map(name => baseline[name]!.modifiedAt));
+      value.updatedAt = new Date(Math.max(Date.parse(value.updatedAt ?? '') || 0, time)).toISOString();
+    }
+    if (JSON.stringify(value.documentBaseline) !== JSON.stringify(baseline)) {
+      value.documentBaseline = baseline;
+      writeJson(file, value);
+    }
+    return value;
+  }
+  private scopedTask(projectId: string, taskId: string) {
+    if (!validProjectId(projectId) || !validTaskId(taskId)) throw Error('Invalid task scope');
+    const project = this.db.query('SELECT * FROM projects WHERE id=?').get(projectId) as Project | null;
+    if (!project) throw Error('Unknown project');
+    const root = projectRoot(project.folder);
+    if (metadata(join(root, 'project.json'), 'project').id !== projectId) throw Error('Project ID mismatch');
+    const tasks = directory(join(root, 'tasks'));
+    if (!pathExists(join(tasks, taskId))) throw Error('Unknown task');
+    const path = directory(join(tasks, taskId));
+    const file = join(path, 'task.json');
+    const value = metadata(file, 'task') as TaskMetadata;
+    if (value.id !== taskId) throw Error('Task directory ID mismatch');
+    return {project, file, value};
+  }
+  reconcileTaskDocuments(projectId: string, taskId: string) {
+    const {project, value: before} = this.scopedTask(projectId, taskId);
+    const after = this.reconcileDocuments(project, taskId);
+    return before.documentBaseline !== undefined && documentContentsKey(before.documentBaseline) !== documentContentsKey(after.documentBaseline!);
+  }
+  taskDocumentFolder(projectId: string, taskId: string) {
+    const {project, value: task} = this.scopedTask(projectId, taskId);
+    this.reconcileDocuments(project, taskId);
+    const path = taskDocuments(project.folder, taskId, {requirements: '# ' + task.name + '\n'});
+    // 読み込み時の既定文書の補完は活動に数えない。
+    this.reconcileDocuments(project, taskId, true);
+    return path;
+  }
+  touchTask(projectId: string, taskId: string) {
+    const {file, value} = this.scopedTask(projectId, taskId);
+    value.updatedAt = new Date(Math.max(Date.now(), Date.parse(value.updatedAt ?? '') || 0)).toISOString();
+    writeJson(file, value);
   }
   createTask(projectId: string, name: string, initialize?: (task: TaskRow) => void): TaskRow {
     if (!validProjectId(projectId)) throw Error('Invalid project');
@@ -121,6 +176,7 @@ export class Store {
       }, true);
       directory(path);
       writeJson(join(path, 'task.json'), value);
+      this.reconcileDocuments(project, value.id);
     } catch (error) {
       if (existsSync(path)) rmSync(path, {
         recursive: true

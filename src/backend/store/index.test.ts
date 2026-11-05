@@ -605,3 +605,45 @@ test('task rows expose canonical creation dates including unknown dates', () => 
     rmSync(f.root, { recursive: true, force: true });
   }
 });
+
+test('document activity survives restart and ignores initial unknown dates and timestamp-only changes', async () => {
+  const f = fixture(); let store = new Store(f.path);
+  try {
+    const project = store.createProject('Demo', f.folder), task = store.createTask(project.id, 'Task');
+    const path = join(f.folder, '.beni', 'tasks', task.id), file = join(path, 'task.json');
+    const original = JSON.parse(readFileSync(file, 'utf8'));
+    original.createdAt = null; original.updatedAt = null; delete original.documentBaseline;
+    writeFileSync(file, JSON.stringify(original));
+    expect(store.tasks()[0]!.updatedAt).toBeNull();
+    const baseline = readFileSync(file, 'utf8');
+    expect(store.tasks()[0]!.updatedAt).toBeNull();
+    expect(readFileSync(file, 'utf8')).toBe(baseline);
+    store.close(); await Bun.sleep(5);
+    writeFileSync(join(path, 'requirements.md'), '# Offline edit\n');
+    store = new Store(f.path);
+    const edited = store.tasks()[0]!;
+    expect(edited.createdAt).toBeNull(); expect(edited.updatedAt).not.toBeNull();
+    writeFileSync(join(path, 'large.md'), 'a'.repeat(1024 * 1024 + 1));
+    expect(store.tasks()).toHaveLength(1);
+    rmSync(join(path, 'large.md'));
+    const stable = store.tasks()[0]!.updatedAt;
+    writeFileSync(join(path, 'requirements.md'), '# Offline edit\n');
+    expect(store.tasks()[0]!.updatedAt).toBe(stable);
+    const {statSync, utimesSync} = await import('node:fs');
+    const priorStat = statSync(join(path, 'requirements.md'));
+    await Bun.sleep(5);
+    writeFileSync(join(path, 'requirements.md'), '# Preserved timestamp edit\n');
+    utimesSync(join(path, 'requirements.md'), priorStat.atime, priorStat.mtime);
+    // A preserved (or older rounded) timestamp must never regress a newer activity.
+    const preserved = store.tasks()[0]!.updatedAt;
+    expect(preserved! >= stable!).toBe(true);
+    await Bun.sleep(5); rmSync(join(path, 'requirements.md'));
+    expect(store.tasks()[0]!.updatedAt! > stable!).toBe(true);
+    const removed = store.task(task.id)!.updatedAt;
+    store.taskDocumentFolder(project.id, task.id);
+    expect(store.task(task.id)!.updatedAt).toBe(removed);
+    mkdirSync(join(f.root, 'other'));
+    const other = store.createProject('Other', join(f.root, 'other'));
+    expect(() => store.touchTask(other.id, task.id)).toThrow('Unknown task');
+  } finally { store.close(); rmSync(f.root, { recursive: true, force: true }); }
+});

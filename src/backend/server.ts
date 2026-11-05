@@ -5,7 +5,7 @@ import { communicationSocket, type SocketData } from './events';
 import type { Server } from 'bun';
 import { validId } from '../shared/communication';
 import { validProjectId, validTaskId } from '../shared/ids';
-import { taskDocuments, readTaskDocuments, watchTaskDocuments } from './documents';
+import { readTaskDocuments, watchTaskDocuments } from './documents';
 import { isAbsolute, dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { mkdir, opendir, realpath } from 'node:fs/promises';
@@ -42,7 +42,7 @@ async function listFolders(path: string) {
 
 const row = (value: unknown): Record<string, any> => value as Record<string, any>;
 const projectTask = (value: unknown) => { const t = row(value); return {id:t.id, projectId:t.project_id, name:t.name, phase:t.phase, status:t.status, createdAt:t.createdAt, updatedAt:t.updatedAt}; };
-const documentFolder = (_store:Store,project:any, task:any) => taskDocuments(project.folder,task.id,{requirements:'# '+task.name+'\n'});
+const documentFolder = (store:Store,project:any, task:any) => store.taskDocumentFolder(project.id,task.id);
 const projectResolver = (store:Store) => (projectId:string) => {
  const project=store.projects().map(row).find(project=>project.id===projectId);
  if(!project)throw Error('Project not found');
@@ -56,6 +56,7 @@ const projectForScope = (store:Store,projectId:unknown,taskId:unknown) => {
   return project;
  };
 export function createHandler(store: Store, initialFolder = homedir(), chat = new ChatService(projectResolver(store)), publicOrigin?: string, terminals = new TerminalService()) {
+ chat.setTaskActivity((p,t)=>store.touchTask(p,t));
  const access=requestAccess(publicOrigin);
  const scope=(p:unknown,t:unknown)=>projectForScope(store,p,t);
  return async (request: Request): Promise<Response> => {
@@ -75,7 +76,7 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
    if (url.pathname === '/api/chat') {const p=url.searchParams.get('projectId');const raw=url.searchParams.get('taskId');const t=raw;if(!scope(p,t))return json({error:'会話が見つかりません'},404);try{const {packs,...conversation}=await chat.get(p as string,t);return json(conversation)}catch{return json({error:'履歴を読み込めませんでした'},500)}}
    if (url.pathname === '/api/state') return json({projects:store.projects(),tasks:store.tasks().map(projectTask)});
    const match = url.pathname.match(/^\/api\/tasks\/([^/]+)$/);
-   if (match) { if(!validTaskId(match[1]))return json({error:'タスクが見つかりません'},404);const task=store.task(match[1]); if (!task) return json({error:'タスクが見つかりません'},404); const t=projectTask(task); try {const project=scope(t.projectId,t.id)!;return json({task:t,documents:readTaskDocuments(documentFolder(store,project,t))});}catch{return json({error:'文書を読み込めませんでした'},500)} }
+   if (match) { if(!validTaskId(match[1]))return json({error:'タスクが見つかりません'},404);const task=store.task(match[1]); if (!task) return json({error:'タスクが見つかりません'},404); const t=projectTask(task); try {const project=scope(t.projectId,t.id)!;const path=documentFolder(store,project,t);return json({task:projectTask(store.task(t.id)),documents:readTaskDocuments(path)});}catch{return json({error:'文書を読み込めませんでした'},500)} }
    return json({error:'見つかりません'},404);
    } catch {return json({error:'保存データを読み込めませんでした'},500)}
   }
@@ -119,7 +120,7 @@ export function createServerOptions(store:Store,initialFolder=homedir(),chat=new
  const websocket=communicationSocket({
   terminal:{validate:s=>s.taskId===null&&!!scope(s.projectId,null)&&(s.terminalId===undefined||terminals.has(s.projectId,s.terminalId)),subscribe:(s,event)=>terminals.subscribe(s,event)},
   chat:{validate:s=>s.terminalId===undefined&&!!scope(s.projectId,s.taskId),subscribe:(s,event)=>chat.subscribe(s.projectId,s.taskId,event)},
-  documents:{validate:s=>s.terminalId===undefined&&s.taskId!==null&&!!scope(s.projectId,s.taskId),subscribe:(s,event,failed)=>{const project=scope(s.projectId,s.taskId)!;const path=documentFolder(store,project,projectTask(store.task(s.taskId!)));let timer:ReturnType<typeof setTimeout>|undefined;const stop=watchTaskDocuments(path,()=>{if(timer===undefined)timer=setTimeout(()=>{timer=undefined;event({name:'documents.changed',data:{}})},80)},failed);return ()=>{clearTimeout(timer);stop()}}},
+  documents:{validate:s=>s.terminalId===undefined&&s.taskId!==null&&!!scope(s.projectId,s.taskId),subscribe:(s,event,failed)=>{const project=scope(s.projectId,s.taskId)!;const path=documentFolder(store,project,projectTask(store.task(s.taskId!)));let timer:ReturnType<typeof setTimeout>|undefined;const stop=watchTaskDocuments(path,()=>{if(timer===undefined)timer=setTimeout(()=>{timer=undefined;try{store.reconcileTaskDocuments(s.projectId,s.taskId!);event({name:'documents.changed',data:{}})}catch{failed()}},80)},failed);return ()=>{clearTimeout(timer);stop()}}},
  });
  const handle=createHandler(store,initialFolder,chat,publicOrigin,terminals);
  return {websocket,fetch(request:Request,server:Server<SocketData>){const url=new URL(request.url);if(url.pathname!=='/api/ws')return handle(request);if(request.method!=='GET'||!access(request).allowed||!access(request).sameOrigin||request.headers.get('sec-fetch-site')==='cross-site')return new Response('Forbidden',{status:403});if(!server.upgrade(request,{data:{ready:false,used:new Set(),subscriptions:new Map()}}))return new Response('WebSocket upgrade required',{status:400});return undefined}};

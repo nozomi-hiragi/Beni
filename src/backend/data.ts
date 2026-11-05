@@ -9,6 +9,7 @@ export type Metadata = {
   updatedAt: string | null;
 };
 export type TaskMetadata = Metadata & {
+  documentBaseline?: Record<string, {hash: string; modifiedAt: number}>;
   phase: string;
   status: string;
 };
