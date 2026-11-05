@@ -78,7 +78,7 @@ FE・BE 間の配信・確定・再接続は [チャットのパック同期](..
 
 ## タスク文書の実ファイル
 
-- プロジェクト作成時、選択した既存フォルダに `.beni/tasks/` を作る。タスク作成時に `.beni/tasks/<task-id>/requirements.md`、`documents.md`、`implementation-plan.md` を用意する。タスクIDは [共通ID規則](../data/README.md#idの共通規則) を使い、名前の重複に影響されない。追加文書の名前は英語の小文字・数字・ハイフンと `.md` を使う。
+- プロジェクト作成時、選択した既存フォルダに `.beni/tasks/` を作る。タスク作成時に `.beni/tasks/<task-id>/requirements.md`、`documents.md`、`implementation.md` を用意する。タスクIDは [共通ID規則](../data/README.md#idの共通規則) を使い、名前の重複に影響されない。追加文書の名前は英語の小文字・数字・ハイフンと `.md` を使う。
 - 文書の正本は実ファイルとする。保存場所と復元の規則は [プロジェクトの .beni](../data/beni/README.md) に従う。
 - 文書プレビューは Markdown を装飾して表示する。見出し・箇条書き・表・引用・コードブロックなどに対応し、生コードへの切り替えは設けない。HTML は表示前にサニタイズする。絶対 HTTP/HTTPS リンクは別タブで開き、同じタスク内のMarkdownへの相対リンクは文書プレビューで開く。対象のないリンクやタスク外への相対リンクは遷移させない。画像は外部取得せず代替テキストを表示する。
 - 文書フォルダの変更を監視してプレビューを更新する。atomic renameによる置換も検知し、未変更のメッセージ・タブのDOMを維持する。通知と再取得の手順は [WS メッセージ仕様](../communication/websocket.md) を参照する。

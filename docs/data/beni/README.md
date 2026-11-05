@@ -21,7 +21,7 @@
         ├── task.json             タスク情報
         ├── requirements.md       要件定義
         ├── documents.md          仕様整理（資料・仕様の目次）
-        ├── implementation-plan.md 実装手順
+        ├── implementation.md 実装手順
         ├── retrospective.md      反省会の記録（反省会から）
         ├── *.md                  追加文書（資料または仕様）
         └── .history/

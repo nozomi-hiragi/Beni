@@ -49,12 +49,12 @@ test('task conversations write and resume in their document sandbox; general sta
   await chat.send('019a0000-0000-7000-8000-000000000001','019a0000-0000-7100-8000-000000000001','write documents','model-a',root,documentDirectory);
   await waitFor(async()=>(await chat.get('019a0000-0000-7000-8000-000000000001','019a0000-0000-7100-8000-000000000001')).messages[1].status==='completed');
   expect(await readFile(join(documentDirectory,'requirements.md'),'utf8')).toBe('# Updated requirements\n');
-  expect(await readFile(join(documentDirectory,'implementation-plan.md'),'utf8')).toBe('# Updated plan\n');
+  expect(await readFile(join(documentDirectory,'implementation.md'),'utf8')).toBe('# Updated plan\n');
   expect(await readFile(join(other,'requirements.md'),'utf8')).toBe('# Other task\n');
   const restarted=new ChatService(p=>projectFolder(root,p),()=>fake);
   await restarted.send('019a0000-0000-7000-8000-000000000001','019a0000-0000-7100-8000-000000000001','hello','model-a',root,documentDirectory);await waitFor(async()=>(await restarted.get('019a0000-0000-7000-8000-000000000001','019a0000-0000-7100-8000-000000000001')).messages[3].status==='completed');
   await restarted.send('019a0000-0000-7000-8000-000000000001',null,'hello','model-a',root);await waitFor(async()=>(await restarted.get('019a0000-0000-7000-8000-000000000001',null)).messages[1].status==='completed');
-  await restarted.send('019a0000-0000-7000-8000-000000000001','019a0000-0000-7100-8000-000000000001','hello','model-a',root,documentDirectory,'implementation');await waitFor(async()=>(await restarted.get('019a0000-0000-7000-8000-000000000001','019a0000-0000-7100-8000-000000000001','implementation')).messages[1].status==='completed');
+  await restarted.send('019a0000-0000-7000-8000-000000000001','019a0000-0000-7100-8000-000000000001','hello','model-a',root,documentDirectory,'execution');await waitFor(async()=>(await restarted.get('019a0000-0000-7000-8000-000000000001','019a0000-0000-7100-8000-000000000001','execution')).messages[1].status==='completed');
   await restarted.send('019a0000-0000-7000-8000-000000000001','019a0000-0000-7100-8000-000000000001','hello','model-a',root,documentDirectory);await waitFor(async()=>(await restarted.get('019a0000-0000-7000-8000-000000000001','019a0000-0000-7100-8000-000000000001')).messages[5].status==='completed');
   const events=(await readFile(log,'utf8')).trim().split('\n').map(line=>JSON.parse(line));
   const start=events.find(event=>event.method==='thread/start');const resume=events.find(event=>event.method==='thread/resume');
@@ -64,7 +64,7 @@ test('task conversations write and resume in their document sandbox; general sta
   const turns=events.filter(event=>event.method==='turn/start');
   for(const turn of turns.slice(0,2))expect(turn.params).toMatchObject({cwd:documentDirectory,approvalPolicy:'never',sandboxPolicy:{type:'workspaceWrite',writableRoots:[documentDirectory],networkAccess:false,excludeTmpdirEnvVar:true,excludeSlashTmp:true}});
   expect(turns[2].params).toMatchObject({cwd:root,sandboxPolicy:{type:'readOnly',networkAccess:false}});
-  const implementationResume=events.find(event=>event.method==='thread/start'&&event.params.cwd===root&&event.params.sandbox==='workspace-write');expect(implementationResume.params.cwd).toBe(root);expect(implementationResume.params.developerInstructions).toContain('Implement source code');expect(implementationResume.params.developerInstructions).toContain('## 仕様');
+  const executionResume=events.find(event=>event.method==='thread/start'&&event.params.cwd===root&&event.params.sandbox==='workspace-write');expect(executionResume.params.cwd).toBe(root);expect(executionResume.params.developerInstructions).toContain('Implement source code');expect(executionResume.params.developerInstructions).toContain('## 仕様');
   expect(turns[3].params).toMatchObject({cwd:root,sandboxPolicy:{type:'workspaceWrite',writableRoots:[root],networkAccess:false,excludeTmpdirEnvVar:true,excludeSlashTmp:true}});
   expect(turns[4].params).toMatchObject({cwd:documentDirectory,sandboxPolicy:{type:'workspaceWrite',writableRoots:[documentDirectory]}});
   expect(events.filter(event=>event.method==='thread/resume').at(-1).params.developerInstructions).toContain('Never modify these files directly');
@@ -188,9 +188,15 @@ test('旧タスク会話は移行せず、フェーズ別会話を独立して�
  const {mkdir,writeFile}=await import('node:fs/promises');const folder=join(root,'.beni','chat');
  try{
   await mkdir(folder,{recursive:true});const old=join(folder,`${t}.json`),bytes=JSON.stringify({version:1,id:'old',projectId:p,taskId:t,threadId:'old-thread',sessionId:'old-session',messages:[],packs:[]});await writeFile(old,bytes);
-  const chat=new ChatService(()=>root,()=>fake);for(const phase of ['requirements','documents','implementation','retrospective'] as const)expect((await chat.get(p,t,phase)).messages).toEqual([]);
+  const chat=new ChatService(()=>root,()=>fake);for(const phase of ['requirements','documents','implementation','execution','retrospective'] as const)expect((await chat.get(p,t,phase)).messages).toEqual([]);
   await chat.send(p,t,'hello',null,root);await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='completed');
   expect(await readFile(old,'utf8')).toBe(bytes);expect(JSON.parse(await readFile(join(folder,t,'requirements.json'),'utf8')).messages).toHaveLength(2);
+  for(const phase of ['implementation','execution'] as const){
+   await chat.send(p,t,phase,null,root,undefined,phase);await waitFor(async()=>(await chat.get(p,t,phase)).messages.at(-1)?.status==='completed');
+   expect(JSON.parse(await readFile(join(folder,t,`${phase}.json`),'utf8'))).toMatchObject({phase,messages:[{content:phase},{content:'Hello'}]});
+  }
+  expect((await chat.get(p,t,'implementation')).messages[0].content).toBe('implementation');
+  expect((await chat.get(p,t,'execution')).messages[0].content).toBe('execution');
  }finally{await rm(root,{recursive:true,force:true})}
 });
 

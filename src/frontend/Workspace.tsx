@@ -304,7 +304,7 @@ export default function Workspace(props: WorkspaceProps) {
                 finally { setAdvancing(false); }
               }} />
               <Show when={phaseError()}><p role="alert" class="p-2 text-sm text-error">{phaseError()}</p></Show>
-              <Show when={isTaskPhase(detail()?.task.phase)}><ChatPanel readOnly={detail()?.task.phase === 'implementation' || detail()?.task.status === 'completed'} onBusyChange={setChatBusy} onModelUnavailable={(model, provider) => { if (detail()?.task.phase === 'implementation') rejectModel(implementationScope(), model, provider); }} projectId={detail()!.task.projectId} taskId={activeTask()} phase={isTaskPhase(detail()?.task.phase) ? detail()?.task.phase as TaskPhase : undefined} /></Show>
+              <Show when={isTaskPhase(detail()?.task.phase)}><ChatPanel readOnly={detail()?.task.phase === 'execution' || detail()?.task.status === 'completed'} onBusyChange={setChatBusy} onModelUnavailable={(model, provider) => { if (detail()?.task.phase === 'execution') rejectModel(implementationScope(), model, provider); }} projectId={detail()!.task.projectId} taskId={activeTask()} phase={isTaskPhase(detail()?.task.phase) ? detail()?.task.phase as TaskPhase : undefined} /></Show>
             </Show>
           </Show>
         </div>

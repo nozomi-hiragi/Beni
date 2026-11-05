@@ -59,7 +59,7 @@ const projectForScope = (store:Store,projectId:unknown,taskId:unknown) => {
   return project;
  };
 export function createHandler(store: Store, initialFolder = homedir(), chat = new ChatService(projectResolver(store)), publicOrigin?: string, terminals = new TerminalService(), taskEventsChanged:(p:string,t:string)=>void=()=>{}) {
- chat.setImplementationFinished((p,t)=>{const task=store.task(t);if(task?.phase==='implementation'&&task.status!=='completed'){store.selectTaskPhase(p,t,'implementation','retrospective');taskEventsChanged(p,t)}});
+ chat.setExecutionFinished((p,t)=>{const task=store.task(t);if(task?.phase==='execution'&&task.status!=='completed'){store.selectTaskPhase(p,t,'execution','retrospective');taskEventsChanged(p,t)}});
  chat.setTaskActivity((p,t)=>store.touchTask(p,t));
  chat.setTaskEvents({capture:(p,t)=>store.captureTaskHistory(p,t),events:(p,t,after,through,limit)=>store.taskEvents(p,t,after,through,limit)});
  const access=requestAccess(publicOrigin);
@@ -80,7 +80,7 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
    const packMatch=url.pathname.match(/^\/api\/chat\/packs(?:\/([^/]+))?$/);
    if(packMatch){const p=url.searchParams.get('projectId');const raw=url.searchParams.get('taskId');const t=raw;if(!scope(p,t))return json({error:'会話が見つかりません'},404);const phase=url.searchParams.get('phase');if(!validChatPhase(t,phase))return json({error:'フェーズを確認してください'},400);try{const id=packMatch[1]===undefined?undefined:decodePackId(packMatch[1]);if(id!==undefined&&!validId(id))return json({error:'入力を確認してください'},400);const after=url.searchParams.get('afterPackId');if(after!==null&&!validId(after))return json({error:'入力を確認してください'},400);return json(id?await chat.pack(p as string,t,id,chatPhase(t,phase)):await chat.packs(p as string,t,url.searchParams.get('afterPackId')??undefined,chatPhase(t,phase)))}catch(error){const m=error instanceof Error?error.message:'';return json({error:m==='not found'?'パックが見つかりません':m==='not closed'?'生成中のパックです':'パックを読み込めませんでした'},m==='not found'?404:m==='not closed'?409:500)}}
    if (url.pathname === '/api/chat') {const p=url.searchParams.get('projectId');const raw=url.searchParams.get('taskId');const t=raw;if(!scope(p,t))return json({error:'会話が見つかりません'},404);const phase=url.searchParams.get('phase');if(!validChatPhase(t,phase))return json({error:'フェーズを確認してください'},400);try{const {packs,...conversation}=await chat.get(p as string,t,chatPhase(t,phase));return json(conversation)}catch{return json({error:'履歴を読み込めませんでした'},500)}}
-   if (url.pathname === '/api/state') {for(const task of store.tasks().map(projectTask))if(task.phase==='implementation')await chat.recoverImplementation(task.projectId,task.id);return json({projects:store.projects(),tasks:store.tasks().map(projectTask)})}
+   if (url.pathname === '/api/state') {for(const task of store.tasks().map(projectTask))if(task.phase==='execution')await chat.recoverExecution(task.projectId,task.id);return json({projects:store.projects(),tasks:store.tasks().map(projectTask)})}
    const eventMatch=url.pathname.match(/^\/api\/tasks\/([^/]+)\/events(?:\/versions\/([^/]+))?$/);
    if(eventMatch){
     const p=url.searchParams.get('projectId'),t=eventMatch[1]!;if(!scope(p,t))return json({error:'タスクが見つかりません'},404);
@@ -92,7 +92,7 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
     }catch(error){const message=error instanceof Error?error.message:'';return json({error:'変更履歴を取得できませんでした'},message==='invalid cursor'?400:message.includes('not found')||message.includes('Unknown')?404:500)}
    }
    const match = url.pathname.match(/^\/api\/tasks\/([^/]+)$/);
-   if (match) { if(!validTaskId(match[1]))return json({error:'タスクが見つかりません'},404);const task=store.task(match[1]); if (!task) return json({error:'タスクが見つかりません'},404); const t=projectTask(task); try {const project=scope(t.projectId,t.id)!;const path=documentFolder(store,project,t);if(t.phase==='implementation')await chat.recoverImplementation(t.projectId,t.id);const documents=readTaskDocuments(path);return json({task:projectTask(store.task(t.id)),documents,canStart:implementationPlanReady(documents)});}catch{return json({error:'文書を読み込めませんでした'},500)} }
+   if (match) { if(!validTaskId(match[1]))return json({error:'タスクが見つかりません'},404);const task=store.task(match[1]); if (!task) return json({error:'タスクが見つかりません'},404); const t=projectTask(task); try {const project=scope(t.projectId,t.id)!;const path=documentFolder(store,project,t);if(t.phase==='execution')await chat.recoverExecution(t.projectId,t.id);const documents=readTaskDocuments(path);return json({task:projectTask(store.task(t.id)),documents,canStart:implementationPlanReady(documents)});}catch{return json({error:'文書を読み込めませんでした'},500)} }
    return json({error:'見つかりません'},404);
    } catch {return json({error:'保存データを読み込めませんでした'},500)}
   }
@@ -114,7 +114,7 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
    if (url.pathname === '/api/chat/send' || url.pathname === '/api/chat/interrupt') {
     const p=input.projectId,t=input.taskId??null;const project=scope(p,t);if(!project)return json({error:'会話が見つかりません'},404);
     if(!validChatPhase(t,input.phase))return json({error:'フェーズを確認してください'},400);
-    if(t!==null&&(store.task(t as string)!.status==='completed'||store.task(t as string)!.phase==='implementation'))return json({error:'現在のタスクには送信できません'},409);
+    if(t!==null&&(store.task(t as string)!.status==='completed'||store.task(t as string)!.phase==='execution'))return json({error:'現在のタスクには送信できません'},409);
     try {if(url.pathname.endsWith('/interrupt')){await chat.interrupt(p as string,t as string|null,chatPhase(t,input.phase));return json({ok:true})}
      if((input.provider!==undefined&&!isProvider(input.provider))||typeof input.content!=='string'||!input.content.trim()||!(input.model===null||(typeof input.model==='string'&&input.model.length<=256)))return json({error:'入力を確認してください'},400);
      if(t!==null&&store.task(t as string)!.phase!==input.phase)return json({error:'フェーズが変更されています'},409);
@@ -130,7 +130,7 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
    if (url.pathname === '/api/projects') {if(typeof input.name!=='string'||typeof input.folder!=='string'||!isAbsolute(input.folder)) return json({error:'名前と絶対パスを入力してください'},400);if(!input.name.trim())return json({error:'名前を入力してください'},400);return json(store.createProject(input.name,input.folder),201)}
    const phaseMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/(phase|start|stop|complete|reopen)$/);
    if (phaseMatch) {
-    if (!isTaskPhase(input.phase) || !validProjectId(input.projectId) || (phaseMatch[2]==='phase'&&(!isTaskPhase(input.target)||!['requirements','documents','implementation-plan'].includes(input.target)))) return json({error:'フェーズを確認してください'},400);
+    if (!isTaskPhase(input.phase) || !validProjectId(input.projectId) || (phaseMatch[2]==='phase'&&(!isTaskPhase(input.target)||!['requirements','documents','implementation'].includes(input.target)))) return json({error:'フェーズを確認してください'},400);
     const taskId=phaseMatch[1]!, projectId=input.projectId, expectedPhase=input.phase;
     if(phaseMatch[2]==='start'&&((input.provider!==undefined&&!isProvider(input.provider))||!(input.model===null||(typeof input.model==='string'&&input.model.length<=256))))return json({error:'入力を確認してください'},400);
     if (!validTaskId(taskId) || !scope(input.projectId, taskId)) return json({error:'タスクが見つかりません'},404);
@@ -140,11 +140,11 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
       const action=phaseMatch[2];
       if(action==='phase'&&input.phase==='retrospective')throw Error('phase conflict');
       if(action==='start'&&input.phase==='retrospective')throw Error('phase conflict');
-      if((action==='stop')!==(input.phase==='implementation'))throw Error('phase conflict');
+      if((action==='stop')!==(input.phase==='execution'))throw Error('phase conflict');
       if(action==='start'&&!implementationPlanReady(readTaskDocuments(store.taskDocumentFolder(projectId,taskId))))throw Error('plan required');
-      return store.selectTaskPhase(projectId,taskId,expectedPhase,action==='start'?'implementation':action==='stop'?'implementation-plan':input.target as TaskPhase);
+      return store.selectTaskPhase(projectId,taskId,expectedPhase,action==='start'?'execution':action==='stop'?'implementation':input.target as TaskPhase);
      };
-     const task=phaseMatch[2]==='complete'||phaseMatch[2]==='reopen'?chat.withIdleTask(projectId,taskId,()=>{if(expectedPhase!=='retrospective')throw Error('phase conflict');return store.setTaskCompleted(projectId,taskId,phaseMatch[2]==='complete')}):phaseMatch[2]==='start'?await chat.startTask(projectId,taskId,change,()=>{if(store.task(taskId)?.phase==='implementation'){store.selectTaskPhase(projectId,taskId,'implementation',expectedPhase);taskEventsChanged(projectId,taskId)}},input.model as string|null,scope(projectId,taskId)!.folder,store.taskDocumentFolder(projectId,taskId),input.provider as Provider|undefined):phaseMatch[2]==='stop'?await chat.stopTask(projectId,taskId,change,()=>{if(expectedPhase!=='implementation'||store.task(taskId)!.phase!==expectedPhase)throw Error('phase conflict')}):chat.withIdleTask(projectId,taskId,change);
+     const task=phaseMatch[2]==='complete'||phaseMatch[2]==='reopen'?chat.withIdleTask(projectId,taskId,()=>{if(expectedPhase!=='retrospective')throw Error('phase conflict');return store.setTaskCompleted(projectId,taskId,phaseMatch[2]==='complete')}):phaseMatch[2]==='start'?await chat.startTask(projectId,taskId,change,()=>{if(store.task(taskId)?.phase==='execution'){store.selectTaskPhase(projectId,taskId,'execution',expectedPhase);taskEventsChanged(projectId,taskId)}},input.model as string|null,scope(projectId,taskId)!.folder,store.taskDocumentFolder(projectId,taskId),input.provider as Provider|undefined):phaseMatch[2]==='stop'?await chat.stopTask(projectId,taskId,change,()=>{if(expectedPhase!=='execution'||store.task(taskId)!.phase!==expectedPhase)throw Error('phase conflict')}):chat.withIdleTask(projectId,taskId,change);
      taskEventsChanged(input.projectId,taskId);
      return json(projectTask(task));
     } catch (error) {

@@ -25,7 +25,7 @@ HTTP による取得・操作と、チャットのパック同期の契約を定
 | `POST /api/tasks/:id/delete` | `{projectId: string}` | 200 `{ok: true}`。タスク・文書・タスク会話を削除 | 404 タスクなし・所属不一致、409 チャット実行中、500 削除失敗 |
 | `POST /api/tasks/:id/phase` | `{projectId: string, phase: string, target: string}`。現在と移動先の準備フェーズを指定 | 200 移動後の `Task` | 400 入力不正、404 タスクなし・所属不一致、409 実行中・フェーズ不一致 |
 | `POST /api/tasks/:id/start` | `{projectId: string, phase: string, model: string \| null, provider?: "codex" \| "claude"}` | 200 実装中の `Task`。選択モデルへ実装開始の依頼を送信 | 400 入力不正、404 対象なし、409 実行中・フェーズ不一致・実装手順未編集、500 開始失敗 |
-| `POST /api/tasks/:id/stop` | `{projectId: string, phase: "implementation"}` | 200 停止完了後の実装手順の `Task` | 404 対象なし、409 フェーズ不一致・停止処理中、500 停止失敗 |
+| `POST /api/tasks/:id/stop` | `{projectId: string, phase: "execution"}` | 200 停止完了後の実装手順の `Task` | 404 対象なし、409 フェーズ不一致・停止処理中、500 停止失敗 |
 | `POST /api/tasks/:id/complete` | `{projectId: string, phase: "retrospective"}` | 200 `status: completed` の `Task` | 404 対象なし、409 フェーズ・状態不一致、チャット実行中 |
 | `POST /api/tasks/:id/reopen` | `{projectId: string, phase: "retrospective"}` | 200 反省会・`status: idle` の `Task` | 404 対象なし、409 フェーズ・状態不一致 |
 | `POST /api/tasks/:id/rename` | `{projectId: string, name: string}`。名前の前後の空白を除く | 200 更新後の `Task` | 400 名前不正、404 タスクなし・所属不一致、500 保存失敗 |
@@ -37,11 +37,11 @@ HTTP による取得・操作と、チャットのパック同期の契約を定
 | `POST /api/chat/send` | `{projectId, taskId, phase, content, model, provider?}`。content は空白のみ不可、model は256文字以内の文字列か null | 202 `Conversation` | 409 送信中、400 Codex 利用不可・設定不適合、404 対象なし、500 保存・接続失敗 |
 | `POST /api/chat/interrupt` | `{projectId, taskId, phase}` | 200 `{ok: true}` | 409 停止対象なし、404 対象なし、500 保存・接続失敗 |
 
-タスクチャットの `phase` は `requirements`・`documents`・`implementation-plan`・`implementation`・`retrospective` のいずれかとする。
+タスクチャットの `phase` は `requirements`・`documents`・`implementation`・`execution`・`retrospective` のいずれかとする。
 
 `chat/send` の 202 は受け付けであり、返答終了ではない。メッセージの送信は `/api/chat/send` を使う。
 
-準備中は `requirements`・`documents`・`implementation-plan` 間を選択できる。`implementation` へ入るにはstartを使い、stop完了後は `implementation-plan` へ戻る。phase操作ではエージェントを自動起動せず、startでは実装開始の定型依頼を実装中の会話へ送る。
+準備中は `requirements`・`documents`・`implementation` 間を選択できる。`execution` へ入るにはstartを使い、stop完了後は `implementation` へ戻る。phase操作ではエージェントを自動起動せず、startでは実装開始の定型依頼を実装中の会話へ送る。
 
 プロジェクト・タスク作成は対応する文書ディレクトリも初期化する。タスク詳細取得でも必要な文書の初期化処理が走る。`GET /api/chat` は実行中でない pending/streaming メッセージを unknown に更新する場合がある。
 

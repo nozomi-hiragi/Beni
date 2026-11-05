@@ -30,7 +30,7 @@ URL を直接開いたときや再読み込みしたときは、指定された�
 | --- | --- | --- |
 | 要件定義 | 要件定義 | `requirements.md` |
 | 仕様整理 | 仕様整理 | `documents.md` |
-| 実装手順 | 実装手順 | `implementation-plan.md` |
+| 実装手順 | 実装手順 | `implementation.md` |
 | 反省会 | 反省会 | `retrospective.md` |
 
 ## 操作の流れ

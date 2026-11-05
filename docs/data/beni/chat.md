@@ -16,7 +16,15 @@
 
 ## フェーズ別の保存
 
-`phase` は `requirements`、`documents`、`implementation-plan`、`implementation`、`retrospective`。各会話は独立した会話ID・発言・パック列・CLIセッション・`lastEventId` を持つ。未送信のフェーズは空の会話として扱い、保存ファイルは必要時に作成する。Generalのphaseはnull。
+`phase` は `requirements`、`documents`、`implementation`、`execution`、`retrospective`。各会話は独立した会話ID・発言・パック列・CLIセッション・`lastEventId` を持つ。未送信のフェーズは空の会話として扱い、保存ファイルは必要時に作成する。Generalのphaseはnull。
+
+| フェーズ | チャットファイル | 対応するタスク文書 |
+| --- | --- | --- |
+| 要件定義 | `requirements.json` | `requirements.md` |
+| 仕様整理 | `documents.json` | `documents.md` |
+| 実装手順 | `implementation.json` | `implementation.md` |
+| 実装中 | `execution.json` | 専用文書なし |
+| 反省会 | `retrospective.json` | `retrospective.md` |
 
 変更イベントと本文の版は [タスクの変更履歴](../../objects/task-events.md) に従う。
 

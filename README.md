@@ -67,7 +67,7 @@ Beni/data/
 └── tasks/<taskId>/
     ├── task.json                タスク情報
     ├── requirements.md
-    └── implementation-plan.md
+    └── implementation.md
 ```
 
 `BENI_DATA_DIR` は `.beni/` の場所を変更しません。会話は平文で保存されます。実データを公開リポジトリへ追加しないでください。

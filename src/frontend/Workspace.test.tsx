@@ -99,7 +99,7 @@ it('refreshes real Markdown content without duplicating tabs and selects require
  vi.stubGlobal('fetch',vi.fn((path:string, init?: RequestInit)=>{
   if(path.endsWith('/phase')) { expect(JSON.parse(String(init?.body))).toEqual({projectId:task.projectId,phase:'requirements',target:'documents'}); currentPhase='documents'; return Promise.resolve(json({...task,phase:currentPhase})); }
   if(path==='/api/state')return Promise.resolve(json({projects:[],tasks:[task]}));
-  if(path==='/api/tasks/019a0000-0000-7100-8000-000000000385')return Promise.resolve(json({task:{...task,phase:currentPhase},messages:[],documents:[{path:'requirements.md',name:'requirements.md',content,version},{path:'documents.md',name:'documents.md',content:'# Index\n\n## 仕様\n\n[API](api.md)',version:1},{path:'api.md',name:'api.md',content:'# API specification',version:1},{path:'implementation-plan.md',name:'implementation-plan.md',content:'# Plan',version:1}]}));
+  if(path==='/api/tasks/019a0000-0000-7100-8000-000000000385')return Promise.resolve(json({task:{...task,phase:currentPhase},messages:[],documents:[{path:'requirements.md',name:'requirements.md',content,version},{path:'documents.md',name:'documents.md',content:'# Index\n\n## 仕様\n\n[API](api.md)',version:1},{path:'api.md',name:'api.md',content:'# API specification',version:1},{path:'implementation.md',name:'implementation.md',content:'# Plan',version:1}]}));
   if(path==='/api/codex/status')return Promise.resolve(json({installed:false,auth:'none',models:[],usage:'unknown'}));
   if(path.startsWith('/api/chat/packs'))return Promise.resolve(json({packs:[]}));
   if(path.startsWith('/api/chat?'))return Promise.resolve(json({id:'document-test',messages:[]}));
@@ -177,7 +177,7 @@ it('moves back, recovers a phase conflict and follows task event changes', async
     if (path === '/api/state') return Promise.resolve(json({projects:[],tasks:[task]}));
     if (path.endsWith('/phase')) {
       expect(JSON.parse(String(init?.body))).toEqual({projectId:task.projectId,phase:'documents',target:'requirements'});
-      phase = conflict ? 'implementation-plan' : 'requirements';
+      phase = conflict ? 'implementation' : 'requirements';
       return Promise.resolve(conflict ? {ok:false,status:409,json:async()=>({error:'フェーズが変更されています'})} as Response : json({...task,phase}));
     }
     if (path === `/api/tasks/${task.id}`) return Promise.resolve(json({task:{...task,phase},documents:[{name:'requirements.md',content:'# Requirements',version:1},{name:'documents.md',content:'# Documents',version:1}]}));
@@ -199,23 +199,23 @@ it('moves back, recovers a phase conflict and follows task event changes', async
   fireEvent.click(screen.getByRole('button',{name:'要件定義'}));
   await screen.findByText('フェーズが変更されています');
   expect(screen.getByRole('button',{name:'実装手順'}).getAttribute('aria-current')).toBe('step');
-  expect(onTaskChange).toHaveBeenLastCalledWith(task.id, expect.objectContaining({phase:'implementation-plan'}));
+  expect(onTaskChange).toHaveBeenLastCalledWith(task.id, expect.objectContaining({phase:'implementation'}));
 });
 
 it.each(['codex','claude'] as const)('starts with the selected %s model and refreshes start availability after stopping', async provider => {
   const saved:Record<string,string>={};
-  const task = {id:'019a0000-0000-7100-8000-000000000901',projectId:'019a0000-0000-7000-8000-000000000901',name:'Selected model',phase:'implementation-plan',status:'idle'};
+  const task = {id:'019a0000-0000-7100-8000-000000000901',projectId:'019a0000-0000-7000-8000-000000000901',name:'Selected model',phase:'implementation',status:'idle'};
   let phase = task.phase, canStart = true;
   const starts: unknown[] = [];
   vi.stubGlobal('fetch', vi.fn((path: string, init?: RequestInit) => {
     if (path === '/api/state') return Promise.resolve(json({projects:[],tasks:[task]}));
     if (path.endsWith('/start')) {
       starts.push(JSON.parse(String(init?.body)));
-      phase = 'implementation';
+      phase = 'execution';
       return Promise.resolve(json({...task,phase}));
     }
     if (path.endsWith('/stop')) {
-      phase = 'implementation-plan'; canStart = false;
+      phase = 'implementation'; canStart = false;
       return Promise.resolve(json({...task,phase}));
     }
     if (path === `/api/tasks/${task.id}`) return Promise.resolve(json({task:{...task,phase},documents:[],canStart}));
@@ -232,10 +232,10 @@ it.each(['codex','claude'] as const)('starts with the selected %s model and refr
   await waitFor(() => expect((screen.getByRole('button',{name:'開始'}) as HTMLButtonElement).disabled).toBe(false));
   fireEvent.change(model,{target:{value:`${provider}:chosen`}});
   await waitFor(() => expect((model as HTMLSelectElement).value).toBe(`${provider}:chosen`));
-  expect(saved['implementation-plan']).toBeUndefined();
+  expect(saved['implementation']).toBeUndefined();
   await waitFor(() => expect((screen.getByRole('button',{name:'開始'}) as HTMLButtonElement).disabled).toBe(false));
   fireEvent.click(screen.getByRole('button',{name:'開始'}));
-  await waitFor(() => expect(starts).toEqual([{projectId:task.projectId,phase:'implementation-plan',model:'chosen',provider}]));
+  await waitFor(() => expect(starts).toEqual([{projectId:task.projectId,phase:'implementation',model:'chosen',provider}]));
   await waitFor(() => expect((screen.getByRole('button',{name:'停止'}) as HTMLButtonElement).disabled).toBe(false));
   fireEvent.click(screen.getByRole('button',{name:'停止'}));
   await waitFor(() => expect((screen.getByRole('button',{name:'開始'}) as HTMLButtonElement).disabled).toBe(true));
@@ -278,8 +278,8 @@ it('実装担当モデルをチャットと独立して記憶し、実装から�
     const pack = packResponse(path, []); if (pack) return pack;
     if (path.startsWith(`/api/tasks/${taskId}/`)) {
       const body = JSON.parse(String(init?.body)); posted.push({path, body});
-      if (path.endsWith('/start')) task = {...task, phase: 'implementation', status: 'running'};
-      if (path.endsWith('/stop')) task = {...task, phase: 'implementation-plan', status: 'idle'};
+      if (path.endsWith('/start')) task = {...task, phase: 'execution', status: 'running'};
+      if (path.endsWith('/stop')) task = {...task, phase: 'implementation', status: 'idle'};
       if (path.endsWith('/phase')) task = {...task, phase: body.target};
       if (path.endsWith('/complete')) task = {...task, status:'completed'};
       if (path.endsWith('/reopen')) task = {...task, status:'idle'};
@@ -322,7 +322,7 @@ it('実装担当モデルをチャットと独立して記憶し、実装から�
 
 it('保存した実装担当モデルが利用不可なら警告を表示し開始を防ぐ', async () => {
  const projectId='019a0000-0000-7000-8000-000000000001', taskId='019a0000-0000-7100-8000-000000000090';
- const task={id:taskId,projectId,name:'サンプル',phase:'implementation-plan',status:'idle'};
+ const task={id:taskId,projectId,name:'サンプル',phase:'implementation',status:'idle'};
  localStorage.setItem(`beni:model:${projectId}:${taskId}:implementation-assignee`,JSON.stringify({id:'removed',name:'Old',provider:'claude'}));
  vi.stubGlobal('fetch',vi.fn(async (path:string) => {
   if(path==='/api/state')return json({projects:[],tasks:[task]});

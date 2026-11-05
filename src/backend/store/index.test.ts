@@ -304,8 +304,8 @@ test('ambiguous document moves stay separate events and phase transitions preser
     ]);
     // メタデータ更新後・履歴確定前に中断した状態も次の照合で取り込む。
     const file = join(folder, 'task.json'), value = JSON.parse(readFileSync(file, 'utf8'));
-    writeFileSync(file, JSON.stringify({...value, phase: 'implementation-plan'}));
-    expect(store.taskEvents(p.id, task.id).events.at(-1)).toMatchObject({type: 'phase.changed', from: 'requirements', to: 'implementation-plan', sourcePhase: null});
+    writeFileSync(file, JSON.stringify({...value, phase: 'implementation'}));
+    expect(store.taskEvents(p.id, task.id).events.at(-1)).toMatchObject({type: 'phase.changed', from: 'requirements', to: 'implementation', sourcePhase: null});
     expect(() => store.advanceTaskPhase(p.id, task.id, 'requirements')).toThrow('phase conflict');
   } finally { store.close(); rmSync(f.root, {recursive: true, force: true}); }
 });
