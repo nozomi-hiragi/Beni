@@ -200,15 +200,15 @@ test('旧タスク会話は移行せず、フェーズ別会話を独立して�
  }finally{await rm(root,{recursive:true,force:true})}
 });
 
-test('引継ぎは固定上限で全ページを渡し、受理後だけカーソルを進めて失敗時は再送する',async()=>{
- const root=await mkdtemp(join(tmpdir(),'beni-phase-cursor-'));const p='019a0000-0000-7000-8000-000000000001',t='019a0000-0000-7100-8000-000000000001';
- const log=join(root,'rpc.jsonl');process.env.FAKE_CODEX_LOG=log;let tail=3;const ranges:number[][]=[];
- const chat=new ChatService(()=>root,()=>fake);chat.setTaskEvents({capture:()=>{},events:(_p,_t,after,through=tail)=>{ranges.push([after,through]);const next=Math.min(after+1,through);return {events:next>after?[{id:next,type:'document.updated',version:'a'.repeat(64),path:'requirements.md'}]:[],lastEventId:next,through,hasMore:next<through}}});
+test('引継ぎは上限だけ渡し、ツールの確認完了で進め、未確認範囲を再送する',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'beni-phase-cursor-')),p='019a0000-0000-7000-8000-000000000001',t='019a0000-0000-7100-8000-000000000001',log=join(root,'rpc.jsonl');process.env.FAKE_CODEX_LOG=log;let tail=3;
+ const chat=new ChatService(()=>root,()=>fake);chat.setTaskEvents({capture:()=>{},events:(_p,_t,after,through=tail,limit=100)=>{const next=Math.min(after+limit,through);return {events:next>after?[{id:next,type:'document.updated',path:'requirements.md',secret:'never-injected'}]:[],lastEventId:next,nextCursor:next,through,hasMore:next<through}}});
  try{
   await chat.send(p,t,'reject',null,root,root);await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='failed');expect((await chat.get(p,t)).lastEventId).toBe(0);
-  await chat.send(p,t,'wait',null,root,root);await waitFor(async()=>(await chat.get(p,t)).lastEventId===3);tail=4;expect((await chat.get(p,t)).messages.at(-2)?.content).toBe('wait');
-  await chat.interrupt(p,t);await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='interrupted');await chat.send(p,t,'hello',null,root,root);await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='completed');expect((await chat.get(p,t)).lastEventId).toBe(4);
-  const turns=(await readFile(log,'utf8')).trim().split('\n').map(line=>JSON.parse(line)).filter(event=>event.method==='turn/start');expect(turns[0].params.input).toEqual(turns[1].params.input.map((input:any,i:number)=>i===0?{...input,text:'reject'}:input));expect(turns[1].params.input[1].text).toContain('versions/<version>.md');expect(turns[2].params.input[1].text).toContain('"id":4');expect(turns[2].params.input[1].text).not.toContain('"id":3');expect(ranges).toEqual([[0,3],[1,3],[2,3],[0,3],[1,3],[2,3],[3,4]]);
+  await chat.send(p,t,'hello',null,root,root);await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='completed');expect((await chat.get(p,t)).lastEventId).toBe(0);
+  await chat.send(p,t,'event tools',null,root,root);await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='completed');expect((await chat.get(p,t)).lastEventId).toBe(3);
+  tail=4;await chat.send(p,t,'event tools',null,root,root);await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='completed');expect((await chat.get(p,t)).lastEventId).toBe(4);
+  const records=(await readFile(log,'utf8')).trim().split('\n').map(line=>JSON.parse(line)),turns=records.filter(event=>event.method==='turn/start');expect(turns[0].params.input[1].text).toContain('after 0, through 3');expect(turns[1].params.input[1].text).toContain('after 0, through 3');expect(turns[3].params.input[1].text).toContain('after 3, through 4');expect(JSON.stringify(turns)).not.toContain('never-injected');expect(records.find(event=>event.method==='thread/start').params.dynamicTools.map((tool:any)=>tool.name)).toContain('acknowledge_events');expect(records.find(event=>event.method==='thread/resume').params.dynamicTools).toBeUndefined();
  }finally{delete process.env.FAKE_CODEX_LOG;await rm(root,{recursive:true,force:true})}
 });
 
@@ -218,7 +218,7 @@ test('受理不明の切断では引継ぎカーソルを進めず、読込中�
  try{
   const reading=chat.get(p,t,'documents');expect(()=>chat.deleteTask(p,t,()=>{})).toThrow('busy');await reading;
   await chat.send(p,t,'disconnect',null,root,root);await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='unknown');expect((await chat.get(p,t)).lastEventId).toBe(0);
-  await chat.send(p,t,'hello',null,root,root);await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='completed');expect((await chat.get(p,t)).lastEventId).toBe(1);expect(delivered).toBe(2);
+  await chat.send(p,t,'event tools',null,root,root);await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='completed');expect((await chat.get(p,t)).lastEventId).toBe(1);expect(delivered).toBe(3);
  }finally{await rm(root,{recursive:true,force:true})}
 });
 
@@ -344,16 +344,16 @@ test('Claude は受理前にセッションとカーソルを保存せず、中�
  process.env.FAKE_CLAUDE_LOG=log;process.env.FAKE_CLAUDE_ACCEPT_DELAY_MS='500';
  try{
   const chat=new ChatService(()=>root,()=>null,()=>fakeClaude);chat.setTaskEvents({capture:()=>{},events:()=>({events:[{id:1,type:'document.updated',path:'requirements.md'}],lastEventId:1,through:1,hasMore:false})});
-  await chat.send(p,t,'hello','sonnet',root,undefined,'requirements',false,'claude');
+  await chat.send(p,t,'event tools','sonnet',root,undefined,'requirements',false,'claude');
   await waitFor(async()=>{try{return (await readFile(log,'utf8')).includes('session')}catch{return false}});
   const pending=await chat.get(p,t);expect(pending).toMatchObject({threadId:null,sessionId:null,lastEventId:0});expect(pending.messages.every(message=>message.sessionId===null&&message.threadId===null)).toBe(true);
   await chat.interrupt(p,t);await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='interrupted');
   expect(await chat.get(p,t)).toMatchObject({threadId:null,sessionId:null,lastEventId:0});
   await Bun.sleep(30);expect((await readFile(log,'utf8')).trim().split('\n')).toHaveLength(1);
   delete process.env.FAKE_CLAUDE_ACCEPT_DELAY_MS;
-  await chat.send(p,t,'Try again','sonnet',root,undefined,'requirements',false,'claude');await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='completed');
+  await chat.send(p,t,'event tools','sonnet',root,undefined,'requirements',false,'claude');await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='completed');
   expect((await chat.get(p,t)).lastEventId).toBe(1);
-  const records=(await readFile(log,'utf8')).trim().split('\n').map(line=>JSON.parse(line));expect(records[1].args).toContain('--session-id');expect(records[1].args).not.toContain('--resume');expect(records[1].session).not.toBe(records[0].session);expect(records[1].prompt).toContain('"id":1');
+  const records=(await readFile(log,'utf8')).trim().split('\n').map(line=>JSON.parse(line));expect(records[1].args).toContain('--session-id');expect(records[1].args).not.toContain('--resume');expect(records[1].session).not.toBe(records[0].session);expect(records[1].prompt).toContain('after 0, through 1');
   const accepted=await chat.get(p,t);process.env.FAKE_CLAUDE_ACCEPT_DELAY_MS='500';
   await chat.send(p,t,'Pending resume','sonnet',root,undefined,'requirements',false,'claude');await waitFor(async()=>(await readFile(log,'utf8')).trim().split('\n').length===3);
   await chat.interrupt(p,t);await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='interrupted');expect(await chat.get(p,t)).toMatchObject({threadId:accepted.threadId,sessionId:accepted.sessionId,lastEventId:1});
@@ -368,7 +368,7 @@ test('Claude の受理前終了・モデル拒否では新規セッションや�
   expect(await chat.get(p,t)).toMatchObject({threadId:null,sessionId:null,lastEventId:0});expect((await chat.get(p,t)).messages).toHaveLength(2);
   await chat.send(p,t,'reject model','sonnet',root,undefined,'requirements',false,'claude');await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='failed');
   expect(await chat.get(p,t)).toMatchObject({threadId:null,sessionId:null,lastEventId:0});expect((await chat.get(p,t)).messages.at(-1)).toMatchObject({errorCode:'MODEL_UNAVAILABLE',sessionId:null,threadId:null});
-  await chat.send(p,t,'hello','sonnet',root,undefined,'requirements',false,'claude');await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='completed');
+  await chat.send(p,t,'event tools','sonnet',root,undefined,'requirements',false,'claude');await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='completed');
   const accepted=await chat.get(p,t);expect(accepted.threadId).not.toBeNull();expect(accepted.lastEventId).toBe(1);
  }finally{await rm(root,{recursive:true,force:true})}
 });
@@ -379,12 +379,74 @@ test('Claude の存在しない再開セッションは明示失敗として残�
  try{
   const chat=new ChatService(()=>root,()=>null,()=>fakeClaude);let through=1;
   chat.setTaskEvents({capture:()=>{},events:(_p,_t,after)=>({events:after<through?[{id:through,type:'document.updated'}]:[],lastEventId:through,through,hasMore:false})});
-  await chat.send(p,t,'hello','sonnet',root,undefined,'requirements',false,'claude');await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='completed');
+  await chat.send(p,t,'event tools','sonnet',root,undefined,'requirements',false,'claude');await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='completed');
   const accepted=await chat.get(p,t);through=2;process.env.FAKE_CLAUDE_RESUME_MISSING='1';
   await chat.send(p,t,'Next question','sonnet',root,undefined,'requirements',false,'claude');await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='failed');
   expect(await chat.get(p,t)).toMatchObject({threadId:null,sessionId:null,lastEventId:1});expect((await chat.get(p,t)).messages).toHaveLength(4);
-  await Bun.sleep(30);const records=(await readFile(log,'utf8')).trim().split('\n').map(line=>JSON.parse(line));expect(records).toHaveLength(2);expect(records[1].args).toContain('--resume');expect(records[1].session).toBe(accepted.sessionId);expect(records[1].prompt).toContain('"id":2');
-  delete process.env.FAKE_CLAUDE_RESUME_MISSING;await chat.send(p,t,'Explicit retry','sonnet',root,undefined,'requirements',false,'claude');await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='completed');
-  const retried=(await readFile(log,'utf8')).trim().split('\n').map(line=>JSON.parse(line)).at(-1);expect(retried.args).toContain('--session-id');expect(retried.args).not.toContain('--resume');expect(retried.session).not.toBe(accepted.sessionId);expect(retried.prompt).toContain('Next question');expect(retried.prompt).toContain('"id":2');expect((await chat.get(p,t)).lastEventId).toBe(2);
+  await Bun.sleep(30);const records=(await readFile(log,'utf8')).trim().split('\n').map(line=>JSON.parse(line));expect(records).toHaveLength(2);expect(records[1].args).toContain('--resume');expect(records[1].session).toBe(accepted.sessionId);expect(records[1].prompt).toContain('after 1, through 2');
+  delete process.env.FAKE_CLAUDE_RESUME_MISSING;await chat.send(p,t,'event tools','sonnet',root,undefined,'requirements',false,'claude');await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='completed');
+  const retried=(await readFile(log,'utf8')).trim().split('\n').map(line=>JSON.parse(line)).at(-1);expect(retried.args).toContain('--session-id');expect(retried.args).not.toContain('--resume');expect(retried.session).not.toBe(accepted.sessionId);expect(retried.prompt).toContain('Next question');expect(retried.prompt).toContain('after 1, through 2');expect((await chat.get(p,t)).lastEventId).toBe(2);
  }finally{delete process.env.FAKE_CLAUDE_LOG;delete process.env.FAKE_CLAUDE_RESUME_MISSING;await rm(root,{recursive:true,force:true})}
+});
+
+test('両接続先の埋め込みツールは同一プロジェクトだけを参照し、確認範囲と入力を検証する',async()=>{
+ for(const provider of ['codex','claude'] as const){
+  const root=await mkdtemp(join(tmpdir(),'beni-embedded-')),p='019a0000-0000-7000-8000-000000000001',t='019a0000-0000-7100-8000-000000000001',other='019a0000-0000-7100-8000-000000000002';
+  const chat=new ChatService(()=>root,()=>fake,()=>fakeClaude),lookups:any[]=[];
+  chat.setTaskEvents({capture:()=>{},events:(project,task,after,through=6,limit=100)=>{lookups.push([project,task,after,through]);const next=Math.min(after+limit,through);return {events:next>after?[{id:next,type:'document.updated',taskId:other}]:[],lastEventId:next,nextCursor:next,through,hasMore:next<through}},event:(project,id)=>{lookups.push([project,id]);return {id,taskId:other}},change:(_project,id)=>({eventId:id,patch:'recorded patch'}),version:(_project,path,id)=>({path,changeId:id,content:'recorded version'})});
+  const calls=[
+   {tool:'list_events',arguments:{after:0,through:6,limit:1,task_id:other,kind:'tool.finished'}},
+   {tool:'get_event',arguments:{event_id:2}},
+   {tool:'get_file_change',arguments:{event_id:3}},
+   {tool:'get_file_version',arguments:{path:`.beni/tasks/${other}/requirements.md`,change_id:3}},
+   {tool:'acknowledge_events',arguments:{through:6}},
+   {tool:'acknowledge_events',arguments:{through:4}},
+   {tool:'unknown_tool',arguments:{}},
+   {tool:'get_event',arguments:{event_id:2,project_id:'another-project'}},
+   {tool:'get_event',arguments:{event_id:-1}},
+   {tool:'acknowledge_events',arguments:{through:7}},
+   {tool:'get_file_version',arguments:{path:'../other/secret.md',change_id:3}},
+   {tool:'get_event',arguments:{event_id:7}},
+  ];
+  process.env.FAKE_EMBEDDED_CALLS=JSON.stringify(calls);
+  try{
+   await chat.send(p,t,'event tools',null,root,undefined,'requirements',false,provider);await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='completed');
+   const c=await chat.get(p,t),results=JSON.parse(c.messages.at(-1)!.content).map((result:any)=>({success:provider==='codex'?result.success:!result.isError,value:JSON.parse(provider==='codex'?result.contentItems[0].text:result.content[0].text)}));
+   expect(c.lastEventId).toBe(6);expect(results.slice(0,6).every((result:any)=>result.success)).toBe(true);expect(results.slice(6).every((result:any)=>!result.success)).toBe(true);
+   expect(results[0].value).toMatchObject({events:[],nextCursor:1,hasMore:true});expect(results[1].value.taskId).toBe(other);expect(results[3].value.content).toBe('recorded version');expect(results[5].value.through).toBe(6);expect(lookups.every(value=>value[0]===p)).toBe(true);
+   delete process.env.FAKE_EMBEDDED_CALLS;
+   await chat.send(p,null,'event tools',null,root,undefined,null,false,provider);await waitFor(async()=>(await chat.get(p,null)).messages.at(-1)?.status==='completed');expect((await chat.get(p,null)).lastEventId).toBe(6);
+  }finally{delete process.env.FAKE_EMBEDDED_CALLS;await rm(root,{recursive:true,force:true})}
+ }
+});
+
+test('操作イベントは出力を重複せず、他タスクのパック参照と削除済み出力を取得する',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'beni-output-events-')),p='019a0000-0000-7000-8000-000000000001',t='019a0000-0000-7100-8000-000000000001';
+ const chat=new ChatService(()=>root,()=>fake),records:any[]=[];let captures=0;
+ chat.setTaskEvents({capture:()=>{captures++},events:(_p,_t,after,through=records.length,limit=100)=>{const events=records.filter(event=>event.id>after&&event.id<=through).slice(0,limit),next=events.at(-1)?.id??through;return {events,lastEventId:next,nextCursor:next,through,hasMore:next<through}},append:(_p,input)=>{const event={id:records.length+1,...input};records.push(event);return event}});
+ try{
+  await chat.send(p,t,'tools',null,root);await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='completed');
+  expect(records).toHaveLength(2);expect(records.map(event=>event.type)).toEqual(['tool.started','tool.finished']);expect(records[1].details).toEqual({toolName:'command',targetPaths:[],result:'completed',exitCode:0});expect(records[1].packId).toBe((await chat.get(p,t)).packs.find(pack=>pack.kind==='tool')?.packId);expect(JSON.stringify(records)).not.toContain('echo example');expect(JSON.stringify(records)).not.toContain('example\\n');expect(captures).toBeGreaterThanOrEqual(3);
+  process.env.FAKE_EMBEDDED_CALLS=JSON.stringify([{tool:'get_execution_output',arguments:{operation_id:records[0].operationId}}]);
+  await chat.send(p,null,'event tools',null,root);await waitFor(async()=>(await chat.get(p,null)).messages.at(-1)?.status==='completed');
+  let result=JSON.parse(JSON.parse((await chat.get(p,null)).messages.at(-1)!.content)[0].contentItems[0].text);expect(result).toMatchObject({deleted:false,output:'example\n',status:'completed'});
+  await rm(join(root,'.beni','chat',t),{recursive:true});
+  await chat.send(p,null,'event tools',null,root);await waitFor(async()=>(await chat.get(p,null)).messages.at(-1)?.status==='completed');
+  result=JSON.parse(JSON.parse((await chat.get(p,null)).messages.at(-1)!.content)[0].contentItems[0].text);expect(result.deleted).toBe(true);await expect(readFile(join(root,'.beni','chat',t,'requirements.json'),'utf8')).rejects.toThrow();
+ }finally{delete process.env.FAKE_EMBEDDED_CALLS;await rm(root,{recursive:true,force:true})}
+});
+
+test('終了時の履歴保存失敗でもチャットを失敗として閉じ、通知を残す',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'beni-event-failure-')),p='019a0000-0000-7000-8000-000000000001';let captured=false;
+ const chat=new ChatService(()=>root,()=>fake);chat.setTaskEvents({capture:()=>{if(captured)throw Error('fictional persistence failure');captured=true},events:()=>({events:[],lastEventId:0,through:0,hasMore:false})});
+ try{await chat.send(p,null,'hello',null,root);await waitFor(async()=>(await chat.get(p,null)).messages.at(-1)?.status==='failed');const c=await chat.get(p,null);expect(c.messages.at(-1)?.content).toContain('イベント履歴の保存に失敗しました。');expect(c.packs.every(pack=>pack.state==='closed')).toBe(true)}finally{await rm(root,{recursive:true,force:true})}
+});
+
+test('操作通知の再送を重複せず、終了未観測と失敗を成功にしない',async()=>{
+ for(const [prompt,result] of [['duplicate tools','completed'],['unfinished tools','unknown'],['failed tools','failed']]){
+  const root=await mkdtemp(join(tmpdir(),'beni-tool-lifecycle-')),p='019a0000-0000-7000-8000-000000000001',records:any[]=[];
+  const chat=new ChatService(()=>root,()=>fake);chat.setTaskEvents({capture:()=>{},events:()=>({events:[],lastEventId:0,through:0,hasMore:false}),append:(_p,input)=>records.push(input)});
+  try{await chat.send(p,null,prompt,null,root);await waitFor(async()=>['completed','failed'].includes((await chat.get(p,null)).messages.at(-1)?.status??''));expect(records).toHaveLength(2);expect(records[1].details.result).toBe(result);if(prompt==='failed tools')expect(records[1].details.exitCode).toBe(7);if(prompt==='unfinished tools')expect((await chat.get(p,null)).packs.find(pack=>pack.kind==='tool')?.status).toBe('failed')}
+  finally{await rm(root,{recursive:true,force:true})}
+ }
 });

@@ -166,7 +166,7 @@ test('document activity survives restart and ignores initial unknown dates and t
     const edited = store.tasks()[0]!;
     expect(edited.createdAt).toBeNull(); expect(edited.updatedAt).not.toBeNull();
     writeFileSync(join(path, 'large.md'), 'a'.repeat(1024 * 1024 + 1));
-    expect(store.tasks()).toHaveLength(1);
+    expect(() => store.tasks()).toThrow('Tracked document exceeds 1 MiB');
     rmSync(join(path, 'large.md'));
     const stable = store.tasks()[0]!.updatedAt;
     writeFileSync(join(path, 'requirements.md'), '# Offline edit\n');
@@ -247,7 +247,7 @@ test('task history retains created, updated, renamed and deleted document versio
     const p = store.createProject('Demo', f.folder), task = store.createTask(p.id, 'Task');
     const folder = join(f.folder, '.beni', 'tasks', task.id);
     const initial = store.taskEvents(p.id, task.id);
-    expect(initial.events.map(event => event.type)).toEqual(['document.created', 'document.created', 'document.created']);
+    expect(initial.events.map(event => event.type)).toEqual(['task.created', 'document.created', 'document.created', 'document.created']);
     expect(initial.events.every(event => event.sourcePhase === null)).toBe(true);
     const original = initial.events.find(event => event.path === 'requirements.md')!;
     writeFileSync(join(folder, 'requirements.md'), 'updated\r\n');
@@ -272,12 +272,12 @@ test('history pagination fixes through and validates unknown cursors and referen
   try {
     const p = store.createProject('Demo', f.folder), task = store.createTask(p.id, 'Task');
     const first = store.taskEvents(p.id, task.id, 0, undefined, 1);
-    expect(first).toMatchObject({lastEventId: 1, through: 3, hasMore: true});
+    expect(first).toMatchObject({lastEventId: 1, through: 4, hasMore: true});
     writeFileSync(join(f.folder, '.beni', 'tasks', task.id, 'extra.md'), 'later');
     const next = store.taskEvents(p.id, task.id, first.lastEventId, first.through, 100);
-    expect(next.events.map(event => event.id)).toEqual([2, 3]);
-    expect(next).toMatchObject({lastEventId: 3, through: 3, hasMore: false});
-    expect(store.taskEvents(p.id, task.id, 3).events.map(event => event.id)).toEqual([4]);
+    expect(next.events.map(event => event.id)).toEqual([2, 3, 4]);
+    expect(next).toMatchObject({lastEventId: 4, through: 4, hasMore: false});
+    expect(store.taskEvents(p.id, task.id, 4).events.map(event => event.id)).toEqual([5]);
     expect(store.taskEvents(p.id, task.id, 3, 3).lastEventId).toBe(3);
     for (const args of [[-1], [1.5], [0, 1.5], [3, 2], [0, undefined, 0], [0, undefined, 101]] as [number, number?, number?][]) expect(() => store.taskEvents(p.id, task.id, ...args)).toThrow('Invalid event cursor');
     expect(() => store.taskEvents(p.id, task.id, 99)).toThrow('Unknown event cursor');
@@ -310,18 +310,15 @@ test('ambiguous document moves stay separate events and phase transitions preser
   } finally { store.close(); rmSync(f.root, {recursive: true, force: true}); }
 });
 
-test('history rejects linked or corrupted indexes, blobs and current documents', () => {
-  for (const target of ['index', 'blob', 'document', 'hardlink', 'snapshot', 'hash']) {
+test('history rejects linked databases and unsafe current documents without touching their targets', () => {
+  for (const target of ['database', 'document', 'hardlink']) {
     const f = fixture(), store = new Store(f.path);
     try {
-      const p = store.createProject('Demo', f.folder), task = store.createTask(p.id, 'Task'), folder = join(f.folder, '.beni', 'tasks', task.id);
-      const history = join(folder, '.history'), initial = store.taskEvents(p.id, task.id), version = initial.events[0]!.version!;
-      const file = target === 'index' || target === 'snapshot' ? join(history, 'index.json') : target === 'document' ? join(folder, 'requirements.md') : join(history, 'versions', version + '.md');
+      const p = store.createProject('Demo', f.folder), task = store.createTask(p.id, 'Task');
+      const file = target === 'database' ? join(f.folder, '.beni', 'events.sqlite') : join(f.folder, '.beni', 'tasks', task.id, 'requirements.md');
       const external = join(f.root, 'external'); writeFileSync(external, 'outside');
-      if (target === 'snapshot') {
-        const value = JSON.parse(readFileSync(file, 'utf8')); value.snapshot['requirements.md'] = '0'.repeat(64); writeFileSync(file, JSON.stringify(value));
-      } else if (target === 'hash') writeFileSync(file, 'corrupt');
-      else { rmSync(file); if (target === 'hardlink') linkSync(external, file); else symlinkSync(external, file); }
+      rmSync(file);
+      if (target === 'hardlink') linkSync(external, file); else symlinkSync(external, file);
       expect(() => store.taskEvents(p.id, task.id)).toThrow();
       expect(readFileSync(external, 'utf8')).toBe('outside');
     } finally { store.close(); rmSync(f.root, {recursive: true, force: true}); }
@@ -346,7 +343,10 @@ test('task deletion removes legacy and all phase conversations while preserving 
     expect(existsSync(join(root, 'tasks', task.id))).toBe(false);
     expect(existsSync(chat)).toBe(false);
     expect(existsSync(join(root, 'chat', task.id + '.json'))).toBe(false);
-    expect(store.taskEvents(p.id, remaining.id)).toEqual(before);
+    const after = store.taskEvents(p.id, remaining.id);
+    expect(after.events).toEqual(before.events);
+    expect(after.through).toBeGreaterThan(before.through);
+    expect(after.nextCursor).toBe(after.through);
   } finally { store.close(); rmSync(f.root, {recursive: true, force: true}); }
 });
 
@@ -374,26 +374,119 @@ test('phase chat deletion recovery restores uncommitted directories and rejects 
   } finally { store.close(); rmSync(f.root, {recursive: true, force: true}); }
 });
 
-test('history publishes blobs before its index and retries a failed commit without event gaps', async () => {
+test('SQLite history rolls back failed commits and retries without event gaps', () => {
+  const f = fixture(), store = new Store(f.path);
+  try {
+    const p = store.createProject('Demo', f.folder), task = store.createTask(p.id, 'Task'), folder = join(f.folder, '.beni', 'tasks', task.id);
+    const before = store.taskEvents(p.id, task.id), database = new Database(join(f.folder, '.beni', 'events.sqlite'));
+    database.exec("CREATE TRIGGER fail_event BEFORE INSERT ON file_changes BEGIN SELECT RAISE(ABORT, 'simulated history commit failure'); END");
+    writeFileSync(join(folder, 'extra.md'), 'new version');
+    expect(() => store.captureTaskHistory(p.id, task.id, 'documents')).toThrow('simulated history commit failure');
+    expect(database.query('SELECT MAX(id) AS id FROM events').get()).toEqual({id: before.through});
+    expect(database.query('SELECT COUNT(*) AS count FROM file_changes').get()).toEqual({count: 3});
+    database.exec('DROP TRIGGER fail_event'); database.close();
+    store.captureTaskHistory(p.id, task.id, 'documents');
+    expect(store.taskEvents(p.id, task.id, before.through).events).toMatchObject([{id: before.through + 1, type: 'document.created', path: 'extra.md', sourcePhase: 'documents'}]);
+    expect(existsSync(join(folder, '.history'))).toBe(false);
+  } finally { store.close(); rmSync(f.root, {recursive: true, force: true}); }
+});
+
+test('project cursors advance over other tasks and retained history survives task deletion', () => {
+  const f = fixture(); let store = new Store(f.path);
+  try {
+    const p = store.createProject('Demo', f.folder), task = store.createTask(p.id, 'Task');
+    const file = join(f.folder, '.beni', 'tasks', task.id, 'requirements.md');
+    const first = store.taskEvents(p.id, task.id);
+    const original = first.events.find(event => event.path === 'requirements.md')!;
+    const other = store.createTask(p.id, 'Other');
+    const empty = store.taskEvents(p.id, task.id, first.through, undefined, 1);
+    expect(empty.events).toEqual([]); expect(empty.nextCursor).toBeGreaterThan(first.through);
+    let cursor = empty.nextCursor;
+    while (cursor < empty.through) cursor = store.taskEvents(p.id, task.id, cursor, empty.through, 1).nextCursor;
+    expect(cursor).toBe(empty.through);
+    writeFileSync(file, 'final edit\r\n');
+    store.deleteTask(p.id, task.id);
+    const deleted = store.taskEvents(p.id, task.id, first.through);
+    expect(deleted.events.map(event => event.type)).toEqual(['document.updated', 'task.deleted']);
+    const updated = deleted.events[0]!;
+    store.close(); store = new Store(f.path);
+    expect(store.task(task.id)).toBeNull();
+    expect(store.taskEventVersion(p.id, task.id, original.version!).content).toBe('# Task\n');
+    expect(store.projectFileVersion(p.id, `.beni/tasks/${task.id}/requirements.md`, updated.id)).toMatchObject({content: 'final edit\r\n'});
+    expect(store.taskEvents(p.id, task.id).events.at(-1)?.type).toBe('task.deleted');
+    expect(store.task(other.id)).not.toBeNull();
+    mkdirSync(join(f.root, 'other')); const another = store.createProject('Other project', join(f.root, 'other'));
+    expect(() => store.projectFileVersion(another.id, `.beni/tasks/${task.id}/requirements.md`, updated.id)).toThrow();
+  } finally { store.close(); rmSync(f.root, {recursive: true, force: true}); }
+});
+
+test('task operations emit create rename phase complete and reopen events once', () => {
+  const f = fixture(), store = new Store(f.path);
+  try {
+    const p = store.createProject('Demo', f.folder), task = store.createTask(p.id, 'Task');
+    store.renameTask(p.id, task.id, 'Renamed'); store.renameTask(p.id, task.id, 'Renamed');
+    store.selectTaskPhase(p.id, task.id, 'requirements', 'retrospective');
+    store.setTaskCompleted(p.id, task.id, true); store.setTaskCompleted(p.id, task.id, false);
+    const operations = store.taskEvents(p.id, task.id).events.filter(event => !event.type.startsWith('document.'));
+    expect(operations.map(event => event.type)).toEqual(['task.created', 'task.renamed', 'phase.changed', 'task.completed', 'task.reopened']);
+  } finally { store.close(); rmSync(f.root, {recursive: true, force: true}); }
+});
+
+test('task deletion refuses lost history and rolls back its deletion event on filesystem failure', async () => {
   const f = fixture(), store = new Store(f.path), fs = await import('node:fs'), original = fs.renameSync;
   let fault: ReturnType<typeof spyOn> | undefined;
   try {
-    const p = store.createProject('Demo', f.folder), task = store.createTask(p.id, 'Task'), folder = join(f.folder, '.beni', 'tasks', task.id);
-    const before = store.taskEvents(p.id, task.id), index = join(folder, '.history', 'index.json'), saved = readFileSync(index, 'utf8');
-    writeFileSync(join(folder, 'extra.md'), 'new version');
+    const p = store.createProject('Demo', f.folder), task = store.createTask(p.id, 'Task');
+    const path = join(f.folder, '.beni', 'tasks', task.id, 'requirements.md');
+    writeFileSync(path, 'x'.repeat(1024 * 1024 + 1));
+    expect(() => store.deleteTask(p.id, task.id)).toThrow('Tracked document exceeds 1 MiB');
+    expect(store.task(task.id)).not.toBeNull();
+    writeFileSync(path, 'saved before delete');
     fault = spyOn(fs, 'renameSync').mockImplementation((from, to) => {
-      if (String(to) === index) throw Error('simulated history commit failure');
+      if (String(to).endsWith('/committed.json')) throw Error('simulated deletion failure');
       return original(from, to);
     });
-    expect(() => store.captureTaskHistory(p.id, task.id, 'documents')).toThrow('simulated history commit failure');
+    expect(() => store.deleteTask(p.id, task.id)).toThrow('simulated deletion failure');
     fault.mockRestore(); fault = undefined;
-    expect(readFileSync(index, 'utf8')).toBe(saved);
-    const crypto = await import('node:crypto'), version = crypto.createHash('sha256').update('new version').digest('hex');
-    expect(readFileSync(join(folder, '.history', 'versions', version + '.md'), 'utf8')).toBe('new version');
-    expect(() => store.taskEventVersion(p.id, task.id, version)).toThrow('Unknown history version');
-    // 中断時の一時本文はhash名を持たず、未完成でも公開履歴に影響しない。
-    writeFileSync(join(folder, '.history', 'versions', '.tmp-abandoned'), 'partial');
-    store.captureTaskHistory(p.id, task.id, 'documents');
-    expect(store.taskEvents(p.id, task.id, before.lastEventId).events).toMatchObject([{id: before.lastEventId + 1, type: 'document.created', path: 'extra.md', sourcePhase: 'documents', version}]);
+    expect(store.task(task.id)).not.toBeNull();
+    expect(store.taskEvents(p.id, task.id).events.some(event => event.type === 'task.deleted')).toBe(false);
+    store.deleteTask(p.id, task.id);
+    expect(store.taskEvents(p.id, task.id).events.filter(event => event.type === 'task.deleted')).toHaveLength(1);
   } finally { fault?.mockRestore(); store.close(); rmSync(f.root, {recursive: true, force: true}); }
+});
+
+test('failed task creation leaves neither a task nor committed history', () => {
+  const f = fixture(), store = new Store(f.path);
+  try {
+    const p = store.createProject('Demo', f.folder), task = store.createTask(p.id, 'Existing');
+    const before = store.projectEvents(p.id), database = new Database(join(f.folder, '.beni', 'events.sqlite'));
+    database.exec("CREATE TRIGGER fail_creation BEFORE INSERT ON file_changes BEGIN SELECT RAISE(ABORT, 'simulated creation failure'); END");
+    expect(() => store.createTask(p.id, 'Failed')).toThrow('simulated creation failure');
+    database.exec('DROP TRIGGER fail_creation'); database.close();
+    expect(store.tasks(p.id).map(value => value.id)).toEqual([task.id]);
+    expect(store.projectEvents(p.id)).toEqual(before);
+  } finally { store.close(); rmSync(f.root, {recursive: true, force: true}); }
+});
+
+test('task metadata rolls back when its operation history cannot be recorded', () => {
+  const f = fixture(), store = new Store(f.path);
+  try {
+    const p = store.createProject('Demo', f.folder), task = store.createTask(p.id, 'Task');
+    const database = new Database(join(f.folder, '.beni', 'events.sqlite'));
+    database.exec("CREATE TRIGGER fail_operation BEFORE INSERT ON events WHEN NEW.type IN ('task.renamed','phase.changed','task.completed','task.reopened') BEGIN SELECT RAISE(ABORT, 'simulated operation failure'); END");
+    expect(() => store.renameTask(p.id, task.id, 'Failed')).toThrow('simulated operation failure');
+    expect(store.task(task.id)?.name).toBe('Task');
+    expect(() => store.selectTaskPhase(p.id, task.id, 'requirements', 'documents')).toThrow('simulated operation failure');
+    expect(store.task(task.id)?.phase).toBe('requirements');
+    database.exec('DROP TRIGGER fail_operation');
+    store.selectTaskPhase(p.id, task.id, 'requirements', 'retrospective');
+    database.exec("CREATE TRIGGER fail_operation BEFORE INSERT ON events WHEN NEW.type IN ('task.completed','task.reopened') BEGIN SELECT RAISE(ABORT, 'simulated operation failure'); END");
+    expect(() => store.setTaskCompleted(p.id, task.id, true)).toThrow('simulated operation failure');
+    expect(store.task(task.id)?.status).toBe('idle');
+    database.exec('DROP TRIGGER fail_operation'); database.close();
+    store.renameTask(p.id, task.id, 'Retry'); store.setTaskCompleted(p.id, task.id, true);
+    const operations = store.taskEvents(p.id, task.id).events.map(event => event.type);
+    expect(operations.filter(type => type === 'task.renamed')).toHaveLength(1);
+    expect(operations.filter(type => type === 'task.completed')).toHaveLength(1);
+  } finally { store.close(); rmSync(f.root, {recursive: true, force: true}); }
 });

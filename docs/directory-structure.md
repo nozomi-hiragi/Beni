@@ -16,7 +16,8 @@ Beni/
 │   │   ├── chat.test.ts              会話の保存・再開・中断・分離、接続エラーのテスト
 │   │   ├── data.ts                   メタデータ検証・保存と文書だけ残ったタスクの復元
 │   │   ├── documents.ts              タスク用 Markdown の作成・読み取り・変更監視
-│   │   ├── task-history.ts           タスクの変更イベント・文書の版・履歴取得
+│   │   ├── project-events.ts         プロジェクトイベント・文書差分・版の復元
+│   │   ├── embedded-tools.ts         LLM向けイベント参照ツールの定義・入力検証
 │   │   ├── terminal.ts               PTY・端末画面・操作権・終了処理
 │   │   ├── terminal.test.ts          シェルの存続・排他・画面復元・HTTP/WSのテスト
 │   │   ├── events.ts                 共通 WS の接続・購読・送信上限と解放処理

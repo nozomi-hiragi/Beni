@@ -1,6 +1,7 @@
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { createInterface } from 'node:readline';
+import { type EmbeddedTool, type EmbeddedToolResult, toolResult } from './embedded-tools';
 
 // 安全性に関わるフラグの組み合わせを確認した CLI 以降だけを使用する。
 export const CLAUDE_MIN_VERSION = '2.1.292';
@@ -30,13 +31,14 @@ export async function claudeStatus(executable:string|null):Promise<ClaudeStatus>
  return status;
 }
 
-type Options={cwd:string;model:string|null;sandbox:'read-only'|'workspace-write';developerInstructions?:string};
+type Options={cwd:string;model:string|null;sandbox:'read-only'|'workspace-write';developerInstructions?:string;dynamicTools?:EmbeddedTool[]};
 type Block={id:string;type:'text'|'tool_use';text:string;name?:string;input?:unknown;partial?:string;complete:boolean};
 
 // ChatService が使う内部通知に CLI の NDJSON を変換する。CLI はターンごとに起動する。
 export class ClaudeRpc {
  onEvent:(method:string,params:any)=>void=()=>{};
  onClose:()=>void=()=>{};
+ onToolCall:(params:any)=>Promise<EmbeddedToolResult>=async()=>toolResult({error:'Unsupported tool'},false);
  private child:ChildProcessWithoutNullStreams|null=null;
  private session:string|null=null;
  private resumed=false;
@@ -51,6 +53,7 @@ export class ClaudeRpc {
  private partials=new Map<number,Block>();
  private sawText=false;
  private initialized=false;
+ private initialPrompt:string|null=null;
  private pending:{resolve:()=>void;reject:(error:Error)=>void;timer:ReturnType<typeof setTimeout>}|null=null;
  constructor(private executable:string){}
  async init(){}
@@ -77,6 +80,13 @@ export class ClaudeRpc {
    // 管理者ポリシーが優先され、CLI 既定の一時領域・worktree の共有 .git は書込可能。
    const settings={disableAllHooks:true,...(writable?{sandbox:{enabled:true,failIfUnavailable:true,autoAllowBashIfSandboxed:true,allowUnsandboxedCommands:false,excludedCommands:[],enableWeakerNestedSandbox:false,enableWeakerNetworkIsolation:false,allowAppleEvents:false,filesystem:{disabled:false,allowWrite:[]},network:{strictAllowlist:true,allowedDomains:[],deniedDomains:['*'],allowUnixSockets:[],allowAllUnixSockets:false,allowLocalBinding:false,allowMachLookup:[]}}}:{})};
    const args=['--print','--output-format','stream-json','--verbose','--include-partial-messages','--restricted','--safe-mode','--setting-sources','','--strict-mcp-config','--mcp-config','{"mcpServers":{}}','--no-chrome','--disable-slash-commands','--permission-mode','dontAsk','--permission-prompts','none','--tools',tools,'--allowedTools',tools,'--disallowedTools','mcp__*','--settings',JSON.stringify(settings),'--system-prompt-snapshot','off','--model',model,this.resumed?'--resume':'--session-id',this.session];
+   if(this.options.dynamicTools?.length){
+    // ユーザー設定を読まず、Beni 内部の SDK transport だけを接続する。
+    args[args.indexOf('--mcp-config')+1]=JSON.stringify({mcpServers:{beni:{type:'sdk',name:'beni'}}});
+    args[args.indexOf('--allowedTools')+1]=[tools,...this.options.dynamicTools.map(tool=>`mcp__beni__${tool.name}`)].join(',');
+    args.splice(args.indexOf('--disallowedTools'),2);
+    args.push('--input-format','stream-json');
+   }
    if(this.options.developerInstructions)args.push('--append-system-prompt',this.options.developerInstructions);
    const acceptance=new Promise<void>((resolve,reject)=>{const timer=setTimeout(()=>{this.rejectPending(Error('Claude acceptance timed out'));this.close()},60000);timer.unref();this.pending={resolve,reject,timer}});
    // spawn 失敗時にも acceptance の rejection を未処理にしない。
@@ -88,7 +98,11 @@ export class ClaudeRpc {
    child.stdin.on('error',()=>{});
    await new Promise<void>((resolve,reject)=>{child.once('spawn',resolve);child.once('error',()=>reject(Error('Claude unavailable')))});
    this.emit('turn/started',{turn:{id:this.turn}});
-   child.stdin.end(params.input.map((item:any)=>item.text).join('\n\n'));
+   const prompt=params.input.map((item:any)=>item.text).join('\n\n');
+   if(this.options.dynamicTools?.length){
+    child.stdin.write(JSON.stringify({type:'control_request',request_id:'beni-initialize',request:{subtype:'initialize',hooks:null}})+'\n');
+    this.initialPrompt=prompt;
+   }else child.stdin.end(prompt);
    await acceptance;
    return {turn:{id:this.turn}};
   }
@@ -106,8 +120,15 @@ export class ClaudeRpc {
  private text(block:Block,text:string){if(!text)return;this.sawText=true;block.text+=text;this.emit('item/agentMessage/delta',{itemId:block.id,delta:text})}
  private item(block:Block){let input=block.input??{};if(block.partial){try{input=JSON.parse(block.partial)}catch{input=block.partial}}return {id:block.id,type:'dynamicToolCall',name:block.name,arguments:input,status:'inProgress'}}
  private completeText(block:Block){if(block.complete)return;block.complete=true;this.emit('item/completed',{item:{id:block.id,type:'agentMessage',text:block.text}})}
- private finish(status:'completed'|'failed'|'interrupted',modelUnavailable=false){if(this.completed)return;this.completed=true;for(const block of this.blocks.values())if(block.type==='text')this.completeText(block);this.emit('turn/completed',{turn:{id:this.turn,status,...(modelUnavailable?{error:{code:'model_not_found'}}:{})}})}
+ private finish(status:'completed'|'failed'|'interrupted',modelUnavailable=false){if(this.completed)return;this.completed=true;this.child?.stdin.end();for(const block of this.blocks.values())if(block.type==='text')this.completeText(block);this.emit('turn/completed',{turn:{id:this.turn,status,...(modelUnavailable?{error:{code:'model_not_found'}}:{})}})}
  private receive(message:any){
+  if(message.type==='control_response'&&message.response?.request_id==='beni-initialize'){
+   if(message.response.subtype!=='success'){this.close();return}
+   if(this.initialPrompt!==null){this.child?.stdin.write(JSON.stringify({type:'user',session_id:this.session,message:{role:'user',content:this.initialPrompt},parent_tool_use_id:null})+'\n');this.initialPrompt=null}return;
+  }
+  if(message.type==='control_request'){
+   void this.control(message).catch(()=>this.close());return;
+  }
   if(message.parent_tool_use_id)return;
   if(message.type==='system'&&message.subtype==='init'){
    if(message.session_id!==this.session){this.rejectPending(new ClaudeRejected());this.close();return}
@@ -156,6 +177,23 @@ export class ClaudeRpc {
    if(failed)this.rejectPending(new ClaudeRejected(modelUnavailable,this.interrupted));else this.accept();
    this.finish(this.interrupted?'interrupted':failed?'failed':'completed',modelUnavailable);
   }
+ }
+ private async control(message:any){
+  const request=message.request;
+  const reply=(response:unknown)=>{if(!this.closed&&!this.completed)this.child?.stdin.write(JSON.stringify({type:'control_response',response:{subtype:'success',request_id:message.request_id,response}})+'\n')};
+  if(request?.subtype!=='mcp_message'||request.server_name!=='beni'||!this.options?.dynamicTools?.length){
+   if(!this.closed&&!this.completed)this.child?.stdin.write(JSON.stringify({type:'control_response',response:{subtype:'error',request_id:message.request_id,error:'Unsupported control request'}})+'\n');return;
+  }
+  const rpc=request.message;if(!rpc||rpc.jsonrpc!=='2.0')throw Error('Invalid SDK request');
+  let result:unknown;
+  if(rpc.method==='initialize')result={protocolVersion:'2025-11-25',capabilities:{tools:{}},serverInfo:{name:'beni',version:'1.0.0'}};
+  else if(rpc.method==='notifications/initialized'||rpc.method==='ping')result={};
+  else if(rpc.method==='tools/list')result={tools:this.options.dynamicTools.map(({name,description,inputSchema})=>({name,description,inputSchema}))};
+  else if(rpc.method==='tools/call'){
+   const output=await this.onToolCall({threadId:this.session,turnId:this.turn,callId:message.request_id,tool:rpc.params?.name,arguments:rpc.params?.arguments});
+   result={content:output.contentItems.map(item=>({type:'text',text:item.text})),isError:!output.success};
+  }else{reply({mcp_response:{jsonrpc:'2.0',id:rpc.id,error:{code:-32601,message:'Unsupported MCP method'}}});return}
+  reply({mcp_response:{jsonrpc:'2.0',...(rpc.id!==undefined?{id:rpc.id}:{}),result}});
  }
  private signalClose(){if(this.closed)return;this.closed=true;setImmediate(()=>this.onClose())}
  close(){this.rejectPending(this.interrupted?new ClaudeRejected(false,true):Error('Connection closed'));if(this.termination)clearTimeout(this.termination);this.termination=null;if(this.child&&this.child.exitCode===null&&this.child.signalCode===null){this.child.kill('SIGTERM');this.termination=setTimeout(()=>this.child?.kill('SIGKILL'),3000);this.termination.unref()}this.signalClose()}

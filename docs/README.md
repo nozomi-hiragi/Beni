@@ -20,6 +20,4 @@
   - [タスク検索](features/task-search.md)
   - [プロジェクト内ターミナル](features/terminal.md)
 
-## 設計中
-
-- [プロジェクトイベント管理（草案）](project-events/README.md)
+- [プロジェクトイベント管理](project-events/README.md)

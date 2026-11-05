@@ -61,7 +61,12 @@ const projectForScope = (store:Store,projectId:unknown,taskId:unknown) => {
 export function createHandler(store: Store, initialFolder = homedir(), chat = new ChatService(projectResolver(store)), publicOrigin?: string, terminals = new TerminalService(), taskEventsChanged:(p:string,t:string)=>void=()=>{}) {
  chat.setExecutionFinished((p,t)=>{const task=store.task(t);if(task?.phase==='execution'&&task.status!=='completed'){store.selectTaskPhase(p,t,'execution','retrospective');taskEventsChanged(p,t)}});
  chat.setTaskActivity((p,t)=>store.touchTask(p,t));
- chat.setTaskEvents({capture:(p,t)=>store.captureTaskHistory(p,t),events:(p,t,after,through,limit)=>store.taskEvents(p,t,after,through,limit)});
+ chat.setTaskEvents({
+  capture:(p,t,phase,operationId)=>store.captureTaskHistory(p,t,phase,operationId),
+  events:(p,t,after,through,limit)=>store.projectEvents(p,{after,through,limit,...(t===null?{}:{taskId:t})}),
+  event:(p,id)=>store.projectEvent(p,id),change:(p,id)=>store.projectFileChange(p,id),version:(p,path,id)=>store.projectFileVersion(p,path,id),
+  append:(p,input)=>{const event=store.recordProjectEvent(p,input);if(event.taskId!==null)taskEventsChanged(p,event.taskId);return event}
+ });
  const access=requestAccess(publicOrigin);
  const scope=(p:unknown,t:unknown)=>projectForScope(store,p,t);
  return async (request: Request): Promise<Response> => {
@@ -83,7 +88,7 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
    if (url.pathname === '/api/state') {for(const task of store.tasks().map(projectTask))if(task.phase==='execution')await chat.recoverExecution(task.projectId,task.id);return json({projects:store.projects(),tasks:store.tasks().map(projectTask)})}
    const eventMatch=url.pathname.match(/^\/api\/tasks\/([^/]+)\/events(?:\/versions\/([^/]+))?$/);
    if(eventMatch){
-    const p=url.searchParams.get('projectId'),t=eventMatch[1]!;if(!scope(p,t))return json({error:'タスクが見つかりません'},404);
+    const p=url.searchParams.get('projectId'),t=eventMatch[1]!;if(!validTaskId(t)||!scope(p,null))return json({error:'タスクが見つかりません'},404);
     try {
      if(eventMatch[2]!==undefined){if(!/^[a-f0-9]{64}$/.test(eventMatch[2]))return json({error:'版を確認してください'},400);return json(store.taskEventVersion(p as string,t,eventMatch[2]))}
      const integer=(name:string,fallback?:number)=>{const value=url.searchParams.get(name);if(value===null)return fallback;if(!/^(0|[1-9][0-9]*)$/.test(value)||!Number.isSafeInteger(Number(value)))throw Error('invalid cursor');return Number(value)};
@@ -156,14 +161,14 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
    const deleteMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/delete$/);
    if (deleteMatch) {
     if (!validTaskId(deleteMatch[1]) || !scope(input.projectId, deleteMatch[1])) return json({error:'タスクが見つかりません'},404);
-    try { chat.deleteTask(input.projectId as string, deleteMatch[1]!, () => store.deleteTask(input.projectId as string, deleteMatch[1]!)); return json({ok:true}); }
+    try { chat.deleteTask(input.projectId as string, deleteMatch[1]!, () => store.deleteTask(input.projectId as string, deleteMatch[1]!)); taskEventsChanged(input.projectId as string,deleteMatch[1]!); return json({ok:true}); }
     catch (error) { return error instanceof Error && error.message === 'busy' ? json({error:'チャットの処理中は削除できません'},409) : json({error:'タスクを削除できませんでした'},500); }
    }
    const renameMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/rename$/);
    if (renameMatch) {
     if (typeof input.name !== 'string' || !input.name.trim()) return json({error:'タスク名を入力してください'},400);
     if (!validTaskId(renameMatch[1]) || !scope(input.projectId, renameMatch[1])) return json({error:'タスクが見つかりません'},404);
-    try { return json(projectTask(store.renameTask(input.projectId as string, renameMatch[1]!, input.name))); }
+    try { const task=store.renameTask(input.projectId as string, renameMatch[1]!, input.name); taskEventsChanged(input.projectId as string,renameMatch[1]!); return json(projectTask(task)); }
     catch { return json({error:'タスク名を保存できませんでした'},500); }
    }
    if (url.pathname === '/api/tasks') {if(typeof input.name!=='string'||!validProjectId(input.projectId))return json({error:'タスク名とプロジェクトを確認してください'},400);const project=scope(input.projectId,null);if(!project)return json({error:'プロジェクトが見つかりません'},404);return json(projectTask(store.createTask(input.projectId,input.name)),201)}
@@ -173,20 +178,20 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
 }
 export function createServerOptions(store:Store,initialFolder=homedir(),chat=new ChatService(projectResolver(store)),publicOrigin?:string, terminals=new TerminalService()) {
  const eventListeners=new Map<string,Set<(event:any)=>void>>();
- const notifyTaskEvents=(p:string,t:string)=>{const page=store.taskEvents(p,t);for(const listener of eventListeners.get(JSON.stringify([p,t]))??[])listener({name:'task.events.changed',data:{lastEventId:page.through}})};
+ const notifyTaskEvents=(p:string,t:string)=>{const cursor=store.projectEventCursor(p);for(const listener of eventListeners.get(JSON.stringify([p,t]))??[])listener({name:'task.events.changed',data:{lastEventId:cursor}})};
  const access=requestAccess(publicOrigin);
  const scope=(p:string,t:string|null)=>projectForScope(store,p,t);
  const websocket=communicationSocket({
   'task-events':{
-   validate:s=>s.phase===undefined&&s.terminalId===undefined&&s.taskId!==null&&!!scope(s.projectId,s.taskId),
+   validate:s=>s.phase===undefined&&s.terminalId===undefined&&s.taskId!==null&&!!scope(s.projectId,null),
    subscribe:(s,event,failed)=>{
     const t=s.taskId!,k=JSON.stringify([s.projectId,t]);
-    const path=store.taskDocumentFolder(s.projectId,t);
-    const stop=watchTaskDocuments(path,()=>{try{store.captureTaskHistory(s.projectId,t);notifyTaskEvents(s.projectId,t)}catch{failed()}},failed);
+    const task=store.task(t),live=task?.project_id===s.projectId;
+    const stop=live?watchTaskDocuments(store.taskDocumentFolder(s.projectId,t),()=>{try{store.captureTaskHistory(s.projectId,t);notifyTaskEvents(s.projectId,t)}catch{failed()}},failed):()=>{};
     const listeners=eventListeners.get(k)??new Set();
     eventListeners.set(k,listeners);listeners.add(event);
     return {
-     start:()=>{try{store.captureTaskHistory(s.projectId,t);notifyTaskEvents(s.projectId,t)}catch{failed()}},
+     start:()=>{try{if(live)store.captureTaskHistory(s.projectId,t);notifyTaskEvents(s.projectId,t)}catch{failed()}},
      stop:()=>{stop();listeners.delete(event);if(!listeners.size)eventListeners.delete(k)}
     };
    }

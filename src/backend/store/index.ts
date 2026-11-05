@@ -3,9 +3,9 @@ import { Database } from 'bun:sqlite';
 import { existsSync, lstatSync, mkdirSync, readdirSync, renameSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { validProjectId, validTaskId } from '../../shared/ids';
-import { cleanDeletedTask, directory, metadata, newMetadata, projectRoot, recoverTasks, pathExists, writeJson, validateChatDirectory, type TaskMetadata } from '../data';
+import { cleanDeletedTask, directory, metadata, newMetadata, projectRoot, recoverTasks, pathExists, readJson, writeJson, validateChatDirectory, type TaskMetadata } from '../data';
 import { taskPhases, type TaskPhase } from '../../shared/task-phase';
-import { captureTaskHistory, taskEvents, taskEventVersion } from '../task-history';
+import { captureProjectTaskHistory, projectEvents, projectEvent, getProjectFileChange, getProjectFileVersion, projectTaskVersion, appendProjectEvent, projectTaskDeleted, type ProjectEventInput } from '../project-events';
 export { taskPhases } from '../../shared/task-phase';
 export type Project = {
   id: string;
@@ -21,6 +21,19 @@ export type TaskRow = {
   phase: string;
   status: string;
 };
+// ファイル削除の確定直後に停止しても、隔離データを消す前に削除イベントを補う。
+function recoverProjectTasks(folder: string, projectId: string) {
+  const root = projectRoot(folder);
+  for (const entry of readdirSync(root)) {
+    if (!entry.startsWith('.deleting-') || !validTaskId(entry.slice(10))) continue;
+    const staged = directory(join(root, entry)), committed = join(staged, 'committed.json');
+    if (!pathExists(committed)) continue;
+    const journal = readJson(committed), taskId = entry.slice(10);
+    if (!journal || journal.version !== 1 || journal.projectId !== projectId || journal.taskId !== taskId) throw Error('Invalid deletion journal');
+    projectTaskDeleted(folder, taskId);
+  }
+  return recoverTasks(folder);
+}
 export class Store {
   private readonly db: Database;
   constructor(path: string) {
@@ -49,7 +62,7 @@ export class Store {
       if (data.id !== row.id) throw Error('Project ID mismatch');
       row.name = data.name;
       this.db.query('UPDATE projects SET name=? WHERE id=?').run(row.name, row.id);
-      recoverTasks(row.folder);
+      recoverProjectTasks(row.folder, row.id);
     }
     return rows;
   }
@@ -62,7 +75,7 @@ export class Store {
     const old = this.db.query('SELECT * FROM projects WHERE id=?').get(data.id) as Project | null;
     if (old && old.folder !== normalized && existsSync(old.folder)) throw Error('Duplicate live project copy.');
     if (!pathExists(file)) writeJson(file, data);
-    recoverTasks(normalized);
+    recoverProjectTasks(normalized, data.id);
     this.db.query('INSERT INTO projects(id,name,folder) VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,folder=excluded.folder').run(data.id, data.name, normalized);
     return {
       id: data.id,
@@ -75,7 +88,7 @@ export class Store {
     const projects = this.projects().filter(p => projectId === undefined || p.id === projectId);
     return projects.flatMap(project => {
       if (!existsSync(project.folder)) return [];
-      const root = recoverTasks(project.folder);
+      const root = recoverProjectTasks(project.folder, project.id);
       return readdirSync(root).filter(validTaskId).map(id => {
         const value = reconcile ? this.reconcileDocuments(project, id) : metadata(join(root, id, 'task.json'), 'task') as TaskMetadata;
         return {
@@ -117,7 +130,7 @@ export class Store {
       value.documentBaseline = baseline;
       writeJson(file, value);
     }
-    captureTaskHistory(path, value.phase);
+    captureProjectTaskHistory(project.folder, taskId, value.phase);
     return value;
   }
   private scopedTask(projectId: string, taskId: string) {
@@ -154,44 +167,93 @@ export class Store {
   }
   renameTask(projectId: string, taskId: string, name: string): TaskRow {
     if (typeof name !== 'string' || !name.trim()) throw Error('Empty value');
-    const {file, value} = this.scopedTask(projectId, taskId);
+    const {project, file, value} = this.scopedTask(projectId, taskId);
     if (value.name === name.trim()) return {id: value.id, project_id: projectId, name: value.name, phase: value.phase, status: value.status, createdAt: value.createdAt, updatedAt: value.updatedAt};
+    const before = structuredClone(value), previousName = value.name;
     value.name = name.trim();
     value.updatedAt = new Date(Math.max(Date.now(), Date.parse(value.updatedAt ?? '') || 0)).toISOString();
     writeJson(file, value);
+    try { appendProjectEvent(project.folder, {type: 'task.renamed', taskId, phase: value.phase as TaskPhase, details: {previousName, name: value.name}}); }
+    catch (error) { writeJson(file, before); throw error; }
     return {id: value.id, project_id: projectId, name: value.name, phase: value.phase, status: value.status, createdAt: value.createdAt, updatedAt: value.updatedAt};
   }
-  captureTaskHistory(projectId: string, taskId: string, sourcePhase: TaskPhase | null = null) {
-    const {file, value} = this.scopedTask(projectId, taskId);
-    captureTaskHistory(join(file, '..'), value.phase, sourcePhase);
+  // 削除済みタスクの履歴も、現存タスクではなくプロジェクトのスコープで検証する。
+  private scopedProject(projectId: string) {
+    if (!validProjectId(projectId)) throw Error('Invalid project');
+    const project = this.db.query('SELECT * FROM projects WHERE id=?').get(projectId) as Project | null;
+    if (!project) throw Error('Unknown project');
+    if (metadata(join(projectRoot(project.folder), 'project.json'), 'project').id !== projectId) throw Error('Project ID mismatch');
+    return project;
   }
-  taskEvents(projectId: string, taskId: string, after = 0, through?: number, limit = 100) {
-    const {file, value} = this.scopedTask(projectId, taskId);
-    return taskEvents(join(file, '..'), value.phase, after, through, limit);
+  captureTaskHistory(projectId: string, taskId: string | null, sourcePhase: TaskPhase | null = null, operationId?: string) {
+    const project = this.scopedProject(projectId);
+    if (taskId === null) {
+      for (const task of this.tasks(projectId, false)) captureProjectTaskHistory(project.folder, task.id, task.phase, sourcePhase, operationId);
+      return;
+    }
+    const {value} = this.scopedTask(projectId, taskId);
+    captureProjectTaskHistory(project.folder, taskId, value.phase, sourcePhase, operationId);
+  }
+  projectEvents(projectId: string, options: {after?: number; through?: number; limit?: number; taskId?: string; types?: string[]} = {}) {
+    const project = this.scopedProject(projectId);
+    if (options.taskId !== undefined && !validTaskId(options.taskId)) throw Error('Invalid task scope');
+    this.captureTaskHistory(projectId, null);
+    return projectEvents(project.folder, options);
+  }
+  projectEventCursor(projectId: string) {
+    return projectEvents(this.scopedProject(projectId).folder, {limit: 1}).through;
+  }
+  projectEvent(projectId: string, eventId: number) {
+    return projectEvent(this.scopedProject(projectId).folder, eventId);
+  }
+  projectFileChange(projectId: string, eventId: number) {
+    return getProjectFileChange(this.scopedProject(projectId).folder, eventId);
+  }
+  projectFileVersion(projectId: string, path: string, changeId: number) {
+    return getProjectFileVersion(this.scopedProject(projectId).folder, path, changeId);
+  }
+  recordProjectEvent(projectId: string, event: ProjectEventInput) {
+    return appendProjectEvent(this.scopedProject(projectId).folder, event);
+  }
+  taskEvents(projectId: string, taskId: string | null, after = 0, through?: number, limit = 100) {
+    const page = this.projectEvents(projectId, {after, through, limit, ...(taskId === null ? {} : {taskId})});
+    if (taskId === null) return page;
+    const prefix = `.beni/tasks/${taskId}/`;
+    // 既存のタスクUIでは文書名だけを表示する。IDとカーソルはプロジェクト共通。
+    return {...page, events: page.events.map(event => ({...event,
+      ...(event.path === undefined ? {} : {path: event.path.startsWith(prefix) ? event.path.slice(prefix.length) : event.path}),
+      ...(event.previousPath === undefined ? {} : {previousPath: event.previousPath.startsWith(prefix) ? event.previousPath.slice(prefix.length) : event.previousPath})
+    }))};
   }
   taskEventVersion(projectId: string, taskId: string, version: string) {
-    const {file} = this.scopedTask(projectId, taskId);
-    return taskEventVersion(join(file, '..'), version);
+    if (!validTaskId(taskId)) throw Error('Invalid task scope');
+    return projectTaskVersion(this.scopedProject(projectId).folder, taskId, version);
   }
   selectTaskPhase(projectId: string, taskId: string, expectedPhase: string, target: TaskPhase): TaskRow {
-    const {file, value} = this.scopedTask(projectId, taskId);
+    const {project, file, value} = this.scopedTask(projectId, taskId);
     if (!taskPhases.includes(target)) throw Error('invalid phase');
     if (value.phase !== expectedPhase || value.status==='completed') throw Error('phase conflict');
     if(target==='retrospective')retrospectiveDocument(join(file,'..'));
     if(value.phase===target)return {id:value.id,project_id:projectId,name:value.name,phase:value.phase,status:value.status,createdAt:value.createdAt,updatedAt:value.updatedAt};
-    captureTaskHistory(join(file, '..'), value.phase);
+    captureProjectTaskHistory(project.folder, taskId, value.phase);
+    const before = structuredClone(value);
     value.phase = target;
     value.updatedAt = new Date(Math.max(Date.now(), (Date.parse(value.updatedAt ?? '') || 0) + 1)).toISOString();
     writeJson(file, value);
-    captureTaskHistory(join(file, '..'), target, expectedPhase as TaskPhase);
+    try { captureProjectTaskHistory(project.folder, taskId, target, expectedPhase as TaskPhase); }
+    catch (error) { writeJson(file, before); throw error; }
     return {id: value.id, project_id: projectId, name: value.name, phase: value.phase, status: value.status, createdAt: value.createdAt, updatedAt: value.updatedAt};
   }
   setTaskCompleted(projectId:string,taskId:string,completed:boolean):TaskRow {
-    const {file,value}=this.scopedTask(projectId,taskId);
+    const {project,file,value}=this.scopedTask(projectId,taskId);
     if(value.phase!=='retrospective'||value.status!==(completed?'idle':'completed'))throw Error('phase conflict');
+    captureProjectTaskHistory(project.folder, taskId, value.phase);
+    const before = structuredClone(value);
     value.status=completed?'completed':'idle';
     value.updatedAt=new Date(Math.max(Date.now(),(Date.parse(value.updatedAt??'')||0)+1)).toISOString();
     writeJson(file,value);
+    try { appendProjectEvent(project.folder, {type: completed ? 'task.completed' : 'task.reopened', taskId, phase: value.phase as TaskPhase}); }
+    catch (error) { writeJson(file, before); throw error; }
     return {id:value.id,project_id:projectId,name:value.name,phase:value.phase,status:value.status,createdAt:value.createdAt,updatedAt:value.updatedAt};
   }
   advanceTaskPhase(projectId: string, taskId: string, expectedPhase: string, direction: 'next' | 'back' = 'next'): TaskRow {
@@ -205,7 +267,7 @@ export class Store {
   }
 
   deleteTask(projectId: string, taskId: string) {
-    const {project} = this.scopedTask(projectId, taskId);
+    const {project, value} = this.scopedTask(projectId, taskId);
     const root = projectRoot(project.folder), task = join(root, 'tasks', taskId);
     const chatRoot = join(root, 'chat');
     if (pathExists(chatRoot)) directory(chatRoot);
@@ -216,6 +278,7 @@ export class Store {
     }
     const phaseChat = join(chatRoot, taskId);
     if (pathExists(phaseChat)) validateChatDirectory(phaseChat);
+    captureProjectTaskHistory(project.folder, taskId, value.phase);
     const staged = join(root, `.deleting-${taskId}`);
     mkdirSync(staged, {mode:0o700});
     try { writeJson(join(staged, 'journal.json'), {version:1, projectId, taskId}); }
@@ -224,8 +287,11 @@ export class Store {
       renameSync(task, join(staged, 'task'));
       if (pathExists(chat)) renameSync(chat, join(staged, 'chat.json'));
       if (pathExists(phaseChat)) renameSync(phaseChat, join(staged, 'chat'));
-      renameSync(join(staged, 'journal.json'), join(staged, 'committed.json'));
+      projectTaskDeleted(project.folder, taskId, () => renameSync(join(staged, 'journal.json'), join(staged, 'committed.json')));
     } catch (error) {
+      // DBのcommit失敗はファイル側の削除確定も取り消してから復元する。
+      const committed = join(staged, 'committed.json');
+      if (pathExists(committed)) renameSync(committed, join(staged, 'journal.json'));
       recoverTasks(project.folder);
       throw error;
     }

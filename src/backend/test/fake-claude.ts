@@ -2,6 +2,7 @@
 import {appendFileSync,writeFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {spawnSync} from 'node:child_process';
+import {createInterface} from 'node:readline';
 
 const args=process.argv.slice(2);
 if(args.includes('--version')){console.log(`${process.env.FAKE_CLAUDE_VERSION??'2.1.292'} (Claude Code)`);process.exit(0)}
@@ -11,7 +12,14 @@ if(args[0]==='auth'){
  console.log(JSON.stringify({loggedIn:method!=='none',authMethod:method,apiProvider:process.env.FAKE_CLAUDE_PROVIDER??'firstParty',email:'example@example.test',accountId:'fictional-account'}));process.exit(method==='none'?1:0);
 }
 const send=(value:unknown)=>process.stdout.write(JSON.stringify(value)+'\n');
-const prompt=await Bun.stdin.text();
+const input=args.includes('--input-format')?createInterface({input:process.stdin})[Symbol.asyncIterator]():null;
+let prompt='';
+if(input){
+ while(true){const line=await input.next();if(line.done)process.exit(1);const message=JSON.parse(line.value);
+  if(message.type==='control_request'&&message.request.subtype==='initialize'){send({type:'control_response',response:{subtype:'success',request_id:message.request_id,response:{}}});continue}
+  if(message.type==='user'){prompt=message.message.content;break}
+ }
+}else prompt=await Bun.stdin.text();
 const action=prompt.split('\n\n')[0];
 const session=args[args.indexOf(args.includes('--resume')?'--resume':'--session-id')+1];
 if(process.env.FAKE_CLAUDE_LOG)appendFileSync(process.env.FAKE_CLAUDE_LOG,JSON.stringify({args,cwd:process.cwd(),prompt,session,subprocessEnvScrub:process.env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB})+'\n');
@@ -33,7 +41,18 @@ const text=(index:number,value:string)=>{stream({type:'content_block_start',inde
 const complete=(id:string,content:unknown[])=>send({type:'assistant',message:{id,content},parent_tool_use_id:null});
 if(action==='result only'){send({type:'result',subtype:'success',is_error:false,result:'Final only',session_id:session});process.exit(0)}
 if(action==='discuss invalid model'){send({type:'result',subtype:'success',is_error:false,result:'This explains an invalid model error.',error:{code:'model_not_found'},session_id:session});process.exit(0)}
-if(action==='run command'){
+if(action==='event tools'||process.env.FAKE_EMBEDDED_CALLS){
+ if(!input)throw Error('Missing SDK stream');
+ const range=prompt.match(/Beni project event review range: after (\d+), through (\d+)/);
+ const calls=process.env.FAKE_EMBEDDED_CALLS?JSON.parse(process.env.FAKE_EMBEDDED_CALLS):[{tool:'list_events',arguments:{after:Number(range?.[1]??0),through:Number(range?.[2]??0),limit:1}},{tool:'acknowledge_events',arguments:{through:Number(range?.[2]??0)}}];
+ const results=[];
+ for(const [index,call] of calls.entries()){
+  const id=`embedded:${index}`;start(id);stream({type:'content_block_start',index:0,content_block:{type:'tool_use',id,name:`mcp__beni__${call.tool}`,input:call.arguments}});complete(id,[{type:'tool_use',id,name:`mcp__beni__${call.tool}`,input:call.arguments}]);
+  send({type:'control_request',request_id:id,request:{subtype:'mcp_message',server_name:'beni',message:{jsonrpc:'2.0',id:index,method:'tools/call',params:{name:call.tool,arguments:call.arguments}}}});
+  while(true){const line=await input.next();if(line.done)process.exit(1);const message=JSON.parse(line.value);if(message.type!=='control_response'||message.response.request_id!==id)continue;const result=message.response.response.mcp_response.result;results.push(result);send({type:'user',message:{content:[{type:'tool_result',tool_use_id:id,content:result.content,is_error:result.isError}]}});break}
+ }
+ start('results');text(0,JSON.stringify(results));complete('results',[{type:'text',text:JSON.stringify(results)}]);
+}else if(action==='run command'){
  const sandbox=settings.sandbox;
  if(!tools.includes('Bash')||sandbox?.enabled!==true||sandbox.failIfUnavailable!==true||sandbox.allowUnsandboxedCommands!==false||sandbox.network?.strictAllowlist!==true||!sandbox.network?.deniedDomains?.includes('*')){send({type:'result',subtype:'error_during_execution',is_error:true,errors:['Sandboxed Bash is not available']});process.exit(1)}
  start('command');stream({type:'content_block_start',index:0,content_block:{type:'tool_use',id:'bash-1',name:'Bash',input:{}}});
@@ -59,4 +78,4 @@ else{
 if(action==='wait'){
  process.on('SIGINT',()=>{send({type:'result',subtype:'error_during_execution',is_error:true,errors:['Interrupted']});process.exit(0)});
  setInterval(()=>{},1000);
-}else send({type:'result',subtype:'success',is_error:false,result:'Hello',session_id:session});
+}else {send({type:'result',subtype:'success',is_error:false,result:'Hello',session_id:session});input?.return?.();}

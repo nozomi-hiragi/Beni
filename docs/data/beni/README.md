@@ -11,6 +11,7 @@
 ```text
 .beni/
 ├── project.json                  プロジェクト情報
+├── events.sqlite                 プロジェクトイベント・文書差分・全文キャッシュ
 ├── knowledge.md                  プロジェクト共通のナレッジ（必要時）
 ├── chat/
 │   ├── general.json              ジェネラル会話
@@ -23,14 +24,10 @@
         ├── documents.md          仕様整理（資料・仕様の目次）
         ├── implementation.md 実装手順
         ├── retrospective.md      反省会の記録（反省会から）
-        ├── *.md                  追加文書（資料または仕様）
-        └── .history/
-            ├── index.json        変更イベントと観測状態
-            └── versions/
-                └── <sha256>.md   文書の各版
+        └── *.md                  追加文書（資料または仕様）
 ```
 
-メタデータと会話はJSON、文書本文はMarkdownの実ファイルに保存します。プロジェクト専用SQLiteは追加しません。会話はタスクフォルダーへ置かず、`chat/` にまとめます。
+メタデータと会話はJSON、文書本文はMarkdownの実ファイルに保存します。イベント・文書履歴はプロジェクト側の `events.sqlite` に保存します。会話はタスクフォルダーへ置かず、`chat/` にまとめます。
 
 会話の保存内容・更新規則は [chat/ の仕様](chat.md) を参照します。
 

@@ -3,7 +3,7 @@ import { test, expect } from 'bun:test';
 const Socket = globalThis.WebSocket as unknown as {new(url:string,options:Bun.WebSocketOptions):WebSocket};
 import { generateId, validProjectId, validTaskId } from '../shared/ids';
 import { Store } from './store/index';
-import { ChatService } from './chat';
+import { ChatService, type TaskEventsProvider } from './chat';
 import { createHandler, createServerOptions, dataPaths } from './server';
 import { mkdtemp, mkdir, realpath, rm, symlink, writeFile, readFile, rename, stat } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -402,12 +402,17 @@ test('HTTPはタスク会話phaseを必須とし、イベントのページ・�
   expect((await post('/api/chat/packs/missing/ack',{projectId:project.id,taskId:task.id,hash:'0'.repeat(64)})).status).toBe(400);
   const path=`/api/tasks/${task.id}/events?projectId=${project.id}`;const first=await (await get(path+'&limit=1')).json();expect(first.events).toHaveLength(1);expect(first.hasMore).toBe(true);expect(first.lastEventId).toBe(1);
   const rest=await (await get(path+`&after=1&through=${first.through}`)).json();expect(rest.events.length).toBeGreaterThan(0);expect(rest.through).toBe(first.through);expect(rest.hasMore).toBe(false);
-  const event=first.events[0];const version=await (await get(`/api/tasks/${task.id}/events/versions/${event.version}?projectId=${project.id}`)).json();expect(version.version).toBe(event.version);expect(typeof version.content).toBe('string');
+  const event=rest.events.find((event:any)=>event.version);const version=await (await get(`/api/tasks/${task.id}/events/versions/${event.version}?projectId=${project.id}`)).json();expect(version.version).toBe(event.version);expect(typeof version.content).toBe('string');
   for(const suffix of ['&after=-1','&after=1.5','&after=NaN','&limit=0','&limit=101','&through=0&after=1'])expect((await get(path+suffix)).status).toBe(400);
   expect((await get(path+'&after=999999')).status).toBe(404);expect((await get(`/api/tasks/${task.id}/events/versions/${'0'.repeat(64)}?projectId=${project.id}`)).status).toBe(404);
   expect((await post(`/api/tasks/${task.id}/phase`,{projectId:project.id,phase:'requirements',target:'execution'})).status).toBe(400);
   expect((await post(`/api/tasks/${task.id}/phase`,{projectId:project.id,phase:'requirements',target:'documents'})).status).toBe(200);
   expect((await post(`/api/tasks/${task.id}/phase`,{projectId:project.id,phase:'documents',target:'requirements'})).status).toBe(200);
+  expect((await post(`/api/tasks/${task.id}/delete`,{projectId:project.id})).status).toBe(200);
+  const retained=await (await get(path)).json();expect(retained.events.at(-1).type).toBe('task.deleted');
+  expect((await get(`/api/tasks/${task.id}/events/versions/${event.version}?projectId=${project.id}`)).status).toBe(200);
+  const other=store.createProject('Other',await mkdtemp(join(tmpdir(),'beni-events-scope-')));
+  try{expect((await get(`/api/tasks/${task.id}/events/versions/${event.version}?projectId=${other.id}`)).status).toBe(404)}finally{await rm(other.folder,{recursive:true,force:true})}
  }finally{store.close();await rm(folder,{recursive:true,force:true})}
 });
 
@@ -422,6 +427,9 @@ test('WSのphaseスコープを検証し、タスク全体の文書・フェー�
   await writeFile(join(folder,'.beni','tasks',task.id,'requirements.md'),'# External change');const changed=await inbox.next();expect(changed.name).toBe('task.events.changed');expect(changed.data.lastEventId).toBeGreaterThan(initial.data.lastEventId);
   const phase=await fetch(origin+`/api/tasks/${task.id}/phase`,{method:'POST',headers:{origin,'content-type':'application/json'},body:JSON.stringify({projectId:project.id,phase:'requirements',target:'documents'})});expect(phase.status).toBe(200);expect(await inbox.next()).toMatchObject({subscriptionId:'events',name:'task.events.changed'});
   ws.send(JSON.stringify({type:'unsubscribe',subscriptionId:'events'}));expect(await inbox.next()).toMatchObject({type:'unsubscribed'});
+  store.deleteTask(project.id,task.id);
+  subscribe('retained-events','task-events');expect(await inbox.next()).toMatchObject({type:'subscribed',subscriptionId:'retained-events'});
+  expect(await inbox.next()).toMatchObject({name:'task.events.changed',data:{lastEventId:store.taskEvents(project.id,task.id).through}});
  }finally{ws.close();server.stop(true);store.close();await rm(folder,{recursive:true,force:true})}
 });
 
@@ -569,4 +577,31 @@ test('次回準備の知識本文と反省会のproject cwdをCLIへ渡す',asyn
   expect(starts[1].params.cwd).toBe(folder);expect(starts[1].params.developerInstructions).toContain('execution.json');
   expect(turns[1].params.sandboxPolicy.writableRoots).toEqual([folder]);
  }finally{delete process.env.FAKE_CODEX_LOG;store.close();await rm(folder,{recursive:true,force:true})}
+});
+
+
+test('埋め込みツールの保存成功だけをタスクイベントへ通知し、文書照合の実行参照を渡す', async () => {
+ const folder=await mkdtemp(join(tmpdir(),'beni-event-notifications-')),store=new Store(':memory:');
+ const project=store.createProject('Example',folder),task=store.createTask(project.id,'Task'),chat=new ChatService(()=>folder,()=>null);
+ let provider:TaskEventsProvider|undefined;
+ const original=chat.setTaskEvents.bind(chat);chat.setTaskEvents=value=>{provider=value;original(value)};
+ const notifications:{projectId:string;taskId:string}[]=[];
+ createHandler(store,folder,chat,undefined,undefined,(projectId,taskId)=>notifications.push({projectId,taskId}));
+ try {
+  const operation={taskId:task.id,phase:'requirements' as const,operationId:'example-operation',chatId:'example-chat',sendId:'example-send',packId:'example-pack',toolCallId:'example-call'};
+  provider!.append!(project.id,{...operation,type:'tool.started',details:{toolName:'command'}});
+  provider!.append!(project.id,{...operation,type:'tool.finished',details:{toolName:'command',result:'completed'}});
+  expect(notifications).toEqual([{projectId:project.id,taskId:task.id},{projectId:project.id,taskId:task.id}]);
+  provider!.append!(project.id,{type:'tool.started',operationId:'general-operation',taskId:null,phase:null});
+  expect(notifications).toHaveLength(2);
+  expect(()=>provider!.append!(project.id,{...operation,type:'invalid.event'})).toThrow();
+  expect(notifications).toHaveLength(2);
+  createServerOptions(store,folder,chat);
+  const before=store.projectEventCursor(project.id);
+  await writeFile(join(folder,'.beni','tasks',task.id,'requirements.md'),'Recorded tool edit');
+  provider!.append!(project.id,{...operation,operationId:'another-operation',type:'tool.finished',details:{result:'completed'}});
+  expect(store.projectEventCursor(project.id)).toBe(before+1);
+  provider!.capture(project.id,task.id,'requirements',operation.operationId);
+  expect(store.taskEvents(project.id,task.id).events.at(-1)).toMatchObject({type:'document.updated',sourcePhase:'requirements',operationId:operation.operationId});
+ } finally {store.close();await rm(folder,{recursive:true,force:true})}
 });
