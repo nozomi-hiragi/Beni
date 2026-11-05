@@ -121,7 +121,7 @@ it('opens a selected project even if it has no tasks', async () => {
   expect(location.pathname).toBe('/project/019a0000-0000-7000-8000-000000000002');
   expect(location.search).toBe('');
   expect(await screen.findByRole('button',{name:'タスクツリーを開閉'})).toBeTruthy();
-  expect(screen.getByRole('tab', {name:'ジェネラル'})).toBeTruthy();
+  expect(screen.getByRole('tab', {name:'General'})).toBeTruthy();
 });
 
 it('keeps a newly loaded same-project task when the workspace list is newer than the project snapshot', async () => {
@@ -154,4 +154,26 @@ it('validates project and task UUID kinds and rejects reserved bits and duplicat
   expect(parseRoute(new URL(`http://localhost/project/${project.replace('-7000-','-7001-')}`)).kind).toBe('not-found');
   expect(parseRoute(new URL(`http://localhost/project/${project}?task=${project}`))).toMatchObject({kind:'project',invalidTask:true});
   expect(parseRoute(new URL(`http://localhost/project/${project}?task=${task}&task=${task}`))).toMatchObject({kind:'project',invalidTask:true});
+});
+
+it('updates the URL after deletion and refuses a deleted task from cached history', async () => {
+  const original = fetch;
+  const deleteRequest = vi.fn();
+  vi.stubGlobal('fetch', vi.fn((url:string, init?:RequestInit) => {
+    if (url.endsWith('/delete')) { deleteRequest(url, init); return Promise.resolve(json({ok:true})); }
+    return original(url, init);
+  }));
+  const path = `/project/${projects[0]!.id}`;
+  pop(`${path}?task=${tasks[0]!.id}`);
+  render(() => <App />);
+  await screen.findByRole('heading',{name:'一つ目',level:1});
+  fireEvent.contextMenu(screen.getByRole('tab',{name:'一つ目'}));
+  fireEvent.click(screen.getByRole('menuitem',{name:'削除'}));
+  fireEvent.click(screen.getByRole('button',{name:'OK'}));
+  await waitFor(() => expect(location.search).toBe(''));
+  expect(screen.getByRole('tab',{name:'General'}).getAttribute('aria-selected')).toBe('true');
+  expect(deleteRequest).toHaveBeenCalledOnce();
+  pop(`${path}?task=${tasks[0]!.id}`);
+  await waitFor(() => expect(screen.getByText('このプロジェクトのタスクが見つかりません')).toBeTruthy());
+  expect(screen.queryByRole('tab',{name:'一つ目'})).toBeNull();
 });

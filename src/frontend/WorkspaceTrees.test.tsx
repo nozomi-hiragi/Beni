@@ -136,7 +136,7 @@ describe('Workspace task and document tabs', () => {
     // Closing the last chat empties the pane; tree remains available to reopen.
     fireEvent.click(screen.getByRole('button', { name: '設計 を閉じる' }));
     expect(screen.queryByRole('tab', { name: '設計' })).toBeNull();
-    expect(screen.getByRole('tab', { name: 'ジェネラル' }).getAttribute('aria-selected')).toBe('true');
+    expect(screen.getByRole('tab', { name: 'General' }).getAttribute('aria-selected')).toBe('true');
     fireEvent.click(screen.getByRole('button', { name: 'タスクツリーを開閉' }));
     fireEvent.click(screen.getByRole('button', { name: '設計' }));
     await screen.findByRole('tab', { name: '設計' });
@@ -313,4 +313,23 @@ describe('Workspace task and document tabs', () => {
     expect(screen.getByRole('button', { name: '指示書.md · v1' })).toBeTruthy();
     expect(screen.getByRole('button', { name: '指示書.md · v2' })).toBeTruthy();
   });
+});
+
+it('updates the task tab and tree from the rename response without selecting a different task', async () => {
+ const task={id:'019a0000-0000-7100-8000-000000000065',projectId:'019a0000-0000-7000-8000-000000000018',name:'Before',phase:'requirements',status:'idle'};
+ const changed=vi.fn();
+ const fetchMock=vi.fn((path:string,init?:RequestInit)=>{
+  if(path==='/api/state') return Promise.resolve(json({projects:[],tasks:[task]}));
+  if(path===`/api/tasks/${task.id}/rename`) {expect(JSON.parse(String(init?.body))).toEqual({projectId:task.projectId,name:'After'});task.name='After';return Promise.resolve(json({...task}));}
+  if(path===`/api/tasks/${task.id}`) return Promise.resolve(json({task:{...task},documents:[]}));
+  throw Error('Unexpected request');
+ });
+ vi.stubGlobal('fetch',fetchMock);
+ render(()=><Workspace taskId={task.id} onTaskChange={changed} onHome={()=>{}} />);
+ fireEvent.contextMenu(await screen.findByRole('tab',{name:'Before'}));fireEvent.click(screen.getByRole('menuitem',{name:'リネーム'}));
+ fireEvent.input(screen.getByRole('textbox',{name:'タスク名'}),{target:{value:'After'}});fireEvent.keyDown(screen.getByRole('textbox',{name:'タスク名'}),{key:'Enter'});
+ await screen.findByRole('tab',{name:'After'});
+ expect(screen.queryByRole('tab',{name:'Before'})).toBeNull();
+ fireEvent.click(screen.getByRole('button',{name:'タスクツリーを開閉'}));
+ expect(screen.getByRole('button',{name:'After'})).toBeTruthy();expect(changed).not.toHaveBeenCalled();
 });

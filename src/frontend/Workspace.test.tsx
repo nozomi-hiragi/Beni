@@ -120,7 +120,43 @@ it('refreshes real Markdown content without duplicating tabs and selects require
  expect(screen.getByRole('heading',{name:'Plan',level:1})).toBeTruthy();
  fireEvent.click(screen.getByRole('button',{name:'タスク内容'}));
  expect(screen.getByRole('heading',{name:'Updated from disk',level:1})).toBeTruthy();
- fireEvent.click(screen.getByRole('tab',{name:'ジェネラル'}));
+ fireEvent.click(screen.getByRole('tab',{name:'General'}));
  await waitFor(()=>expect([...subscription.subscriptions.values()].some(sub=>sub.topic==='documents')).toBe(false));
  cleanup();expect(FakeWebSocket.instances.every(event=>event.closed)).toBe(true);
+});
+
+it('deletes an inactive task without changing selection and removes active task documents and tree entries', async () => {
+  const projectId = '019a0000-0000-7000-8000-000000000001';
+  const first = {id:'019a0000-0000-7100-8000-000000000601',projectId,name:'Delete A',phase:'requirements',status:'idle'};
+  const second = {...first,id:'019a0000-0000-7100-8000-000000000602',name:'Delete B'};
+  const onTaskChange = vi.fn(); const onTaskDeleted = vi.fn(); const deletes: string[] = [];
+  vi.stubGlobal('fetch', vi.fn((path:string, init?:RequestInit) => {
+    if (path === '/api/state') return Promise.resolve(json({projects:[],tasks:[first,second]}));
+    if (path.endsWith('/delete')) { expect(init?.method).toBe('POST'); expect(JSON.parse(String(init?.body))).toEqual({projectId}); deletes.push(path); return Promise.resolve(json({ok:true})); }
+    const task = [first,second].find(task => path === `/api/tasks/${task.id}`);
+    if (task) return Promise.resolve(json({task,documents:[{name:`${task.name}.md`,content:'# Document',version:1}]}));
+    if(path==='/api/codex/status')return Promise.resolve(json({installed:false,auth:'none',models:[],usage:'unknown'}));
+    if(path.startsWith('/api/chat/packs'))return Promise.resolve(json({packs:[]}));
+    if(path.startsWith('/api/chat?'))return Promise.resolve(json({id:'delete-chat',messages:[]}));
+    throw Error(path);
+  }));
+  render(() => <Workspace projectId={projectId} taskId={first.id} onHome={()=>{}} onTaskChange={onTaskChange} onTaskDeleted={onTaskDeleted} />);
+  await screen.findByRole('tab',{name:'Delete A.md'});
+  fireEvent.click(screen.getByRole('button',{name:'タスクツリーを開閉'}));
+  fireEvent.click(await screen.findByRole('button',{name:'Delete B'}));
+  await screen.findByRole('tab',{name:'Delete B.md'});
+  const remove = async (name:string) => { fireEvent.contextMenu(screen.getByRole('tab',{name})); fireEvent.click(screen.getByRole('menuitem',{name:'削除'})); fireEvent.click(screen.getByRole('button',{name:'OK'})); await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull()); };
+  onTaskChange.mockClear();
+  await remove('Delete A');
+  expect(onTaskChange).not.toHaveBeenCalled();
+  expect(screen.getByRole('tab',{name:'Delete B'}).getAttribute('aria-selected')).toBe('true');
+  await remove('Delete B');
+  expect(onTaskChange).toHaveBeenLastCalledWith(undefined, undefined);
+  expect(screen.getByRole('tab',{name:'General'}).getAttribute('aria-selected')).toBe('true');
+  expect(screen.queryByRole('tab',{name:'Delete B.md'})).toBeNull();
+  fireEvent.click(screen.getByRole('button',{name:'タスクツリーを開閉'}));
+  expect(screen.queryByRole('button',{name:'Delete A'})).toBeNull();
+  expect(screen.queryByRole('button',{name:'Delete B'})).toBeNull();
+  expect(onTaskDeleted.mock.calls).toEqual([[first.id],[second.id]]);
+  expect(deletes).toEqual([`/api/tasks/${first.id}/delete`,`/api/tasks/${second.id}/delete`]);
 });

@@ -51,7 +51,7 @@ function ProjectScreen(props: { id: string; task?: string; invalidTask: boolean;
     <Show when={state() && !project()}><p role="alert">プロジェクトが見つかりません</p></Show>
     <Show when={project()}>
       <Show when={!props.invalidTask && validTask()} fallback={<p role="alert">このプロジェクトのタスクが見つかりません</p>}>
-        <Workspace projectId={props.id} taskId={props.task} onTaskChange={changeTask} onHome={props.onHome} />
+        <Workspace onTaskDeleted={id => setState(previous => previous && {...previous, tasks: previous.tasks.filter(task => task.id !== id)})} projectId={props.id} taskId={props.task} onTaskChange={changeTask} onHome={props.onHome} />
       </Show>
     </Show>
   </>;
