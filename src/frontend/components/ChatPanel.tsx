@@ -5,7 +5,7 @@ import { communication } from '../communication';
 import { ChatSync } from '../chat-sync';
 import { followChatBottom } from '../chat-scroll';
 import type { Pack } from '../../shared/communication';
-import type { ChatMessage, CodexStatus, Conversation, Message } from '../types';
+import type { ChatMessage, CodexStatus, Conversation } from '../types';
 
 interface Draft { text: string; version: number; sending: boolean; error: string; listeners: Set<() => void>; refresh?: () => void }
 const drafts = new Map<string, Draft>();
@@ -16,7 +16,7 @@ const draftFor = (key: string) => {
 };
 const stateLabel: Record<ChatMessage['status'], string> = { pending: '送信待ち', streaming: '応答中', completed: '完了', failed: '失敗', interrupted: '中断', unknown: '結果不明' };
 
-export default function ChatPanel(props: { projectId: number; taskId?: number; legacyMessages?: Message[] }) {
+export default function ChatPanel(props: { projectId: string; taskId?: string }) {
   const [conversationState,setConversationState]=createStore<{value?:Conversation}>({});
   const conversation=()=>conversationState.value;
   const setConversation=(value:Conversation|undefined)=>setConversationState('value',value===undefined?undefined:reconcile(value,{key:'id'}));
@@ -103,7 +103,6 @@ export default function ChatPanel(props: { projectId: number; taskId?: number; l
     <Show when={syncError()}><p role="alert" class="px-4 pt-3 text-sm text-error">{syncError()} <button class="btn btn-xs" onClick={() => refresh()}>更新</button></p></Show>
     <div ref={scrollport} class="min-h-0 flex-1 overflow-y-auto p-5" role="log" aria-label="チャット履歴" aria-live="polite">
       <div ref={scrollContent} class="space-y-3">
-        <Show when={props.legacyMessages?.length}><section aria-label="以前の履歴"><p class="mb-2 text-xs text-base-content/60">以前の履歴（読み取り専用）</p><For each={props.legacyMessages}>{message => <article class={`chat ${message.role === 'user' ? 'chat-end' : 'chat-start'}`}><div class="chat-header text-xs text-base-content/60">{message.role === 'user' ? 'あなた' : message.role === 'assistant' ? 'アシスタント' : message.role}</div><div class={`chat-bubble min-w-0 ${message.role === 'user' ? 'chat-bubble-primary' : 'bg-base-200 text-base-content'}`}><p class="whitespace-pre-wrap break-words text-sm leading-relaxed">{message.content}</p></div><div class="chat-footer text-xs text-base-content/60">読み取り専用</div></article>}</For></section></Show>
         <Show when={packState.value.length} fallback={<p class="text-sm text-base-content/50">希望や回答を入力してください。</p>}><For each={packState.value}>{pack => <article class={`chat ${pack.role === 'user' ? 'chat-end' : 'chat-start'}`}><div class="chat-header text-xs text-base-content/60">{pack.role === 'user' ? 'あなた' : 'アシスタント'} · codex{pack.model ? ` · ${pack.model}` : ''}</div><div class={`chat-bubble min-w-0 ${pack.role === 'user' ? 'chat-bubble-primary' : 'bg-base-200 text-base-content'}`}><Show when={pack.kind === 'tool'} fallback={<p class="whitespace-pre-wrap break-words text-sm leading-relaxed">{pack.content}</p>}><details><summary>{pack.tool?.name ?? 'ツール'}</summary><pre class="whitespace-pre-wrap break-words text-xs">{pack.tool?.input}</pre><pre class="whitespace-pre-wrap break-words text-xs">{pack.tool?.output}</pre></details></Show></div><div class="chat-footer text-xs text-base-content/60">{stateLabel[pack.status]}</div></article>}</For></Show>
       </div>
     </div>

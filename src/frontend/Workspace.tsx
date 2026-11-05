@@ -12,10 +12,11 @@ import ResizeHandle from './components/ResizeHandle';
 import type { AppState, Document, Task, TaskDetail } from './types';
 
 export interface WorkspaceProps {
-  taskId?: number;
-  projectId?: number;
-  onTaskChange?: (id: number | undefined, task?: Task) => void;
+  taskId?: string;
+  projectId?: string;
+  onTaskChange?: (id: string | undefined, task?: Task) => void;
   onHome: () => void;
+  onTaskDeleted?: (id: string) => void;
 }
 
 const documentId = (document: Document) => document.path ?? JSON.stringify([document.name, document.version]);
@@ -25,9 +26,9 @@ export default function Workspace(props: WorkspaceProps) {
   const [detailState,setDetailState]=createStore<{value?:TaskDetail}>({});
   const detail=()=>detailState.value;
   const setDetail=(value:TaskDetail|undefined)=>setDetailState('value',value===undefined?undefined:reconcile(value,{key:'id'}));
-  const [activeTask, setActiveTask] = createSignal<number | undefined>(props.taskId);
-  const [openTasks, setOpenTasks] = createSignal<number[]>(props.taskId === undefined ? [] : [props.taskId]);
-  const [projectId, setProjectId] = createSignal<number | undefined>(props.projectId);
+  const [activeTask, setActiveTask] = createSignal<string | undefined>(props.taskId);
+  const [openTasks, setOpenTasks] = createSignal<string[]>(props.taskId === undefined ? [] : [props.taskId]);
+  const [projectId, setProjectId] = createSignal<string | undefined>(props.projectId);
   const [tasks, setTasks] = createSignal<Task[]>([]);
   const [treeError, setTreeError] = createSignal('');
   const [taskTreeOpen, setTaskTreeOpen] = createSignal(false);
@@ -40,8 +41,9 @@ export default function Workspace(props: WorkspaceProps) {
   const [chatRatio, setChatRatio] = createSignal(60);
   let workspace: HTMLElement | undefined;
   let leftPanels: HTMLDivElement | undefined;
-  const documentTabs = new Map<number, DocumentTabs>();
-  let documentOwner: number | undefined;
+  const deletedTasks = new Set<string>();
+  const documentTabs = new Map<string, DocumentTabs>();
+  let documentOwner: string | undefined;
   let alive = true;
   let taskTreeToggle: HTMLButtonElement | undefined;
   let documentTreeToggle: HTMLButtonElement | undefined;
@@ -58,15 +60,15 @@ export default function Workspace(props: WorkspaceProps) {
 
   const taskOptions = createMemo(() => {
     const project = projectId();
-    const list = tasks().filter(task => task.projectId === project);
+    const list = tasks().filter(task => task.projectId === project && !deletedTasks.has(task.id));
     const current = detail()?.task;
-    if (current && current.projectId === project && !list.some(task => task.id === current.id)) list.unshift(current);
+    if (current && !deletedTasks.has(current.id) && current.projectId === project && !list.some(task => task.id === current.id)) list.unshift(current);
     return list;
   });
-  const taskLabel = (task: Task) => `#${task.id} ${task.name}`;
-  const taskName = (id: number) => {
+  const taskLabel = (task: Task) => task.name;
+  const taskName = (id: string) => {
     const task = taskOptions().find(item => item.id === id);
-    return task ? taskLabel(task) : `#${id}`;
+    return task ? taskLabel(task) : 'タスク';
   };
   const documents = createMemo(() => detail()?.documents ?? []);
   const documentLabel = (document: Document) => documents().filter(item => item.name === document.name).length > 1 ? `${document.name} · v${document.version}` : document.name;
@@ -75,6 +77,7 @@ export default function Workspace(props: WorkspaceProps) {
   // URL changes select tabs without remounting this workspace or creating history.
   createEffect(() => {
     const id = props.taskId;
+    if (id !== undefined && deletedTasks.has(id)) return;
     if (id !== undefined) setOpenTasks(previous => previous.includes(id) ? previous : [...previous, id]);
     setActiveTask(id);
   });
@@ -84,7 +87,7 @@ export default function Workspace(props: WorkspaceProps) {
       const state = await api<AppState>('/api/state');
       if (alive) {
         batch(() => {
-          setTasks(state.tasks);
+          setTasks(state.tasks.filter(task => !deletedTasks.has(task.id)));
           const initial = state.tasks.find(task => task.id === props.taskId);
           if (projectId() === undefined && initial) setProjectId(initial.projectId);
           setTreeError('');
@@ -96,17 +99,17 @@ export default function Workspace(props: WorkspaceProps) {
   });
   onCleanup(() => { alive = false; });
 
-  function restoreDocumentTabs(taskId: number) {
+  function restoreDocumentTabs(taskId: string) {
     const previous = documentTabs.get(taskId);
     setOpenDocuments(previous?.open ?? []);
     setActiveDocument(previous?.selected);
     documentOwner = taskId;
   }
-  function saveDocumentTabs(taskId: number, open: string[], selected: string | undefined, known?: string[]) {
+  function saveDocumentTabs(taskId: string, open: string[], selected: string | undefined, known?: string[]) {
     documentTabs.set(taskId, { known: known ?? documentTabs.get(taskId)?.known ?? [], open, selected });
     if (documentOwner === taskId) { setOpenDocuments(open); setActiveDocument(selected); }
   }
-  function adoptDocuments(taskId: number, values: Document[]) {
+  function adoptDocuments(taskId: string, values: Document[]) {
     const available = values.map(documentId);
     const previous = documentTabs.get(taskId);
     const open = previous
@@ -137,7 +140,7 @@ export default function Workspace(props: WorkspaceProps) {
       const request = ++sequence;
       try {
         const data = await api<TaskDetail>(`/api/tasks/${taskId}`);
-        if (!active || request !== sequence) return;
+        if (!active || request !== sequence || deletedTasks.has(taskId)) return;
         batch(() => {
           setDetail(data);
           setProjectId(data.task.projectId);
@@ -162,13 +165,39 @@ export default function Workspace(props: WorkspaceProps) {
     onCleanup(() => { active = false; sequence++; unsubscribe?.(); });
   });
 
-  function openTask(id: number) {
+  async function renameTask(id: string, name: string) {
+    const project = projectId();
+    if (!project) throw Error('プロジェクトが見つかりません');
+    const task = await api<Task>(`/api/tasks/${id}/rename`, {projectId: project, name});
+    if (!alive || deletedTasks.has(id)) return;
+    batch(() => {
+      setTasks(previous => previous.some(item => item.id === id) ? previous.map(item => item.id === id ? task : item) : [...previous, task]);
+      const current = detail();
+      if (current?.task.id === id) setDetail({...current, task});
+    });
+  }
+  async function deleteTask(id: string) {
+    const project = projectId();
+    if (!project) throw Error('プロジェクトが見つかりません');
+    await api<{ok: boolean}>(`/api/tasks/${id}/delete`, {projectId: project});
+    if (!alive) return;
+    deletedTasks.add(id);
+    batch(() => {
+      setTasks(previous => previous.filter(task => task.id !== id));
+      documentTabs.delete(id);
+      if (detail()?.task.id === id) { setDetail(undefined); documentOwner = undefined; setOpenDocuments([]); setActiveDocument(undefined); }
+      closeTask(id);
+      props.onTaskDeleted?.(id);
+    });
+  }
+  function openTask(id: string) {
+    if (deletedTasks.has(id)) return;
     if (id !== props.taskId && !taskOptions().some(task => task.id === id)) return;
     setOpenTasks(previous => previous.includes(id) ? previous : [...previous, id]);
     setActiveTask(id);
     props.onTaskChange?.(id, taskOptions().find(task => task.id === id));
   }
-  function closeTask(id: number) {
+  function closeTask(id: string) {
     const remaining = openTasks().filter(item => item !== id);
     setOpenTasks(remaining);
     if (activeTask() === id) {
@@ -195,9 +224,9 @@ export default function Workspace(props: WorkspaceProps) {
   return <section ref={workspace} class="workspace mx-auto grid h-auto min-h-[34rem] min-w-0 max-w-7xl gap-4 px-4 pb-5 pt-4 lg:h-[calc(100vh-7rem)] lg:min-h-0" style={{"--left-ratio": `${leftRatio()}fr`, "--right-ratio": `${100 - leftRatio()}fr`}}>
     <div ref={leftPanels} class="workspace-left grid min-h-0 min-w-0 gap-4" classList={{"workspace-left-terminal": projectId() !== undefined}} style={{"--chat-ratio": `${chatRatio()}fr`, "--terminal-ratio": `${100 - chatRatio()}fr`}}>
       <section class="card flex min-h-[20rem] min-w-0 flex-col overflow-hidden border border-base-300 bg-base-100 shadow-sm lg:min-h-0" aria-label="タスクチャット">
-        <TabBar label="チャット" tabs={[{ id: 'general', label: 'ジェネラル', closable: false }, ...openTasks().map(id => ({ id: String(id), label: taskName(id) }))]} activeId={activeTask() === undefined ? 'general' : String(activeTask())} onSelect={id => id === 'general' ? (setActiveTask(undefined), props.onTaskChange?.(undefined)) : openTask(Number(id))} onClose={id => { if (id !== 'general') closeTask(Number(id)); }} left={toggle('タスクツリーを開閉', taskTreeOpen(), 'task-tree', () => setTaskTreeOpen(value => !value), element => { taskTreeToggle = element; })} />
+        <TabBar onDelete={deleteTask} onRename={renameTask} label="チャット" tabs={[{ id: 'general', label: 'General', closable: false }, ...openTasks().map(id => ({ id: String(id), label: taskName(id), renameable: true, deletable: true }))]} activeId={activeTask() === undefined ? 'general' : String(activeTask())} onSelect={id => id === 'general' ? (setActiveTask(undefined), props.onTaskChange?.(undefined)) : openTask(id)} onClose={id => { if (id !== 'general') closeTask(id); }} left={toggle('タスクツリーを開閉', taskTreeOpen(), 'task-tree', () => setTaskTreeOpen(value => !value), element => { taskTreeToggle = element; })} />
         <div class="relative flex min-h-0 flex-1 flex-col overflow-auto">
-          <Show when={taskTreeOpen()}><TreeView id="task-tree" label="タスク" nodes={[{id:'general', label:'ジェネラル'}, ...taskOptions().map(task => ({id:String(task.id), label:taskLabel(task)})), ...(props.taskId !== undefined && !taskOptions().some(task => task.id === props.taskId) ? [{id:String(props.taskId),label:taskName(props.taskId)}] : [])]} onSelect={id => { if (id === 'general') { setActiveTask(undefined); props.onTaskChange?.(undefined); } else openTask(Number(id)); setTaskTreeOpen(false); }} /></Show>
+          <Show when={taskTreeOpen()}><TreeView id="task-tree" label="タスク" nodes={[{id:'general', label:'General'}, ...taskOptions().map(task => ({id:String(task.id), label:taskLabel(task)})), ...(props.taskId !== undefined && !deletedTasks.has(props.taskId) && !taskOptions().some(task => task.id === props.taskId) ? [{id:String(props.taskId),label:taskName(props.taskId)}] : [])]} onSelect={id => { if (id === 'general') { setActiveTask(undefined); props.onTaskChange?.(undefined); } else openTask(id); setTaskTreeOpen(false); }} /></Show>
           <Show when={taskTreeOpen() && treeError()}><p role="alert" class="relative z-20 m-2 text-sm text-error">{treeError()}</p></Show>
           <Show when={activeTask() === undefined && projectId() !== undefined}><ChatPanel projectId={projectId()!} /></Show>
           <Show when={activeTask() !== undefined}>
@@ -208,7 +237,7 @@ export default function Workspace(props: WorkspaceProps) {
                 const document = documents().filter(item => (item.name === 'requirements.md' || item.name === '指示書.md')).reduce<Document | undefined>((latest, item) => !latest || item.version > latest.version ? item : latest, undefined);
                 if (document) openDocument(documentId(document));
               }} />
-              <ChatPanel projectId={detail()!.task.projectId} taskId={activeTask()} legacyMessages={detail()!.messages} />
+              <ChatPanel projectId={detail()!.task.projectId} taskId={activeTask()} />
             </Show>
           </Show>
         </div>

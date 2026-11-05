@@ -1,12 +1,13 @@
 import { For, Show } from 'solid-js';
 import type { Task } from '../types';
 
-export type SortKey = 'id' | 'name' | 'phase' | 'status';
+export type SortKey = 'id' | 'name' | 'phase' | 'status' | 'createdAt' | 'updatedAt';
 const columns: { key: SortKey; label: string }[] = [
-  { key: 'id', label: 'ID' },
   { key: 'name', label: 'タスク名' },
   { key: 'phase', label: 'フェーズ' },
   { key: 'status', label: '状態' },
+  { key: 'createdAt', label: '作成日' },
+  { key: 'updatedAt', label: '更新日' },
 ];
 
 export interface TaskListProps {
@@ -16,6 +17,12 @@ export interface TaskListProps {
   sortDirection: 1 | -1;
   onSort: (key: SortKey) => void;
   onOpenTask: (task: Task) => void;
+}
+
+const dateFormatter = new Intl.DateTimeFormat('ja-JP', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+
+function TaskDate(props: { value?: string | null }) {
+  return <>{props.value ? <time dateTime={props.value}>{dateFormatter.format(new Date(props.value))}</time> : '—'}</>;
 }
 
 export default function TaskList(props: TaskListProps) {
@@ -34,7 +41,7 @@ export default function TaskList(props: TaskListProps) {
           <tr class="cursor-pointer hover:bg-base-200 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-primary" data-id={task.id} tabIndex={0} onClick={() => props.onOpenTask(task)} onKeyDown={event => {
             if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); props.onOpenTask(task); }
           }}>
-            <td class="text-base-content/50 tabular-nums">#{task.id}</td><td class="font-semibold">{task.name}</td><td>{task.phase}</td><td><span class="inline-flex max-w-full rounded-full border border-base-300 bg-base-200 px-2.5 py-1 text-xs text-base-content/70">{task.status}</span></td>
+            <td class="font-semibold">{task.name}</td><td>{task.phase}</td><td><span class="inline-flex max-w-full rounded-full border border-base-300 bg-base-200 px-2.5 py-1 text-xs text-base-content/70">{task.status}</span></td><td><TaskDate value={task.createdAt} /></td><td><TaskDate value={task.updatedAt} /></td>
           </tr>
         }</For></tbody>
       </table>

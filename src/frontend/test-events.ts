@@ -29,10 +29,10 @@ export class FakeWebSocket {
     });
   }
   close() { this.closed = true; this.readyState = 3; this.subscriptions.clear(); this.onclose?.(); }
-  change(topic: Topic = 'chat', taskId?: number) {
+  change(topic: Topic = 'chat', taskId?: string) {
     this.event(topic, topic === 'chat' ? { name: 'chat.changed', data: {} } : { name: 'documents.changed', data: {} }, taskId);
   }
-  event(topic: Topic, event: TopicEvent, taskId?: number) {
+  event(topic: Topic, event: TopicEvent, taskId?: string) {
     for (const [id, sub] of this.subscriptions) if (sub.topic === topic && (taskId === undefined || sub.scope.taskId === taskId)) this.receive({ type: 'event', subscriptionId: id, ...event });
   }
 }

@@ -15,22 +15,23 @@ HTTP による取得・操作と、チャットのパック同期の契約を定
 
 ## API 一覧
 
-`projectId` は正の安全な整数。チャットの `taskId` は同じプロジェクトのタスク ID または null。GET の会話指定では `taskId` を省略すると一般会話、POST では null を明示する。
+`projectId` とタスクIDは [データの共通ID規則](../data/README.md#idの共通規則) に従う文字列。プロジェクト用とタスク用を区別し、整数IDは受け付けない。チャットの `taskId` は同じプロジェクトのタスク ID または null。GET の会話指定では `taskId` を省略すると一般会話、POST では null を明示する。
 
 | メソッド・パス | 入力 | 成功 | 個別の主なエラー |
 | --- | --- | --- | --- |
 | `GET /api/state` | なし | 200 `{projects: Project[], tasks: Task[]}` | — |
 | `POST /api/projects` | `{name: string, folder: string}`。名前は空白のみ不可、folder は絶対パス | 201 `Project` | 400 入力・保存先不正 |
-| `POST /api/tasks` | `{projectId: number, name: string}`。空白のみの名前は保存時に拒否 | 201 `Task` | 400 入力不正、404 プロジェクトなし |
-| `GET /api/tasks/:id` | パスのタスク ID | 200 `{task: Task, messages: StoredMessage[], documents: Document[]}` | 404 タスクなし、500 文書取得失敗 |
-| `POST /api/tasks/:id/messages` | `{content: string}`。空白のみは保存時に拒否 | 201 `StoredMessage` | 400 入力不正、404 タスクなし |
+| `POST /api/tasks` | `{projectId: string, name: string}`。空白のみの名前は保存時に拒否 | 201 `Task` | 400 入力不正、404 プロジェクトなし |
+| `POST /api/tasks/:id/delete` | `{projectId: string}` | 200 `{ok: true}`。タスク・文書・タスク会話を削除 | 404 タスクなし・所属不一致、409 チャット実行中、500 削除失敗 |
+| `POST /api/tasks/:id/rename` | `{projectId: string, name: string}`。名前の前後の空白を除く | 200 更新後の `Task` | 400 名前不正、404 タスクなし・所属不一致、500 保存失敗 |
+| `GET /api/tasks/:id` | パスのタスク ID | 200 `{task: Task, documents: Document[]}` | 404 タスクなし、500 文書取得失敗 |
 | `POST /api/folders/list` | `{path?: string}`。指定時は絶対パス | 200 `FolderList` | 400 パス不正・開けない |
 | `GET /api/codex/status` | なし | 200 `CodexStatus` | 接続失敗時は一部の情報を unknown/null として返す |
 | `GET /api/chat` | query: `projectId`, 任意の `taskId` | 200 `Conversation` | 404 会話対象なし、500 履歴取得失敗 |
 | `POST /api/chat/send` | `{projectId, taskId, content, model}`。content は空白のみ不可、model は256文字以内の文字列か null | 202 `Conversation` | 409 送信中、400 Codex 利用不可・設定不適合、404 対象なし、500 保存・接続失敗 |
 | `POST /api/chat/interrupt` | `{projectId, taskId}` | 200 `{ok: true}` | 409 停止対象なし、404 対象なし、500 保存・接続失敗 |
 
-`chat/send` の 202 は受け付けであり、返答終了ではない。`tasks/:id/messages` は DB へ保存するだけで Codex に送信しない。パック同期 API とは別の入口である。
+`chat/send` の 202 は受け付けであり、返答終了ではない。メッセージの送信は `/api/chat/send` を使う。
 
 プロジェクト・タスク作成は対応する文書ディレクトリも初期化する。タスク詳細取得でも必要な文書の初期化処理が走る。`GET /api/chat` は実行中でない pending/streaming メッセージを unknown に更新する場合がある。
 
@@ -39,12 +40,8 @@ HTTP による取得・操作と、チャットのパック同期の契約を定
 以下はワイヤー上のデータを示す説明用の型。フロントエンドの型が一部の項目を省略していても、実際の応答には含まれる。
 
 ```ts
-type Project = { id: number; name: string; folder: string };
-type Task = { id: number; projectId: number; name: string; phase: string; status: string };
-type StoredMessage = {
-  id: number; project_id: number; task_id: number | null;
-  role: string; content: string; created_at: string;
-};
+type Project = { id: string; name: string; folder: string };
+type Task = { id: string; projectId: string; name: string; phase: string; status: string; createdAt: string | null; updatedAt: string | null };
 type Document = { name: string; path: string; content: string; version: number };
 type FolderList = {
   path: string; parent: string | null;
@@ -62,18 +59,18 @@ type ChatMessage = {
   threadId: string | null; sessionId: string | null;
 };
 type Conversation = {
-  version: 1; id: string; projectId: number; taskId: number | null;
+  version: 1; id: string; projectId: string; taskId: string | null;
   threadId: string | null; sessionId: string | null; messages: ChatMessage[];
 };
 ```
 
-- 一覧のプロジェクト・タスクは ID 降順、DB メッセージは ID 昇順。
+- 一覧のプロジェクト・タスクは ID 降順。会話内のパックは保存された順序に従う。
 - Document の path はファイル名。version はファイルの更新時刻 `mtimeMs` であり、DB 文書の版番号とは別。
 - フォルダー一覧は直下の実ディレクトリのみ、最大 500 件。シンボリックリンクは一覧対象外。省略時はサーバー起動時の初期フォルダー（通常はホーム）。
 
 ## パック同期 API
 
-共通の会話指定は `{projectId: number, taskId: number | null}`。パック ID は不透明な文字列であり、文字列の大小で並べない。BE が会話内の順序を管理する。
+共通の会話指定は `{projectId: string, taskId: string | null}`。パック ID は不透明な文字列であり、文字列の大小で並べない。BE が会話内の順序を管理する。
 
 | メソッド・パス | 入力 | 成功応答 |
 | --- | --- | --- |
@@ -122,7 +119,7 @@ status/state は生成状態を表し、本文のハッシュには含めませ�
 
 ## 静的配信
 
-`/`、`/settings`、`/project/:id`（正の整数）、`/ui/index.html` は同じ HTML を返す。`/ui/build/app.js` と `/ui/generated.css` は dist の生成物を返す。HTML と生成物には CSP、nosniff、no-store を設定する。画像は同一 origin と data URL を許可し、daisyUI の吹き出しが使う埋め込み SVG を表示する。スクリプト・スタイル・通信先は同一 origin に限定する。この配信は HTTP のまま。
+`/`、`/settings`、`/project/:id`（プロジェクト用ID文字列）、`/ui/index.html` は同じ HTML を返す。`/ui/build/app.js` と `/ui/generated.css` は dist の生成物を返す。HTML と生成物には CSP、nosniff、no-store を設定する。画像は同一 origin と data URL を許可し、daisyUI の吹き出しが使う埋め込み SVG を表示する。スクリプト・スタイル・通信先は同一 origin に限定する。この配信は HTTP のまま。
 
 ## ターミナル管理
 

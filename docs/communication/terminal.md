@@ -16,7 +16,7 @@
 ```ts
 type TerminalSession = {
   id: string;
-  projectId: number;
+  projectId: string;
   requestId: string;
   status: 'running' | 'exited' | 'failed';
   exitCode: number | null;

@@ -1,7 +1,9 @@
 import { test, expect } from 'bun:test';
 // Bun supports headers in its client constructor; DOM types expose only protocols.
 const Socket = globalThis.WebSocket as unknown as {new(url:string,options:Bun.WebSocketOptions):WebSocket};
+import { generateId, validProjectId, validTaskId } from '../shared/ids';
 import { Store } from './store/index';
+import { ChatService } from './chat';
 import { createHandler, createServerOptions, dataPaths } from './server';
 import { mkdtemp, mkdir, realpath, rm, symlink, writeFile, readFile, rename, stat } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -15,9 +17,15 @@ test('project, task, chat and initial document flow', async () => {
  try {
   const p=await post('/api/projects',{name:'Example',folder});expect(p.status).toBe(201);const project=await p.json();
   const t=await post('/api/tasks',{projectId:project.id,name:'Sample'});expect(t.status).toBe(201);const task=await t.json();
-  expect((await post(`/api/tasks/${task.id}/messages`,{content:'  原文\n'})).status).toBe(201);
+  expect(validProjectId(project.id)).toBe(true);expect(validTaskId(task.id)).toBe(true);
+  expect((await post(`/api/tasks/${task.id}/messages`,{content:'  原文\n'})).status).toBe(404);
   const detail=await (await handle(new Request(`http://127.0.0.1:3210/api/tasks/${task.id}`))).json();
-  expect(detail.messages[0].content).toBe('  原文\n');expect(detail.documents[0].content).toBe('# Sample\n');
+  expect(detail.messages).toBeUndefined();expect(detail.documents[0].content).toBe('# Sample\n');
+  const metadataPath=join(folder,'.beni','tasks',task.id,'task.json');const metadata=JSON.parse(await readFile(metadataPath,'utf8'));
+  expect(task.createdAt).toBe(metadata.createdAt);expect(detail.task.createdAt).toBe(metadata.createdAt);
+  expect(task.updatedAt).toBe(metadata.updatedAt);expect(detail.task.updatedAt).toBe(metadata.updatedAt);
+  metadata.createdAt=null;metadata.updatedAt=null;await writeFile(metadataPath,JSON.stringify(metadata));
+  const state=await (await handle(new Request('http://127.0.0.1:3210/api/state'))).json();expect(state.tasks[0].createdAt).toBeNull();expect(state.tasks[0].updatedAt).toBeNull();
   expect((await handle(new Request('http://127.0.0.1:3210/api/tasks',{method:'POST',headers:{origin:'https://example.com','content-type':'application/json'},body:'{}'}))).status).toBe(403);
   expect((await handle(new Request('http://example.com/api/state'))).status).toBe(403);
   expect((await post('/api/projects',{name:'x'.repeat(70000),folder:'/tmp/example'})).status).toBe(413);
@@ -48,12 +56,12 @@ test('serves SPA entry for supported direct URLs without intercepting API or oth
  const store = new Store(':memory:');
  try {
   const handle = createHandler(store);
-  for (const path of ['/settings', '/project/1', '/project/42?task=10']) {
+  for (const path of ['/settings', `/project/${generateId('project')}`, `/project/${generateId('project')}?task=${generateId('task')}`]) {
    const response = await handle(new Request(`http://127.0.0.1:3210${path}`));
    expect(response.status).toBe(200);
    expect(await response.text()).toContain('/ui/build/app.js');
   }
-  for (const path of ['/project', '/project/0', '/settings/extra', '/api/missing']) {
+  for (const path of ['/project', '/project/0', '/project/1', `/project/${generateId('task')}`, '/settings/extra', '/api/missing']) {
    expect((await handle(new Request(`http://127.0.0.1:3210${path}`))).status).toBe(404);
   }
  } finally { store.close(); }
@@ -114,10 +122,10 @@ test('folder picker bounds a directory listing', async () => {
 });
 
 
-test('creates task Markdown, seeds latest legacy documents once, and previews real file updates', async()=>{
+test('creates task Markdown and previews real file updates as the authoritative documents', async()=>{
  const folder=await mkdtemp(join(tmpdir(),'beni-documents-'));const store=new Store(':memory:');const handle=createHandler(store);
  const post=(path:string,data:unknown)=>handle(new Request('http://127.0.0.1:3210'+path,{method:'POST',headers:{origin:'http://127.0.0.1:3210','content-type':'application/json'},body:JSON.stringify(data)}));
- const detail=async(id:number)=>(await handle(new Request(`http://127.0.0.1:3210/api/tasks/${id}`))).json();
+ const detail=async(id:string)=>(await handle(new Request(`http://127.0.0.1:3210/api/tasks/${id}`))).json();
  try{
   const project=await (await post('/api/projects',{name:'Example',folder})).json();
   const task=await (await post('/api/tasks',{name:'New task',projectId:project.id})).json();
@@ -126,10 +134,8 @@ test('creates task Markdown, seeds latest legacy documents once, and previews re
   expect(await readFile(join(base,'implementation-plan.md'),'utf8')).toContain('# Implementation plan');
   await writeFile(join(base,'requirements.md'),'# Actual file\n');
   expect((await detail(task.id)).documents.find((d:any)=>d.name==='requirements.md').content).toBe('# Actual file\n');
-  const legacy=store.createTask(project.id,'Legacy') as {id:number};store.saveDocument(legacy.id,'requirements','# Latest saved version\n',1);
-  expect((await detail(legacy.id)).documents.find((d:any)=>d.name==='requirements.md').content).toBe('# Latest saved version\n');
-  store.saveDocument(legacy.id,'requirements','# DB no longer authoritative\n',2);
-  expect((await detail(legacy.id)).documents.find((d:any)=>d.name==='requirements.md').content).toBe('# Latest saved version\n');
+  const second=store.createTask(project.id,'Second');
+  expect((await detail(second.id)).documents.find((d:any)=>d.name==='requirements.md').content).toBe('# Second\n');
   expect((await detail(task.id)).documents.find((d:any)=>d.name==='requirements.md').content).toBe('# Actual file\n');
  }finally{store.close();await rm(folder,{recursive:true,force:true})}
 });
@@ -142,29 +148,29 @@ test('refuses symlink-managed paths without writing outside and without register
   expect((await post({name:'Blocked',folder:project})).status).toBe(400);expect(store.projects()).toHaveLength(0);
   const {projectDocuments,taskDocuments,readTaskDocuments}=await import('./documents');
   const folder=join(root,'safe');await mkdir(folder);const tasks=projectDocuments(folder);
-  await symlink(outside,join(tasks,'1'));expect(()=>taskDocuments(folder,1,{requirements:'no'})).toThrow();
-  await mkdir(join(tasks,'2'));await writeFile(join(outside,'requirements.md'),'untouched');await symlink(join(outside,'requirements.md'),join(tasks,'2','requirements.md'));
-  expect(()=>taskDocuments(folder,2,{requirements:'no'})).toThrow();
-  expect(()=>readTaskDocuments(join(tasks,'2'))).toThrow();
+  const first=generateId('task'),second=generateId('task');
+  await symlink(outside,join(tasks,first));expect(()=>taskDocuments(folder,first,{requirements:'no'})).toThrow();
+  await mkdir(join(tasks,second));await writeFile(join(outside,'requirements.md'),'untouched');await symlink(join(outside,'requirements.md'),join(tasks,second,'requirements.md'));
+  expect(()=>taskDocuments(folder,second,{requirements:'no'})).toThrow();
+  expect(()=>readTaskDocuments(join(tasks,second))).toThrow();
   expect(await readFile(join(outside,'requirements.md'),'utf8')).toBe('untouched');
   const another=join(root,'another');await mkdir(another);await mkdir(join(another,'.beni'));await symlink(outside,join(another,'.beni','tasks'));
   expect(()=>projectDocuments(another)).toThrow();
  }finally{store.close();await rm(root,{recursive:true,force:true})}
 });
 
-test('rolls back failed task creation and preserves existing documents on ID collision',async()=>{
+test('recovers orphan document folders and creates new tasks without overwriting their content',async()=>{
  const folder=await mkdtemp(join(tmpdir(),'beni-document-collision-'));const store=new Store(':memory:');const handle=createHandler(store);
  const post=(path:string,data:unknown)=>handle(new Request('http://127.0.0.1:3210'+path,{method:'POST',headers:{origin:'http://127.0.0.1:3210','content-type':'application/json'},body:JSON.stringify(data)}));
  try{
   const project=await (await post('/api/projects',{name:'Example',folder})).json();
   const existing=join(folder,'.beni','tasks','1');await mkdir(existing);await writeFile(join(existing,'requirements.md'),'preserve');
-  expect((await post('/api/tasks',{name:'Collision',projectId:project.id})).status).toBe(400);
-  expect(store.tasks()).toHaveLength(0);expect(store.documents(1)).toHaveLength(0);
-  expect(await readFile(join(existing,'requirements.md'),'utf8')).toBe('preserve');
-  // Removing only this fixture's collision demonstrates the rolled-back task can be created normally.
-  await rm(existing,{recursive:true});
-  expect((await post('/api/tasks',{name:'Retry',projectId:project.id})).status).toBe(201);
-  expect(store.tasks()).toHaveLength(1);expect(await readFile(join(existing,'requirements.md'),'utf8')).toBe('# Retry\n');
+  const recovered=await (await handle(new Request('http://127.0.0.1:3210/api/state'))).json();
+  expect(recovered.tasks).toHaveLength(1);expect(recovered.tasks[0].name).toBe('Unknown');
+  expect(await readFile(join(folder,'.beni','tasks',recovered.tasks[0].id,'requirements.md'),'utf8')).toBe('preserve');
+  expect((await post('/api/tasks',{name:'New',projectId:project.id})).status).toBe(201);
+  expect(store.tasks()).toHaveLength(2);
+  expect(await readFile(join(folder,'.beni','tasks',recovered.tasks[0].id,'requirements.md'),'utf8')).toBe('preserve');
  }finally{store.close();await rm(folder,{recursive:true,force:true})}
 });
 
@@ -172,17 +178,22 @@ test('rolls back failed task creation and preserves existing documents on ID col
 function socketMessages(ws:WebSocket){const messages:any[]=[];ws.addEventListener('message',event=>messages.push(JSON.parse(String(event.data))));return {messages,async next(){for(let i=0;i<150;i++){if(messages.length)return messages.shift();await Bun.sleep(10)}throw Error('Missing WebSocket message')}}}
 async function opened(ws:WebSocket){if(ws.readyState===1)return;await new Promise<void>((resolve,reject)=>{ws.addEventListener('open',()=>resolve(),{once:true});ws.addEventListener('error',()=>reject(Error('WebSocket failed')),{once:true})})}
 test('shared WebSocket validates handshake/scopes, streams document changes and releases subscriptions',async()=>{
- const folder=await mkdtemp(join(tmpdir(),'beni-ws-'));const store=new Store(':memory:');const project=store.createProject('Example',folder) as {id:number};const other=store.createProject('Other',folder) as {id:number};const task=store.createTask(project.id,'Task') as {id:number};
+ const folder=await mkdtemp(join(tmpdir(),'beni-ws-'));const store=new Store(':memory:');const otherFolder=join(folder,'other');await mkdir(otherFolder);const project=store.createProject('Example',folder);const other=store.createProject('Other',otherFolder);const task=store.createTask(project.id,'Task');
  const server=Bun.serve({hostname:'127.0.0.1',port:0,...createServerOptions(store)});const origin=`http://127.0.0.1:${server.port}`;const ws=new Socket(origin.replace('http:','ws:')+'/api/ws',{headers:{origin}});const inbox=socketMessages(ws);
  try{
   expect((await fetch(origin+'/api/ws')).status).toBe(403);
   await opened(ws);ws.send(JSON.stringify({type:'subscribe',subscriptionId:'before',topic:'chat',scope:{projectId:project.id,taskId:null}}));expect(await inbox.next()).toMatchObject({type:'error',code:'NOT_READY'});
   ws.send('{');expect(await inbox.next()).toMatchObject({code:'INVALID_MESSAGE'});
   ws.send(JSON.stringify({type:'hello',version:1}));expect(await inbox.next()).toEqual({type:'ready',version:1});
+  ws.send(JSON.stringify({type:'subscribe',subscriptionId:'swapped-id',topic:'chat',scope:{projectId:task.id,taskId:null}}));expect(await inbox.next()).toMatchObject({code:'INVALID_MESSAGE'});
   ws.send(JSON.stringify({type:'subscribe',subscriptionId:'bad',topic:'documents',scope:{projectId:other.id,taskId:task.id}}));expect(await inbox.next()).toMatchObject({code:'NOT_FOUND',subscriptionId:'bad'});
   ws.send(JSON.stringify({type:'subscribe',subscriptionId:'doc',topic:'documents',scope:{projectId:project.id,taskId:task.id}}));expect(await inbox.next()).toEqual({type:'subscribed',subscriptionId:'doc'});
+  ws.send(JSON.stringify({type:'subscribe',subscriptionId:'doc-two',topic:'documents',scope:{projectId:project.id,taskId:task.id}}));expect(await inbox.next()).toEqual({type:'subscribed',subscriptionId:'doc-two'});
   const path=join(folder,'.beni','tasks',String(task.id));await writeFile(join(path,'replacement.tmp'),'# Atomic replacement');await rename(join(path,'replacement.tmp'),join(path,'requirements.md'));
-  expect(await inbox.next()).toMatchObject({type:'event',subscriptionId:'doc',name:'documents.changed',data:{}});
+  const updates=[await inbox.next(),await inbox.next()];expect(updates.map(message=>message.subscriptionId).sort()).toEqual(['doc','doc-two']);expect(updates.every(message=>message.name==='documents.changed')).toBe(true);
+  const timestamp=store.task(task.id)!.updatedAt;expect(timestamp).not.toBe(task.updatedAt);
+  await writeFile(join(path,'ignored.tmp'),'ignored');await Bun.sleep(200);expect(inbox.messages).toHaveLength(0);expect(store.task(task.id)!.updatedAt).toBe(timestamp);
+  ws.send(JSON.stringify({type:'unsubscribe',subscriptionId:'doc-two'}));expect(await inbox.next()).toEqual({type:'unsubscribed',subscriptionId:'doc-two'});
   ws.send(JSON.stringify({type:'unsubscribe',subscriptionId:'doc'}));expect(await inbox.next()).toEqual({type:'unsubscribed',subscriptionId:'doc'});
   ws.send(JSON.stringify({type:'subscribe',subscriptionId:'doc',topic:'documents',scope:{projectId:project.id,taskId:task.id}}));expect(await inbox.next()).toMatchObject({code:'SUBSCRIPTION_CONFLICT'});
   await writeFile(join(path,'requirements.md'),'# Disconnected');await Bun.sleep(120);expect(inbox.messages).toHaveLength(0);
@@ -266,4 +277,82 @@ test('public origin configuration requires an exact HTTPS origin',()=>{
    expect(()=>createServerOptions(store,undefined,undefined,origin)).toThrow();
   }
  }finally{store.close()}
+});
+
+
+test('HTTP scopes accept kind-correct IDs and reject numeric or swapped identifiers',async()=>{
+ const folder=await mkdtemp(join(tmpdir(),'beni-http-ids-'));const store=new Store(':memory:');
+ try{
+  const project=store.createProject('Example',folder),task=store.createTask(project.id,'Task');
+  const handle=createHandler(store,folder,new ChatService(()=>folder,()=>null));
+  const get=(path:string)=>handle(new Request('http://127.0.0.1:3210'+path));
+  const post=(path:string,input:unknown)=>handle(new Request('http://127.0.0.1:3210'+path,{method:'POST',headers:{origin:'http://127.0.0.1:3210','content-type':'application/json'},body:JSON.stringify(input)}));
+  for(const suffix of [`projectId=${project.id}`,`projectId=${project.id}&taskId=${task.id}`]){
+   const result=await get('/api/chat?'+suffix);expect(result.status).toBe(200);
+   expect((await result.json()).projectId).toBe(project.id);
+  }
+  for(const suffix of ['projectId=1',`projectId=${task.id}`,`projectId=${project.id}&taskId=1`,`projectId=${project.id}&taskId=${project.id}`])expect((await get('/api/chat?'+suffix)).status).toBe(404);
+  expect((await get('/api/tasks/'+project.id)).status).toBe(404);
+  expect((await get('/api/tasks/1')).status).toBe(404);
+  expect((await post('/api/tasks',{projectId:task.id,name:'Wrong kind'})).status).toBe(400);
+  expect((await post('/api/chat/send',{projectId:project.id,taskId:project.id,content:'test',model:null})).status).toBe(404);
+ }finally{store.close();await rm(folder,{recursive:true,force:true})}
+});
+
+test('HTTP task chat records activity while GET recovery and general chat preserve task dates', async () => {
+ const folder=await mkdtemp(join(tmpdir(),'beni-activity-'));const store=new Store(':memory:');
+ const project=store.createProject('Example',folder),task=store.createTask(project.id,'Task');
+ const chat=new ChatService(()=>folder,()=>join(import.meta.dir,'test/fake-codex.ts'));
+ const handle=createHandler(store,'/tmp',chat);
+ const post=(taskId:string|null,content:string)=>handle(new Request('http://127.0.0.1:3210/api/chat/send',{method:'POST',headers:{origin:'http://127.0.0.1:3210','content-type':'application/json'},body:JSON.stringify({projectId:project.id,taskId,content,model:null})}));
+ try{
+  const path=join(folder,'.beni','tasks',task.id,'task.json');const value=JSON.parse(await readFile(path,'utf8'));value.createdAt=null;value.updatedAt=null;await writeFile(path,JSON.stringify(value));
+  expect((await post(null,'hello')).status).toBe(202);
+  for(let i=0;i<100&&(await chat.get(project.id,null)).messages[1]?.status!=='completed';i++)await Bun.sleep(20);
+  expect(store.task(task.id)!.updatedAt).toBeNull();
+  expect((await post(task.id,'hello')).status).toBe(202);
+  for(let i=0;i<100&&(await chat.get(project.id,task.id)).messages[1]?.status!=='completed';i++)await Bun.sleep(20);
+  const completed=store.task(task.id)!;expect(completed.createdAt).toBeNull();expect(completed.updatedAt).not.toBeNull();
+  await handle(new Request(`http://127.0.0.1:3210/api/chat?projectId=${project.id}&taskId=${task.id}`));
+  await handle(new Request(`http://127.0.0.1:3210/api/tasks/${task.id}`));
+  expect(store.task(task.id)!.updatedAt).toBe(completed.updatedAt);
+ }finally{store.close();await rm(folder,{recursive:true,force:true})}
+});
+
+test('task rename validates scope and persists only name and activity metadata', async () => {
+ const folder=await mkdtemp(join(tmpdir(),'beni-rename-'));
+ const store=new Store(':memory:');const handle=createHandler(store);
+ const post=(path:string,data:unknown)=>handle(new Request(`http://127.0.0.1:3210${path}`,{method:'POST',headers:{origin:'http://127.0.0.1:3210','content-type':'application/json'},body:JSON.stringify(data)}));
+ try {
+  const project=store.createProject('Example',folder);const task=store.createTask(project.id,'Before');
+  const file=join(folder,'.beni','tasks',task.id,'task.json');
+  const before=JSON.parse(await readFile(file,'utf8'));before.updatedAt=null;before.extra={retained:true};await writeFile(file,JSON.stringify(before));
+  for(const name of ['', '  ', 42, null]) expect((await post(`/api/tasks/${task.id}/rename`,{projectId:project.id,name})).status).toBe(400);
+  expect((await post(`/api/tasks/${task.id}/rename`,{projectId:generateId('project'),name:'After'})).status).toBe(404);
+  expect((await post('/api/tasks/invalid/rename',{projectId:project.id,name:'After'})).status).toBe(404);
+  expect(JSON.parse(await readFile(file,'utf8'))).toEqual(before);
+  const response=await post(`/api/tasks/${task.id}/rename`,{projectId:project.id,name:'  After  '});expect(response.status).toBe(200);
+  const result=await response.json();expect(result.name).toBe('After');expect(result.id).toBe(task.id);expect(result.updatedAt).toBeTruthy();
+  const after=JSON.parse(await readFile(file,'utf8'));expect(after).toEqual({...before,name:'After',updatedAt:result.updatedAt});
+  expect((await post(`/api/tasks/${task.id}/rename`,{projectId:project.id,name:' After '})).status).toBe(200);
+  expect(JSON.parse(await readFile(file,'utf8'))).toEqual(after);
+  const state=await (await handle(new Request('http://127.0.0.1:3210/api/state'))).json();expect(state.tasks[0].name).toBe('After');
+  expect((await (await handle(new Request(`http://127.0.0.1:3210/api/tasks/${task.id}`))).json()).task.name).toBe('After');
+ }finally{store.close();await rm(folder,{recursive:true,force:true})}
+});
+
+test('task deletion API enforces origin and project scope and blocks send initialization', async () => {
+ const folder=await mkdtemp(join(tmpdir(),'beni-delete-')),store=new Store(':memory:');
+ try {
+  const p=store.createProject('Demo',folder),t=store.createTask(p.id,'Target');
+  let release!:()=>void;const waiting=new Promise<void>(resolve=>{release=resolve});
+  const chat=new ChatService(()=>folder,()=>'/fake');chat.status=async()=>{await waiting;return {auth:'none'} as any};
+  const handle=createHandler(store,folder,chat);
+  const post=(projectId:unknown,origin='http://127.0.0.1:3210')=>handle(new Request(`http://127.0.0.1:3210/api/tasks/${t.id}/delete`,{method:'POST',headers:{origin,'content-type':'application/json'},body:JSON.stringify({projectId})}));
+  expect((await post(p.id,'https://example.com')).status).toBe(403);expect((await post(generateId('project'))).status).toBe(404);
+  const sending=chat.send(p.id,t.id,'hello',null,folder).catch(()=>{});
+  expect((await post(p.id)).status).toBe(409);expect(store.task(t.id)).not.toBeNull();
+  release();await sending;expect((await post(p.id)).status).toBe(200);expect((await post(p.id)).status).toBe(404);
+  expect((await (await handle(new Request('http://127.0.0.1:3210/api/state'))).json()).tasks).toEqual([]);
+ }finally{store.close();await rm(folder,{recursive:true,force:true})}
 });
