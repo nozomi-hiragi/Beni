@@ -172,8 +172,10 @@ export class ChatService {
   if(p===INSTRUCTIONS_CHAT_ID||!this.taskEvents)return undefined;
   this.taskEvents.capture(p,t);
   const conversation=await this.load(p,t,phase);
-  const page=this.taskEvents.events(p,null,conversation.lastEventId,undefined,1);
-  return {after:conversation.lastEventId,through:page.through};
+  const page=this.taskEvents.events(p,null,0,undefined,1);
+  const reset=conversation.lastEventId>page.through;
+  if(reset){conversation.lastEventId=0;await this.save(conversation)}
+  return {after:conversation.lastEventId,through:page.through,...(reset?{reset:true}:{})};
  }
  private async codexRpc(executable:string,cwd:string,writable:boolean){
   const probe=new Rpc(executable,true);let servers:string[];
@@ -332,7 +334,7 @@ export class ChatService {
    });
   }finally{this.preparing.delete(taskKey)}
  }
- private async run(k:string,c:Conversation,sendId:string,content:string,model:string|null,cwd:string,active:{rpc:ChatRpc;threadId:string|null;turnId:string|null},instructions:string,documentDirectory?:string,phase:TaskPhase|null=null,history?:{after:number;through:number},referenceHistory:{role:'user'|'assistant';content:string}[]=[],instructionFocus?:InstructionKey,focusNotice?:string,focusHash?:string){
+ private async run(k:string,c:Conversation,sendId:string,content:string,model:string|null,cwd:string,active:{rpc:ChatRpc;threadId:string|null;turnId:string|null},instructions:string,documentDirectory?:string,phase:TaskPhase|null=null,history?:{after:number;through:number;reset?:boolean},referenceHistory:{role:'user'|'assistant';content:string}[]=[],instructionFocus?:InstructionKey,focusNotice?:string,focusHash?:string){
   let dispatched=false,rejectedStart=false,finished=false,claudePending=c.sessionProvider==='claude',closedWhilePending=false;
   const previousSession={threadId:active.threadId,sessionId:c.sessionId};
   let releaseEvents=()=>{};
@@ -447,7 +449,7 @@ export class ChatService {
      ? {type:'workspaceWrite', writableRoots:[workingDirectory], networkAccess:false, excludeTmpdirEnvVar:true, excludeSlashTmp:true}
      : {type:'readOnly', networkAccess:false},
     ...(command&&c.sessionProvider==='claude'?{command:{name:command.name==='review'?'code-review':command.name,args:parsedCommand!.args}}:{}),
-    input: [{type:'text', text:commandText, text_elements:[]},...(focusNotice?[{type:'text',text:focusNotice,text_elements:[]}]:[]),...(referenceHistory.length?[{type:'text',text:`Beni reference conversation history (user and assistant text only; prior messages are context):\n${JSON.stringify(referenceHistory)}`,text_elements:[]}]:[]),...(history?[{type:'text',text:`Beni project event review range: after ${history.after}, through ${history.through}. Use the embedded event tools to inspect relevant events and versions, then acknowledge_events through the reviewed upper limit. This range stays fixed for this send.`,text_elements:[]}]:[])]
+    input: [{type:'text', text:commandText, text_elements:[]},...(focusNotice?[{type:'text',text:focusNotice,text_elements:[]}]:[]),...(referenceHistory.length?[{type:'text',text:`Beni reference conversation history (user and assistant text only; prior messages are context):\n${JSON.stringify(referenceHistory)}`,text_elements:[]}]:[]),...(history?[{type:'text',text:`Beni project event review range: after ${history.after}, through ${history.through}. Use the embedded event tools to inspect relevant events and versions, then acknowledge_events through the reviewed upper limit. This range stays fixed for this send.${history.reset?'\n保存済の確認位置が現在の履歴範囲外だったので無効化しました。現在の履歴を0から確認してください。':''}`,text_elements:[]}]:[])]
    });
    active.turnId=turn.turn.id;
    if(c.projectId===INSTRUCTIONS_CHAT_ID)await update((_ms,current)=>{current.lastInstructionFocus=instructionFocus;current.lastInstructionFocusHash=focusHash;current.lastInstructionFocusThreadId=active.threadId??undefined});

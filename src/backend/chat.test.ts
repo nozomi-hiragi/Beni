@@ -823,3 +823,39 @@ test('編集相談の clear は固定済みプロンプトを維持し、生成�
   await chat.command('instructions',null,'clear',root);const after=await chat.get('instructions',null);expect(after.id).not.toBe(before.id);expect(after.appliedEditorContent).toBe(original);expect(after.lastInstructionFocus).toBeUndefined();expect(after.instructionToolsVersion).toBeUndefined();expect(after.lastEventId).toBe(0);expect(await chat.instructionEditorState()).toEqual({pending:true,busy:false});expect(JSON.parse(await readFile(join(root,'chat/history',`${before.id}.json`),'utf8'))).toEqual(before);
  }finally{store.close();await rm(root,{recursive:true,force:true})}
 });
+
+test('保存済の確認位置が現在の履歴上限を超えていたら0に戻し、両接続先に通知して確認済み位置を更新する',async()=>{
+ for(const provider of ['codex','claude'] as const){
+  const root=await mkdtemp(join(tmpdir(),'beni-stale-event-cursor-')),p='019a0000-0000-7000-8000-000000000001',t='019a0000-0000-7100-8000-000000000001',log=join(root,'calls.jsonl'),chat=new ChatService(()=>root,()=>fake,()=>fakeClaude),file=join(root,'.beni/chat',t,'requirements.json');
+  process.env.FAKE_CODEX_LOG=log;process.env.FAKE_CLAUDE_LOG=log;
+  chat.setTaskEvents({capture:()=>{},events:(_p,_t,after,through=6,limit=100)=>{if(after>6)throw Error('Unknown event cursor');const next=Math.min(after+limit,through);return {events:next>after?[{id:next,type:'document.updated'}]:[],lastEventId:next,through,hasMore:next<through}}});
+  try{
+   await chat.send(p,t,'hello','sonnet',root,root,'requirements',false,'claude');await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='completed');const before=await chat.get(p,t);await writeFile(file,JSON.stringify({...before,lastEventId:43}));
+   await chat.send(p,t,'event tools',provider==='codex'?'model-a':'sonnet',root,root,'requirements',false,provider);await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='completed');const after=await chat.get(p,t);
+   expect(after.lastEventId).toBe(6);expect(after.messages.slice(0,before.messages.length)).toEqual(before.messages);expect(after.packs.slice(0,before.packs.length)).toEqual(before.packs);expect(after.phase).toBe(before.phase);expect(after.selectedModel?.provider??'codex').toBe(provider);
+   const rows=(await readFile(log,'utf8')).trim().split('\n').map(line=>JSON.parse(line));
+   const notice=provider==='codex'?rows.find(row=>row.method==='turn/start')?.params.input.find((input:any)=>input.text.startsWith('Beni project event review range:'))?.text:rows.filter(row=>row.prompt).at(-1)?.prompt;
+   expect(notice).toContain('after 0, through 6');expect(notice).toContain('保存済の確認位置が現在の履歴範囲外だったので無効化しました。現在の履歴を0から確認してください。');
+   if(provider==='claude'){expect(after.threadId).toBe(before.threadId);expect(rows.filter(row=>row.prompt).at(-1).args).toContain('--resume')}
+   await writeFile(file,JSON.stringify({...after,lastEventId:3}));
+   await chat.send(p,t,'hello',provider==='codex'?'model-a':'sonnet',root,root,'requirements',false,provider);await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='completed');expect((await chat.get(p,t)).lastEventId).toBe(3);
+   const lastRows=(await readFile(log,'utf8')).trim().split('\n').map(line=>JSON.parse(line)),lastNotice=provider==='codex'?lastRows.filter(row=>row.method==='turn/start').at(-1)?.params.input.find((input:any)=>input.text.startsWith('Beni project event review range:'))?.text:lastRows.filter(row=>row.prompt).at(-1)?.prompt;
+   expect(lastNotice).toContain('after 3, through 6');expect(lastNotice).not.toContain('無効化しました');
+  }finally{delete process.env.FAKE_CODEX_LOG;delete process.env.FAKE_CLAUDE_LOG;await rm(root,{recursive:true,force:true})}
+ }
+});
+
+test('確認位置のリセットは送信開始前に保存し、履歴取得の他の例外は握りつぶさない',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'beni-cursor-preflight-')),p='019a0000-0000-7000-8000-000000000001',t='019a0000-0000-7100-8000-000000000001',chat=new ChatService(()=>root,()=>fake),file=join(root,'.beni/chat',t,'requirements.json');
+ try{
+  await chat.send(p,t,'hello',null,root);await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='completed');const before=await chat.get(p,t);await writeFile(file,JSON.stringify({...before,lastEventId:43}));
+  chat.setTaskEvents({capture:()=>{},events:()=>({events:[],lastEventId:0,through:6,hasMore:false})});
+  const unavailable=new ChatService(()=>root,()=>null);unavailable.setTaskEvents({capture:()=>{},events:()=>({events:[],lastEventId:0,through:6,hasMore:false})});
+  await expect(unavailable.send(p,t,'must not send',null,root)).rejects.toThrow('unavailable');expect(await chat.get(p,t)).toEqual({...before,lastEventId:0});
+  for(const stage of ['capture','events'] as const){
+   await writeFile(file,JSON.stringify({...before,lastEventId:43}));
+   chat.setTaskEvents({capture:()=>{if(stage==='capture')throw Error('Invalid tracked document')},events:()=>{throw Error('Event database unavailable')}});
+   await expect(chat.send(p,t,'must not send',null,root)).rejects.toThrow(stage==='capture'?'Invalid tracked document':'Event database unavailable');expect(await chat.get(p,t)).toEqual({...before,lastEventId:43});
+  }
+ }finally{await rm(root,{recursive:true,force:true})}
+});
