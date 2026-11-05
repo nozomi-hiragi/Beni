@@ -3,8 +3,9 @@ import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, realpathSy
 import { basename, dirname, join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import { generateId, validProjectId, validTaskId } from '../shared/ids';
-import { directory, metadata, newMetadata, projectRoot, pathExists, readJson, writeJson } from './data';
-import { packHash, validId, validPack } from '../shared/communication';
+import { directory, metadata, newMetadata, projectRoot, pathExists, readJson, writeJson, validateChatDirectory } from './data';
+import { isTaskPhase } from '../shared/task-phase';
+import { packHash, validId, validPack, isProvider } from '../shared/communication';
 const digest = (path: string) => {
   const stat = lstatSync(path);
   if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) throw Error('Invalid migration file');
@@ -32,13 +33,15 @@ function equalJson(path: string, value: any) {
 export async function rewriteConversation(value: any, projectId: string, taskId: string | null, clone = false) {
   const nullableId = (id: unknown) => id === null || validId(id);
   const date = (value: unknown) => typeof value === 'string' && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value;
-  const validMessage = (m: any) => m && validId(m.id) && validId(m.sendId) && typeof m.content === 'string' && ['user', 'assistant'].includes(m.role) && m.provider === 'codex' && (m.model === null || typeof m.model === 'string') && date(m.createdAt) && date(m.updatedAt) && nullableId(m.threadId) && nullableId(m.sessionId) && ['pending', 'streaming', 'completed', 'failed', 'interrupted', 'unknown'].includes(m.status);
+  const validMessage = (m: any) => m && validId(m.id) && validId(m.sendId) && typeof m.content === 'string' && ['user', 'assistant'].includes(m.role) && isProvider(m.provider) && (m.model === null || typeof m.model === 'string') && date(m.createdAt) && date(m.updatedAt) && nullableId(m.threadId) && nullableId(m.sessionId) && ['pending', 'streaming', 'completed', 'failed', 'interrupted', 'unknown'].includes(m.status);
   if (!value || value.version !== 1 || !validId(value.id) || !nullableId(value.threadId) || !nullableId(value.sessionId) || !Array.isArray(value.messages) || !value.messages.every(validMessage) || new Set(value.messages.map((m: any) => m.id)).size !== value.messages.length) throw Error('Unsupported chat history');
+  if ((value.sessionProvider !== undefined && !isProvider(value.sessionProvider)) || (value.selectedModel != null && (typeof value.selectedModel.id !== 'string' || typeof value.selectedModel.name !== 'string' || (value.selectedModel.provider !== undefined && !isProvider(value.selectedModel.provider))))) throw Error('Unsupported chat provider');
   if (value.packs !== undefined && (!Array.isArray(value.packs) || value.packs.some((pack: any, index: number) => !validPack(pack) || pack.sequence !== index + 1 || !value.messages.some((m: any) => m.id === pack.messageId && m.sendId === pack.sendId && m.role === pack.role)) || new Set(value.packs.map((pack: any) => pack.packId)).size !== value.packs.length)) throw Error('Unsupported chat pack history');
   value.projectId = projectId;
   value.taskId = taskId;
   if (clone) {
     value.id = crypto.randomUUID();
+    value.lastEventId = 0;
     value.threadId = null;
     value.sessionId = null;
     for (const message of value.messages) {
@@ -289,17 +292,31 @@ export async function cloneProject(sourceFolder: string, destinationFolder: stri
     }
     const chat = join(target, 'chat');
     if (existsSync(chat)) for (const filename of readdirSync(chat)) {
+      const sourcePath = join(chat, filename), stat = lstatSync(sourcePath);
+      if (stat.isDirectory() && !stat.isSymbolicLink()) {
+        const tid = map[filename];
+        if (!tid) throw Error('Unknown task chat');
+        validateChatDirectory(sourcePath);
+        for (const phaseFile of readdirSync(sourcePath)) {
+          const phase = phaseFile.slice(0, -5), file = join(sourcePath, phaseFile), original = readJson(file);
+          if (!isTaskPhase(phase) || original.projectId !== pm.id || original.taskId !== filename || original.phase !== phase) throw Error('Clone conversation scope mismatch');
+          writeJson(file, await rewriteConversation(original, pid, tid, true));
+        }
+        const output = join(chat, tid);
+        if (pathExists(output)) throw Error('Clone chat collision');
+        renameSync(sourcePath, output);
+        continue;
+      }
       if (!filename.endsWith('.json')) throw Error('Invalid chat file');
-      const old = filename.slice(0, -5),
-        tid = old === 'general' ? null : map[old];
+      const old = filename.slice(0, -5), tid = old === 'general' ? null : map[old];
       if (tid === undefined) throw Error('Unknown task chat');
-      const original = readJson(join(chat, filename));
+      const original = readJson(sourcePath);
       if (original.projectId !== pm.id || original.taskId !== (old === 'general' ? null : old)) throw Error('Clone conversation scope mismatch');
       const value = await rewriteConversation(original, pid, tid, true);
       const output = join(chat, tid === null ? 'general.json' : `${tid}.json`);
-      if (output !== join(chat, filename) && existsSync(output)) throw Error('Clone chat collision');
+      if (output !== sourcePath && existsSync(output)) throw Error('Clone chat collision');
       writeJson(output, value);
-      if (output !== join(chat, filename)) rmSync(join(chat, filename));
+      if (output !== sourcePath) rmSync(sourcePath);
     }
     if (pathExists(finalTarget)) throw Error('Clone destination already contains .beni');
     renameSync(target, finalTarget);

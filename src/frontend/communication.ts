@@ -19,7 +19,7 @@ export class Communication {
   private handshake?: ReturnType<typeof setTimeout>;
 
   subscribe(topic: Topic, scope: Scope, listener: Listener) {
-    const key = JSON.stringify([topic, scope.projectId, scope.taskId, scope.terminalId ?? null]);
+    const key = JSON.stringify([topic, scope.projectId, scope.taskId, scope.terminalId ?? null, scope.phase ?? null]);
     let subscription = this.subscriptions.get(key);
     if (!subscription) {
       if (this.subscriptions.size >= 32) { listener.error('購読数が上限に達しました'); return () => {}; }
@@ -44,7 +44,7 @@ export class Communication {
   }
 
   terminal(scope: Scope, action: TerminalAction): boolean {
-    const sub = this.subscriptions.get(JSON.stringify(['terminal', scope.projectId, scope.taskId, scope.terminalId ?? null]));
+    const sub = this.subscriptions.get(JSON.stringify(['terminal', scope.projectId, scope.taskId, scope.terminalId ?? null, scope.phase ?? null]));
     if (!this.ready || !sub?.ready) return false;
     return this.send({ ...action, subscriptionId: sub.id });
   }

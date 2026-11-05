@@ -10,12 +10,15 @@ Beni/
 │   ├── backend/                      Bun で動くサーバー側の処理
 │   │   ├── server.ts                 サーバー起動、API、フロントエンド配信、保存先設定
 │   │   ├── server.test.ts            API・配信・文書管理・変更通知・保存先のテスト
-│   │   ├── chat.ts                   Codex 通信、会話の保存・再開・受信・中断
+│   │   ├── chat.ts                   エージェント通信、会話の保存・再開・受信・中断
+│   │   ├── claude.ts                 Claude Code CLI の状態確認とストリーム変換
+│   │   ├── claude.test.ts            Claude の受信・権限設定・中断・接続失敗のテスト
 │   │   ├── chat.test.ts              会話の保存・再開・中断・分離、接続エラーのテスト
 │   │   ├── data.ts                   メタデータ検証・保存と文書だけ残ったタスクの復元
 │   │   ├── migration.ts              旧データの移行・照合・バックアップと.beniの複製
 │   │   ├── data-cli.ts               データ移行・複製コマンドの入口
 │   │   ├── documents.ts              タスク用 Markdown の作成・読み取り・変更監視
+│   │   ├── task-history.ts           タスクの変更イベント・文書の版・履歴取得
 │   │   ├── terminal.ts               PTY・端末画面・操作権・終了処理
 │   │   ├── terminal.test.ts          シェルの存続・排他・画面復元・HTTP/WSのテスト
 │   │   ├── events.ts                 共通 WS の接続・購読・送信上限と解放処理
@@ -23,9 +26,11 @@ Beni/
 │   │   │   ├── index.ts              SQLiteの登録情報とプロジェクト内のタスク管理
 │   │   │   └── index.test.ts         メタデータ・復元・移行・複製のテスト
 │   │   └── test/                     バックエンドのテスト補助
-│   │       └── fake-codex.ts          実サービスを使わず Codex 通信を模擬する実行ファイル
+│   │       ├── fake-codex.ts          実サービスを使わず Codex 通信を模擬する実行ファイル
+│   │       └── fake-claude.ts         実サービスを使わず Claude 通信を模擬する実行ファイル
 │   ├── shared/                       FE・BE 共通の通信定義
 │   │   ├── ids.ts                    プロジェクト・タスクIDの生成と種別検証
+│   │   ├── task-phase.ts             共通のフェーズ識別子と検証
 │   │   └── communication.ts          パック・WS メッセージの型、受信検証、ハッシュ
 │   └── frontend/                     ブラウザーで動く SolidJS の画面
 │       ├── index.html                アプリの表示先と JavaScript・CSS の読み込み
@@ -34,6 +39,7 @@ Beni/
 │       ├── Home.tsx                  プロジェクト・タスク作成、タスク一覧の検索・並べ替え
 │       ├── Workspace.tsx             チャット・タスク・文書の表示とタブ管理
 │       ├── api.ts                    バックエンドへの JSON リクエストとエラー処理
+│       ├── model-cache.ts            接続先別モデル一覧・フェーズ別チャットモデル・タスク別実装モデルの記憶
 │       ├── communication.ts          共通 WS、購読の共有、再接続
 │       ├── chat-sync.ts              チャットのパック照合・順序付き確定・再同期
 │       ├── chat-scroll.ts            最下部にいる間のスクロール追従
@@ -54,7 +60,7 @@ Beni/
 │           ├── ChatPanel.tsx         Codex との会話、モデル選択、送信・中断、過去の履歴表示
 │           ├── CodexSettings.tsx     Codex のインストール・認証・モデルなどの状態確認
 │           ├── ChatComposer.tsx      テキスト入力と送信フォーム
-│           ├── PhaseIndicator.tsx    フェーズ表示。現状は「タスク内容」の操作に対応
+│           ├── PhaseIndicator.tsx    フェーズ表示と実装開始・停止・タスク完了・再開
 │           ├── TabBar.tsx            タブの選択と閉じる操作
 │           ├── TreeView.tsx          項目の階層表示と選択
 │           └── *.test.tsx            部品の表示・操作のテスト
@@ -90,6 +96,13 @@ Beni/
 │   │   ├── project-detail.md         プロジェクト詳細画面
 │   │   ├── project-settings.md       プロジェクト設定・作成
 │   │   └── settings.md               設定画面
+│   ├── objects/                      オブジェクト仕様
+│   │   ├── README.md                 目次と各要素の関係
+│   │   ├── project.md                プロジェクトの持ち物と操作
+│   │   ├── task.md                   タスクと文書
+│   │   ├── chat.md                   会話・発言・返信パック
+│   │   ├── task-events.md            フェーズ間の変更履歴と文書の版
+│   │   └── terminal.md               ターミナルとシェル
 │   ├── features/                     機能ごとの仕様
 │   │   ├── llm-chat.md               LLM チャット連携
 │   │   ├── terminal.md               ターミナルの機能仕様

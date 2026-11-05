@@ -28,10 +28,10 @@ test('marks unfinished saved requests unknown after restart',async()=>{
 });
 test('HTTP chat scope validates project and task ownership',async()=>{
  const {Store}=await import('./store/index');const {createHandler}=await import('./server');const store=new Store(':memory:');const projectRoot=await mkdtemp(join(tmpdir(),'beni-project-'));const p=store.createProject('One',projectRoot) as {id:string};const other=store.createProject('Two',projectFolder(projectRoot,'other')) as {id:string};const task=store.createTask(p.id,'Task') as {id:string};const dir=await mkdtemp(join(tmpdir(),'beni-chat-'));const handler=createHandler(store,'/tmp',new ChatService(p=>projectFolder(dir,p),()=>fake));const post=(path:string,data:unknown)=>handler(new Request('http://127.0.0.1:3210'+path,{method:'POST',headers:{origin:'http://127.0.0.1:3210','content-type':'application/json'},body:JSON.stringify(data)}));try{
-  expect((await handler(new Request(`http://127.0.0.1:3210/api/chat?projectId=${other.id}&taskId=${task.id}`))).status).toBe(404);
-  expect((await post('/api/chat/send',{projectId:other.id,taskId:task.id,content:'hello',model:null})).status).toBe(404);
-  expect((await post('/api/chat/send',{projectId:p.id,taskId:task.id,content:'hello',model:null})).status).toBe(202);
-  await waitFor(async()=>{const res=await handler(new Request(`http://127.0.0.1:3210/api/chat?projectId=${p.id}&taskId=${task.id}`));return (await res.json()).messages[1].status==='completed'});
+  expect((await handler(new Request(`http://127.0.0.1:3210/api/chat?projectId=${other.id}&taskId=${task.id}&phase=requirements`))).status).toBe(404);
+  expect((await post('/api/chat/send',{projectId:other.id,taskId:task.id,phase:'requirements',content:'hello',model:null})).status).toBe(404);
+  expect((await post('/api/chat/send',{projectId:p.id,taskId:task.id,phase:'requirements',content:'hello',model:null})).status).toBe(202);
+  await waitFor(async()=>{const res=await handler(new Request(`http://127.0.0.1:3210/api/chat?projectId=${p.id}&taskId=${task.id}&phase=requirements`));return (await res.json()).messages[1].status==='completed'});
  }finally{store.close();await rm(dir,{recursive:true,force:true});await rm(projectRoot,{recursive:true,force:true})}
 });
 
@@ -54,6 +54,8 @@ test('task conversations write and resume in their document sandbox; general sta
   const restarted=new ChatService(p=>projectFolder(root,p),()=>fake);
   await restarted.send('019a0000-0000-7000-8000-000000000001','019a0000-0000-7100-8000-000000000001','hello','model-a',root,documentDirectory);await waitFor(async()=>(await restarted.get('019a0000-0000-7000-8000-000000000001','019a0000-0000-7100-8000-000000000001')).messages[3].status==='completed');
   await restarted.send('019a0000-0000-7000-8000-000000000001',null,'hello','model-a',root);await waitFor(async()=>(await restarted.get('019a0000-0000-7000-8000-000000000001',null)).messages[1].status==='completed');
+  await restarted.send('019a0000-0000-7000-8000-000000000001','019a0000-0000-7100-8000-000000000001','hello','model-a',root,documentDirectory,'implementation');await waitFor(async()=>(await restarted.get('019a0000-0000-7000-8000-000000000001','019a0000-0000-7100-8000-000000000001','implementation')).messages[1].status==='completed');
+  await restarted.send('019a0000-0000-7000-8000-000000000001','019a0000-0000-7100-8000-000000000001','hello','model-a',root,documentDirectory);await waitFor(async()=>(await restarted.get('019a0000-0000-7000-8000-000000000001','019a0000-0000-7100-8000-000000000001')).messages[5].status==='completed');
   const events=(await readFile(log,'utf8')).trim().split('\n').map(line=>JSON.parse(line));
   const start=events.find(event=>event.method==='thread/start');const resume=events.find(event=>event.method==='thread/resume');
   for(const event of [start,resume]){
@@ -62,6 +64,10 @@ test('task conversations write and resume in their document sandbox; general sta
   const turns=events.filter(event=>event.method==='turn/start');
   for(const turn of turns.slice(0,2))expect(turn.params).toMatchObject({cwd:documentDirectory,approvalPolicy:'never',sandboxPolicy:{type:'workspaceWrite',writableRoots:[documentDirectory],networkAccess:false,excludeTmpdirEnvVar:true,excludeSlashTmp:true}});
   expect(turns[2].params).toMatchObject({cwd:root,sandboxPolicy:{type:'readOnly',networkAccess:false}});
+  const implementationResume=events.find(event=>event.method==='thread/start'&&event.params.cwd===root&&event.params.sandbox==='workspace-write');expect(implementationResume.params.cwd).toBe(root);expect(implementationResume.params.developerInstructions).toContain('Implement source code');expect(implementationResume.params.developerInstructions).toContain('## 仕様');
+  expect(turns[3].params).toMatchObject({cwd:root,sandboxPolicy:{type:'workspaceWrite',writableRoots:[root],networkAccess:false,excludeTmpdirEnvVar:true,excludeSlashTmp:true}});
+  expect(turns[4].params).toMatchObject({cwd:documentDirectory,sandboxPolicy:{type:'workspaceWrite',writableRoots:[documentDirectory]}});
+  expect(events.filter(event=>event.method==='thread/resume').at(-1).params.developerInstructions).toContain('Never modify these files directly');
  }finally{delete process.env.FAKE_CODEX_LOG;await rm(root,{recursive:true,force:true})}
 });
 
@@ -129,7 +135,7 @@ test('project-local histories survive a folder move with unchanged packs and sco
  const root=await mkdtemp(join(tmpdir(),'beni-chat-move-'));const p='019a0000-0000-7000-8000-000000000001',t='019a0000-0000-7100-8000-000000000001';let folder=projectFolder(root,'source');
  try {
   const chat=new ChatService(()=>folder,()=>fake);await chat.send(p,t,'hello',null,folder);await waitFor(async()=>(await chat.get(p,t)).messages[1].status==='completed');const saved=await chat.get(p,t);
-  expect(JSON.parse(await readFile(join(folder,'.beni','chat',`${t}.json`),'utf8'))).toEqual(saved);
+  expect(JSON.parse(await readFile(join(folder,'.beni','chat',t,'requirements.json'),'utf8'))).toEqual(saved);
   const {rename}=await import('node:fs/promises');const moved=join(root,'moved');await rename(folder,moved);folder=moved;
   expect(await new ChatService(()=>folder,()=>fake).get(p,t)).toEqual(saved);
   expect((await new ChatService(()=>folder,()=>fake).get(p,null)).messages).toEqual([]);
@@ -158,4 +164,235 @@ test('an unavailable project folder fails without creating a blank chat or files
   await expect(chat.get('019a0000-0000-7000-8000-000000000001',null)).rejects.toThrow();
   const {readdir}=await import('node:fs/promises');expect(await readdir(root)).toEqual([]);
  }finally{await rm(root,{recursive:true,force:true})}
+});
+
+test('フェーズ別の会話・パック・通知を分離し、タスク全体の同時送信を防ぐ',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'beni-phase-chat-'));const p='019a0000-0000-7000-8000-000000000001',t='019a0000-0000-7100-8000-000000000001';
+ const chat=new ChatService(()=>root,()=>fake);let requirements=0,documents=0;
+ const stop=chat.subscribe(p,t,()=>requirements++);const stopDocuments=chat.subscribe(p,t,()=>documents++,'documents');
+ try{
+  const sending=chat.send(p,t,'wait',null,root,undefined,'documents');
+  await expect(chat.send(p,t,'hello',null,root)).rejects.toThrow('busy');expect(()=>chat.withIdleTask(p,t,()=>{})).toThrow('busy');await sending;
+  await waitFor(async()=>(await chat.get(p,t,'documents')).messages[1].status==='streaming');
+  expect((await chat.get(p,t)).messages).toEqual([]);expect(requirements).toBe(0);expect(documents).toBeGreaterThan(0);
+  await expect(chat.interrupt(p,t)).rejects.toThrow('not running');await chat.interrupt(p,t,'documents');
+  await waitFor(async()=>(await chat.get(p,t,'documents')).messages[1].status==='interrupted');
+  const pack=(await chat.get(p,t,'documents')).packs[0];await expect(chat.pack(p,t,pack.packId)).rejects.toThrow('not found');
+  await chat.send(p,t,'hello',null,root);await waitFor(async()=>(await chat.get(p,t)).messages[1].status==='completed');
+  expect((await chat.get(p,t,'documents')).messages).toHaveLength(2);expect((await chat.get(p,t)).packs[0].sequence).toBe(1);
+ }finally{stop();stopDocuments();await rm(root,{recursive:true,force:true})}
+});
+
+test('旧タスク会話を検証して要件定義へ移行し、競合やリンクは破壊しない',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'beni-phase-migration-'));const p='019a0000-0000-7000-8000-000000000001',t='019a0000-0000-7100-8000-000000000001';
+ const {mkdir,writeFile,lstat,symlink}=await import('node:fs/promises');const folder=join(root,'.beni','chat');
+ try{
+  await mkdir(folder,{recursive:true});const old=join(folder,`${t}.json`);const legacy={version:1,id:'legacy',projectId:p,taskId:t,threadId:'old-thread',sessionId:'old-session',messages:[],packs:[]};await writeFile(old,JSON.stringify(legacy));
+  const chat=new ChatService(()=>root,()=>fake);expect((await chat.get(p,t,'documents')).messages).toEqual([]);const migrated=await chat.get(p,t);expect(migrated).toMatchObject({...legacy,phase:'requirements',lastEventId:0});await expect(lstat(old)).rejects.toThrow();
+  await writeFile(old,JSON.stringify(legacy));expect(await chat.get(p,t)).toEqual(migrated);await expect(lstat(old)).rejects.toThrow();
+  await writeFile(old,JSON.stringify({...legacy,id:'conflict'}));await expect(chat.get(p,t,'implementation')).rejects.toThrow('Chat migration conflict');expect(JSON.parse(await readFile(old,'utf8')).id).toBe('conflict');expect(JSON.parse(await readFile(join(folder,t,'requirements.json'),'utf8')).id).toBe('legacy');
+  await rm(old);await symlink(join(folder,t,'requirements.json'),old);await expect(chat.get(p,t)).rejects.toThrow('Invalid metadata file');
+ }finally{await rm(root,{recursive:true,force:true})}
+});
+
+test('引継ぎは固定上限で全ページを渡し、受理後だけカーソルを進めて失敗時は再送する',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'beni-phase-cursor-'));const p='019a0000-0000-7000-8000-000000000001',t='019a0000-0000-7100-8000-000000000001';
+ const log=join(root,'rpc.jsonl');process.env.FAKE_CODEX_LOG=log;let tail=3;const ranges:number[][]=[];
+ const chat=new ChatService(()=>root,()=>fake);chat.setTaskEvents({capture:()=>{},events:(_p,_t,after,through=tail)=>{ranges.push([after,through]);const next=Math.min(after+1,through);return {events:next>after?[{id:next,type:'document.updated',version:'a'.repeat(64),path:'requirements.md'}]:[],lastEventId:next,through,hasMore:next<through}}});
+ try{
+  await chat.send(p,t,'reject',null,root,root);await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='failed');expect((await chat.get(p,t)).lastEventId).toBe(0);
+  await chat.send(p,t,'wait',null,root,root);await waitFor(async()=>(await chat.get(p,t)).lastEventId===3);tail=4;expect((await chat.get(p,t)).messages.at(-2)?.content).toBe('wait');
+  await chat.interrupt(p,t);await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='interrupted');await chat.send(p,t,'hello',null,root,root);await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='completed');expect((await chat.get(p,t)).lastEventId).toBe(4);
+  const turns=(await readFile(log,'utf8')).trim().split('\n').map(line=>JSON.parse(line)).filter(event=>event.method==='turn/start');expect(turns[0].params.input).toEqual(turns[1].params.input.map((input:any,i:number)=>i===0?{...input,text:'reject'}:input));expect(turns[1].params.input[1].text).toContain('versions/<version>.md');expect(turns[2].params.input[1].text).toContain('"id":4');expect(turns[2].params.input[1].text).not.toContain('"id":3');expect(ranges).toEqual([[0,3],[1,3],[2,3],[0,3],[1,3],[2,3],[3,4]]);
+ }finally{delete process.env.FAKE_CODEX_LOG;await rm(root,{recursive:true,force:true})}
+});
+
+test('受理不明の切断では引継ぎカーソルを進めず、読込中の削除を防ぐ',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'beni-cursor-unknown-'));const p='019a0000-0000-7000-8000-000000000001',t='019a0000-0000-7100-8000-000000000001';const chat=new ChatService(()=>root,()=>fake);let delivered=0;
+ chat.setTaskEvents({capture:()=>{},events:(_p,_t,after)=>{if(after===0)delivered++;return {events:after===0?[{id:1}]:[],through:1,lastEventId:1,hasMore:false}}});
+ try{
+  const reading=chat.get(p,t,'documents');expect(()=>chat.deleteTask(p,t,()=>{})).toThrow('busy');await reading;
+  await chat.send(p,t,'disconnect',null,root,root);await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='unknown');expect((await chat.get(p,t)).lastEventId).toBe(0);
+  await chat.send(p,t,'hello',null,root,root);await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='completed');expect((await chat.get(p,t)).lastEventId).toBe(1);expect(delivered).toBe(2);
+ }finally{await rm(root,{recursive:true,force:true})}
+});
+
+test('停止は送信準備と実行完了を待ち、新送信とphase変更を拒否する',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'beni-stop-')),p='019a0000-0000-7000-8000-000000000001',t='019a0000-0000-7100-8000-000000000001';
+ const chat=new ChatService(()=>root,()=>fake);
+ try{
+  const sending=chat.send(p,t,'wait',null,root,root,'documents');
+  let changed=false;
+  const stopping=chat.stopTask(p,t,()=>{changed=true});
+  await expect(chat.send(p,t,'duplicate',null,root,root,'requirements')).rejects.toThrow('busy');
+  expect(()=>chat.withIdleTask(p,t,()=>{})).toThrow('busy');
+  await sending;await stopping;
+  expect(changed).toBe(true);expect((await chat.get(p,t,'documents')).messages.at(-1)?.status).toBe('interrupted');
+  expect(()=>chat.withIdleTask(p,t,()=>{})).not.toThrow();
+  const again=chat.send(p,t,'wait',null,root,root,'documents');await again;
+  await expect(chat.stopTask(p,t,()=>{},()=>{throw Error('phase conflict')})).rejects.toThrow('phase conflict');
+  await waitFor(async()=>(await chat.get(p,t,'documents')).messages.at(-1)?.status==='streaming');
+  await chat.stopTask(p,t,()=>{});
+ }finally{await rm(root,{recursive:true,force:true})}
+});
+
+test('送信したモデルをフェーズごとに保存し、不在モデルでは履歴を追加しない',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'beni-models-'));const p='019a0000-0000-7000-8000-000000000001',t='019a0000-0000-7100-8000-000000000001';
+ try{
+  const chat=new ChatService(p=>projectFolder(root,p),()=>fake);
+  await chat.send(p,t,'hello','model-a',root);
+  await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='completed');
+  const status=await chat.status();chat.status=async()=>({...status,models:[...status.models!,{id:'model-b',name:'Model B'}]});
+  await chat.send(p,t,'hello','model-b',root);
+  await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='completed');
+  const restarted=new ChatService(p=>projectFolder(root,p),()=>fake);
+  expect((await restarted.get(p,t)).selectedModel).toEqual({id:'model-b',name:'Model B'});
+  expect((await restarted.get(p,t)).messages[0]!.model).toBe('model-a');
+  expect((await restarted.get(p,t,'documents')).selectedModel).toBe(null);
+  expect((await restarted.get(p,null)).selectedModel).toBe(null);
+  await expect(restarted.send(p,t,'hello','missing',root)).rejects.toThrow('model unavailable');
+  expect((await restarted.get(p,t)).messages).toHaveLength(4);
+ }finally{await rm(root,{recursive:true,force:true})}
+});
+
+test('モデル拒否と一般的な拒否を区別し、生成中の重複送信では選択を変えない',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'beni-model-reject-'));const p='019a0000-0000-7000-8000-000000000001';
+ try{
+  const chat=new ChatService(()=>root,()=>fake);
+  await chat.send(p,null,'reject model','model-a',root);
+  await waitFor(async()=>(await chat.get(p,null)).messages.at(-1)?.status==='failed');
+  expect((await chat.get(p,null)).messages.at(-1)?.errorCode).toBe('MODEL_UNAVAILABLE');
+  await chat.send(p,null,'reject','model-a',root);
+  await waitFor(async()=>(await chat.get(p,null)).messages.at(-1)?.status==='failed');
+  expect((await chat.get(p,null)).messages.at(-1)?.errorCode).toBeUndefined();
+  await chat.send(p,null,'wait','model-a',root);
+  await expect(chat.send(p,null,'hello','missing',root)).rejects.toThrow('busy');
+  await waitFor(async()=>(await chat.get(p,null)).messages.at(-1)?.status==='streaming');
+  await chat.interrupt(p,null);
+  await waitFor(async()=>(await chat.get(p,null)).messages.at(-1)?.status==='interrupted');
+  expect((await chat.get(p,null)).selectedModel?.id).toBe('model-a');
+ }finally{await rm(root,{recursive:true,force:true})}
+});
+
+const fakeClaude=join(import.meta.dir,'test/fake-claude.ts');
+test('Claude の送信・ツール・中断と同じ接続先の再開を保存する',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'beni-claude-chat-')),p='019a0000-0000-7000-8000-000000000001',log=join(root,'claude.jsonl');
+ process.env.FAKE_CLAUDE_LOG=log;
+ try{
+  const chat=new ChatService(()=>root,()=>null,()=>fakeClaude),events:any[]=[];chat.subscribe(p,null,event=>events.push(event));
+  expect((await chat.claudeStatus()).auth).toBe('claude');
+  await chat.send(p,null,'tools','opus',root,undefined,null,false,'claude');
+  await waitFor(async()=>(await chat.get(p,null)).messages.at(-1)?.status==='completed');
+  const first=await chat.get(p,null),session=first.sessionId;
+  expect(first.selectedModel).toEqual({id:'opus',name:'Opus',provider:'claude'});expect(first.sessionProvider).toBe('claude');
+  expect(first.messages.every(m=>m.provider==='claude'&&m.model==='opus')).toBe(true);
+  expect(first.packs.every(pack=>pack.provider==='claude')).toBe(true);
+  expect(first.packs.find(pack=>pack.kind==='tool')?.tool).toMatchObject({name:'Read',output:'Example contents'});
+  expect(events.some(event=>event.name==='chat.pack.delta')).toBe(true);
+  const restarted=new ChatService(()=>root,()=>null,()=>fakeClaude);
+  await restarted.send(p,null,'wait',null,root,undefined,null,false,'claude');
+  await waitFor(async()=>(await restarted.get(p,null)).messages.at(-1)?.status==='streaming');
+  await restarted.interrupt(p,null);await waitFor(async()=>(await restarted.get(p,null)).messages.at(-1)?.status==='interrupted');
+  expect((await restarted.get(p,null)).sessionId).toBe(session);
+  const records=(await readFile(log,'utf8')).trim().split('\n').map(line=>JSON.parse(line));
+  expect(records[1].args).toContain('--resume');expect(records[1].session).toBe(session);expect(records[1].prompt).toBe('wait');
+ }finally{delete process.env.FAKE_CLAUDE_LOG;await rm(root,{recursive:true,force:true})}
+});
+
+test('接続先を往復しても他 CLI のセッションを再開せず、本文の履歴だけ引き継ぐ',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'beni-provider-switch-')),p='019a0000-0000-7000-8000-000000000001',claudeLog=join(root,'claude.jsonl'),codexLog=join(root,'codex.jsonl');
+ process.env.FAKE_CLAUDE_LOG=claudeLog;process.env.FAKE_CODEX_LOG=codexLog;
+ try{
+  const chat=new ChatService(()=>root,()=>fake,()=>fakeClaude);
+  await chat.send(p,null,'Codex context','model-a',root);await waitFor(async()=>(await chat.get(p,null)).messages.at(-1)?.status==='completed');
+  await chat.send(p,null,'Claude question',null,root,undefined,null,false,'claude');await waitFor(async()=>(await chat.get(p,null)).messages.at(-1)?.status==='completed');
+  const claude=await chat.get(p,null);expect(claude.threadId).not.toBe('thread-1');expect(claude.selectedModel?.id).toBe('sonnet');
+  const invocation=JSON.parse((await readFile(claudeLog,'utf8')).trim());expect(invocation.args).toContain('--session-id');expect(invocation.args).not.toContain('--resume');expect(invocation.prompt).toContain('Codex context');expect(invocation.prompt).toContain('Hello');
+  await chat.send(p,null,'Codex returns',null,root);await waitFor(async()=>(await chat.get(p,null)).messages.at(-1)?.status==='completed');
+  const result=await chat.get(p,null);expect(result.messages.map(m=>m.provider)).toEqual(['codex','codex','claude','claude','codex','codex']);expect(result.messages[0]?.model).toBe('model-a');expect(result.messages[2]?.model).toBe('sonnet');
+  const records=(await readFile(codexLog,'utf8')).trim().split('\n').map(line=>JSON.parse(line));
+  expect(records.filter(record=>record.method==='thread/resume')).toHaveLength(0);expect(records.filter(record=>record.method==='thread/start')).toHaveLength(2);
+  const turn=records.filter(record=>record.method==='turn/start').at(-1);expect(turn.params.input[1].text).toContain('Claude question');expect(turn.params.input[1].text).not.toContain('sessionId');
+ }finally{delete process.env.FAKE_CLAUDE_LOG;delete process.env.FAKE_CODEX_LOG;await rm(root,{recursive:true,force:true})}
+});
+
+test('Claude のモデル拒否・切断を区別し、利用不可なら履歴を追加しない',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'beni-claude-reject-')),p='019a0000-0000-7000-8000-000000000001';
+ try{
+  const chat=new ChatService(()=>root,()=>null,()=>fakeClaude);
+  await expect(chat.send(p,null,'hello','missing',root,undefined,null,false,'claude')).rejects.toThrow('model unavailable');expect((await chat.get(p,null)).messages).toHaveLength(0);
+  await chat.send(p,null,'reject model','sonnet',root,undefined,null,false,'claude');await waitFor(async()=>(await chat.get(p,null)).messages.at(-1)?.status==='failed');expect((await chat.get(p,null)).messages.at(-1)?.errorCode).toBe('MODEL_UNAVAILABLE');
+  await chat.send(p,null,'reject','sonnet',root,undefined,null,false,'claude');await waitFor(async()=>(await chat.get(p,null)).messages.at(-1)?.status==='failed');expect((await chat.get(p,null)).messages.at(-1)?.errorCode).toBeUndefined();
+  await chat.send(p,null,'disconnect','sonnet',root,undefined,null,false,'claude');await waitFor(async()=>(await chat.get(p,null)).messages.at(-1)?.status==='unknown');
+  process.env.FAKE_CLAUDE_AUTH='api_key';await expect(chat.send(p,null,'hello','sonnet',root,undefined,null,false,'claude')).rejects.toThrow('unavailable');expect((await chat.get(p,null)).messages).toHaveLength(6);
+ }finally{delete process.env.FAKE_CLAUDE_AUTH;await rm(root,{recursive:true,force:true})}
+});
+
+test('Claude の複製で接続先とモデルを保持し、セッションを切り離して本文を再送する',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'beni-claude-clone-')),p='019a0000-0000-7000-8000-000000000001',log=join(root,'claude.jsonl');
+ process.env.FAKE_CLAUDE_LOG=log;
+ try{
+  const {rewriteConversation}=await import('./migration'),{writeFile}=await import('node:fs/promises');const chat=new ChatService(()=>root,()=>null,()=>fakeClaude);
+  await chat.send(p,null,'Saved Claude context','haiku',root,undefined,null,false,'claude');await waitFor(async()=>(await chat.get(p,null)).messages.at(-1)?.status==='completed');
+  const original=await chat.get(p,null),clone=await rewriteConversation(structuredClone(original),p,null,true);
+  expect(clone).toMatchObject({sessionProvider:'claude',threadId:null,sessionId:null,selectedModel:{id:'haiku',provider:'claude'}});expect(clone.messages[0]).toMatchObject({provider:'claude',model:'haiku',sessionId:null});
+  await writeFile(join(root,'.beni','chat','general.json'),JSON.stringify(clone));await chat.send(p,null,'Next question',null,root,undefined,null,false,'claude');await waitFor(async()=>(await chat.get(p,null)).messages.at(-1)?.status==='completed');
+  const records=(await readFile(log,'utf8')).trim().split('\n').map(line=>JSON.parse(line));expect(records[1].args).toContain('--session-id');expect(records[1].session).not.toBe(original.sessionId);expect(records[1].prompt).toContain('Saved Claude context');
+ }finally{delete process.env.FAKE_CLAUDE_LOG;await rm(root,{recursive:true,force:true})}
+});
+
+test('パックの接続先は検証とハッシュに反映し、既存 Codex ハッシュを変えない',async()=>{
+ const {packHash,validPack}=await import('../shared/communication');const pack={packId:'pack',sequence:1,messageId:'message',sendId:'send',role:'user' as const,kind:'text' as const,content:'Example',tool:null,model:null,createdAt:'2026-01-01T00:00:00.000Z',status:'completed' as const,state:'closed' as const};
+ expect(validPack({...pack,provider:'claude'})).toBe(true);expect(validPack({...pack,provider:'other'})).toBe(false);
+ expect(await packHash({...pack,provider:'codex'})).toBe(await packHash(pack));expect(await packHash({...pack,provider:'claude'})).not.toBe(await packHash(pack));
+});
+
+test('Claude は受理前にセッションとカーソルを保存せず、中断しても自動再送しない',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'beni-claude-accept-')),p='019a0000-0000-7000-8000-000000000001',t='019a0000-0000-7100-8000-000000000001',log=join(root,'claude.jsonl');
+ process.env.FAKE_CLAUDE_LOG=log;process.env.FAKE_CLAUDE_ACCEPT_DELAY_MS='500';
+ try{
+  const chat=new ChatService(()=>root,()=>null,()=>fakeClaude);chat.setTaskEvents({capture:()=>{},events:()=>({events:[{id:1,type:'document.updated',path:'requirements.md'}],lastEventId:1,through:1,hasMore:false})});
+  await chat.send(p,t,'hello','sonnet',root,undefined,'requirements',false,'claude');
+  await waitFor(async()=>{try{return (await readFile(log,'utf8')).includes('session')}catch{return false}});
+  const pending=await chat.get(p,t);expect(pending).toMatchObject({threadId:null,sessionId:null,lastEventId:0});expect(pending.messages.every(message=>message.sessionId===null&&message.threadId===null)).toBe(true);
+  await chat.interrupt(p,t);await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='interrupted');
+  expect(await chat.get(p,t)).toMatchObject({threadId:null,sessionId:null,lastEventId:0});
+  await Bun.sleep(30);expect((await readFile(log,'utf8')).trim().split('\n')).toHaveLength(1);
+  delete process.env.FAKE_CLAUDE_ACCEPT_DELAY_MS;
+  await chat.send(p,t,'Try again','sonnet',root,undefined,'requirements',false,'claude');await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='completed');
+  expect((await chat.get(p,t)).lastEventId).toBe(1);
+  const records=(await readFile(log,'utf8')).trim().split('\n').map(line=>JSON.parse(line));expect(records[1].args).toContain('--session-id');expect(records[1].args).not.toContain('--resume');expect(records[1].session).not.toBe(records[0].session);expect(records[1].prompt).toContain('"id":1');
+  const accepted=await chat.get(p,t);process.env.FAKE_CLAUDE_ACCEPT_DELAY_MS='500';
+  await chat.send(p,t,'Pending resume','sonnet',root,undefined,'requirements',false,'claude');await waitFor(async()=>(await readFile(log,'utf8')).trim().split('\n').length===3);
+  await chat.interrupt(p,t);await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='interrupted');expect(await chat.get(p,t)).toMatchObject({threadId:accepted.threadId,sessionId:accepted.sessionId,lastEventId:1});
+ }finally{delete process.env.FAKE_CLAUDE_LOG;delete process.env.FAKE_CLAUDE_ACCEPT_DELAY_MS;await rm(root,{recursive:true,force:true})}
+});
+
+test('Claude の受理前終了・モデル拒否では新規セッションや引継ぎ済みカーソルを残さない',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'beni-claude-early-exit-')),p='019a0000-0000-7000-8000-000000000001',t='019a0000-0000-7100-8000-000000000001';
+ try{
+  const chat=new ChatService(()=>root,()=>null,()=>fakeClaude);chat.setTaskEvents({capture:()=>{},events:()=>({events:[{id:1,type:'document.updated'}],lastEventId:1,through:1,hasMore:false})});
+  await chat.send(p,t,'early exit','sonnet',root,undefined,'requirements',false,'claude');await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='unknown');
+  expect(await chat.get(p,t)).toMatchObject({threadId:null,sessionId:null,lastEventId:0});expect((await chat.get(p,t)).messages).toHaveLength(2);
+  await chat.send(p,t,'reject model','sonnet',root,undefined,'requirements',false,'claude');await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='failed');
+  expect(await chat.get(p,t)).toMatchObject({threadId:null,sessionId:null,lastEventId:0});expect((await chat.get(p,t)).messages.at(-1)).toMatchObject({errorCode:'MODEL_UNAVAILABLE',sessionId:null,threadId:null});
+  await chat.send(p,t,'hello','sonnet',root,undefined,'requirements',false,'claude');await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='completed');
+  const accepted=await chat.get(p,t);expect(accepted.threadId).not.toBeNull();expect(accepted.lastEventId).toBe(1);
+ }finally{await rm(root,{recursive:true,force:true})}
+});
+
+test('Claude の存在しない再開セッションは明示失敗として残し、カーソルを進めない',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'beni-claude-missing-resume-')),p='019a0000-0000-7000-8000-000000000001',t='019a0000-0000-7100-8000-000000000001',log=join(root,'claude.jsonl');
+ process.env.FAKE_CLAUDE_LOG=log;
+ try{
+  const chat=new ChatService(()=>root,()=>null,()=>fakeClaude);let through=1;
+  chat.setTaskEvents({capture:()=>{},events:(_p,_t,after)=>({events:after<through?[{id:through,type:'document.updated'}]:[],lastEventId:through,through,hasMore:false})});
+  await chat.send(p,t,'hello','sonnet',root,undefined,'requirements',false,'claude');await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='completed');
+  const accepted=await chat.get(p,t);through=2;process.env.FAKE_CLAUDE_RESUME_MISSING='1';
+  await chat.send(p,t,'Next question','sonnet',root,undefined,'requirements',false,'claude');await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='failed');
+  expect(await chat.get(p,t)).toMatchObject({threadId:null,sessionId:null,lastEventId:1});expect((await chat.get(p,t)).messages).toHaveLength(4);
+  await Bun.sleep(30);const records=(await readFile(log,'utf8')).trim().split('\n').map(line=>JSON.parse(line));expect(records).toHaveLength(2);expect(records[1].args).toContain('--resume');expect(records[1].session).toBe(accepted.sessionId);expect(records[1].prompt).toContain('"id":2');
+  delete process.env.FAKE_CLAUDE_RESUME_MISSING;await chat.send(p,t,'Explicit retry','sonnet',root,undefined,'requirements',false,'claude');await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='completed');
+  const retried=(await readFile(log,'utf8')).trim().split('\n').map(line=>JSON.parse(line)).at(-1);expect(retried.args).toContain('--session-id');expect(retried.args).not.toContain('--resume');expect(retried.session).not.toBe(accepted.sessionId);expect(retried.prompt).toContain('Next question');expect(retried.prompt).toContain('"id":2');expect((await chat.get(p,t)).lastEventId).toBe(2);
+ }finally{delete process.env.FAKE_CLAUDE_LOG;delete process.env.FAKE_CLAUDE_RESUME_MISSING;await rm(root,{recursive:true,force:true})}
 });

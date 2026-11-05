@@ -2,7 +2,7 @@ import { api } from './api';
 import { object, packHash, validId, validPack, type Pack, type PackEntry, type PackHeader, type Scope, type TopicEvent } from '../shared/communication';
 
 const histories = new Map<string, Pack[]>();
-export const scopeQuery = (scope: Scope) => `projectId=${scope.projectId}${scope.taskId === null ? '' : `&taskId=${scope.taskId}`}`;
+export const scopeQuery = (scope: Scope) => `projectId=${scope.projectId}${scope.taskId === null ? '' : `&taskId=${scope.taskId}&phase=${scope.phase}`}`;
 
 // Confirmed packs survive tab switches; unconfirmed deltas belong to a subscription generation.
 export class ChatSync {

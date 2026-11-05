@@ -50,14 +50,15 @@ WS の接続、購読、イベント、エラーの契約を定義します。
 
 | topic | scope | イベント |
 | --- | --- | --- |
-| `chat` | `{projectId: string, taskId: string \| null}` | `chat.pack.delta`, `chat.pack.closed`, `chat.changed` |
+| `chat` | `{projectId: string, taskId: string \| null, phase?: string \| null}` | `chat.pack.delta`, `chat.pack.closed`, `chat.changed` |
+| `task-events` | `{projectId: string, taskId: string}` | `task.events.changed` |
 | `documents` | `{projectId: string, taskId: string}` | `documents.changed` |
 | `terminal` | `{projectId: string, taskId: null, terminalId?: string}` | `terminal.changed`, `terminal.state`, 画面同期・入出力イベント |
 
 チャットの一般会話は taskId を null にします。文書は具体的なタスクが必須です。ターミナルは terminalId を省略すると一覧、指定すると個別シェルを購読します。操作メッセージとイベントの詳細は [ターミナル通信](terminal.md) を参照してください。
 
 ```json
-{"type":"subscribe","subscriptionId":"s1","topic":"chat","scope":{"projectId":"019a5000-0000-7000-8000-000000000001","taskId":"019a5000-0000-7100-8000-000000000002"}}
+{"type":"subscribe","subscriptionId":"s1","topic":"chat","scope":{"projectId":"019a5000-0000-7000-8000-000000000001","taskId":"019a5000-0000-7100-8000-000000000002","phase":"requirements"}}
 ```
 
 ```json
@@ -154,3 +155,9 @@ FE は HTTP の ack でハッシュ照合を行います。未受信のパック
 FE は不正な応答または INTERNAL_ERROR を受けたときに接続をやり直します。安定した購読が30秒続かないままこれらの失敗が3回重なった場合は自動再試行を止め、ページ再読み込みを案内します。30秒以上の安定稼働後は失敗回数をリセットします。通常のネットワーク切断はこの回数制限に含めません。
 
 購読が一件もなくなった場合、FE は接続と再接続タイマーを閉じます。次に購読が必要になったときに接続を開きます。
+
+## フェーズ別チャットと変更履歴
+
+`chat` のscopeはタスク会話で `{projectId, taskId, phase}` とする。phaseは反省会を含む5フェーズの識別子で、Generalはnullまたは省略する。購読共有・キャッシュ・再接続の対象はphaseまで含めて分離する。`documents`・`terminal` のscopeにphaseは指定しない。
+
+`task-events` は `{projectId, taskId}` をscopeとし、タスク全体の変更を購読する。イベント名は `task.events.changed`、dataは `{lastEventId: number}`。通知を受けた画面はHTTPでタスクのフェーズと変更履歴を再取得する。通知本文に文書の過去版を載せない。

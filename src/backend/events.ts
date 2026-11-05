@@ -23,7 +23,7 @@ export function communicationSocket(topics:Record<string,TopicRegistration>) {
    if(typeof m.type==='string'&&m.type.startsWith('terminal.')){const subscription=ws.data.subscriptions.get(id);if(!validTerminalAction(m)){error(ws,'INVALID_MESSAGE','ターミナル操作を確認してください',id);return}if(!subscription?.message){error(ws,'NOT_FOUND','ターミナルの購読を確認してください',id);return}try{subscription.message(m)}catch(e){const status=(e as {status?:number}).status;error(ws,status===403?'FORBIDDEN':status===429?'LIMIT_EXCEEDED':'INVALID_MESSAGE','ターミナル操作を受け付けませんでした',id)}return}
    if(m.type!=='subscribe'){error(ws,'INVALID_MESSAGE','不明な操作です',id);return}
    if(typeof m.topic!=='string'||!Object.hasOwn(topics,m.topic)){error(ws,'UNKNOWN_TOPIC','不明な購読対象です',id);return}
-   if(!validScope(m.scope)){error(ws,'INVALID_MESSAGE','購読対象を確認してください',id);return}
+   if(!validScope(m.scope)||(m.topic==='chat'?(m.scope.taskId===null?m.scope.phase!=null:!m.scope.phase):m.scope.phase!==undefined)){error(ws,'INVALID_MESSAGE','購読対象を確認してください',id);return}
    if(ws.data.used.has(id)){error(ws,'SUBSCRIPTION_CONFLICT','使用済みの購読 ID です',id);return}
    // Bound both active subscriptions and used identifiers for the life of a socket.
    if(ws.data.used.size>=4096){release(ws);ws.close(1013,'Recycle subscriptions');return}if(ws.data.subscriptions.size>=32){error(ws,'LIMIT_EXCEEDED','購読数の上限です',id);return}

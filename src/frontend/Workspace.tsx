@@ -1,10 +1,12 @@
-import { batch, createEffect, createMemo, createSignal, onCleanup, onMount, Show } from 'solid-js';
+import { availableModels, chooseModel, loadModels, modelIsAvailable, modelLabel, modelScope, modelValue, providerReady, rejectModel, selectedModel as cachedModel } from './model-cache';
+import { batch, createEffect, createMemo, createSignal, For, onCleanup, onMount, Show, untrack } from 'solid-js';
 import { createStore, reconcile } from 'solid-js/store';
-import { api } from './api';
+import { api, ApiError } from './api';
+import { isTaskPhase, type TaskPhase } from '../shared/task-phase';
 import { communication } from './communication';
 import ChatPanel from './components/ChatPanel';
 import MarkdownPreview from './components/MarkdownPreview';
-import PhaseIndicator from './components/PhaseIndicator';
+import PhaseIndicator, { phaseDocuments } from './components/PhaseIndicator';
 import TabBar from './components/TabBar';
 import TreeView from './components/TreeView';
 import TerminalPanel from './components/TerminalPanel';
@@ -23,6 +25,22 @@ const documentId = (document: Document) => document.path ?? JSON.stringify([docu
 type DocumentTabs = { known: string[]; open: string[]; selected?: string };
 
 export default function Workspace(props: WorkspaceProps) {
+  const [chatBusy, setChatBusy] = createSignal(false);
+  const implementationScope = () => modelScope(detail()?.task.projectId ?? '', activeTask(), 'implementation-assignee');
+  const implementationModel = () => cachedModel(implementationScope());
+  const implementationAvailable = () => modelIsAvailable(implementationScope());
+  createEffect(() => {
+    const task = detail()?.task;
+    if (!task) return;
+    const scope = implementationScope();
+    void loadModels(false).catch(() => {});
+    untrack(() => { if (cachedModel(scope) && !modelIsAvailable(scope)) void loadModels(true, cachedModel(scope)?.provider).catch(() => {}); });
+  });
+  createEffect(() => {
+    if (!detail()) return;
+    const candidate = availableModels().find(item => providerReady(item.provider));
+    if (!implementationModel() && candidate) chooseModel(implementationScope(), candidate);
+  });
   const [detailState,setDetailState]=createStore<{value?:TaskDetail}>({});
   const detail=()=>detailState.value;
   const setDetail=(value:TaskDetail|undefined)=>setDetailState('value',value===undefined?undefined:reconcile(value,{key:'id'}));
@@ -70,8 +88,12 @@ export default function Workspace(props: WorkspaceProps) {
     const task = taskOptions().find(item => item.id === id);
     return task ? taskLabel(task) : 'タスク';
   };
+  const [advancing, setAdvancing] = createSignal(false);
+  const [phaseError, setPhaseError] = createSignal('');
+  createEffect(() => { activeTask(); setPhaseError(''); });
   const documents = createMemo(() => detail()?.documents ?? []);
-  const documentLabel = (document: Document) => documents().filter(item => item.name === document.name).length > 1 ? `${document.name} · v${document.version}` : document.name;
+  const documentName = (name: string) => phaseDocuments.find(item => item.name === name)?.label ?? name;
+  const documentLabel = (document: Document) => documents().filter(item => item.name === document.name).length > 1 ? `${documentName(document.name)} · v${document.version}` : documentName(document.name);
   const currentDocument = createMemo(() => documents().find(document => documentId(document) === activeDocument()));
 
   // URL changes select tabs without remounting this workspace or creating history.
@@ -115,7 +137,8 @@ export default function Workspace(props: WorkspaceProps) {
     const open = previous
       ? [...previous.open.filter(id => available.includes(id)), ...available.filter(id => !previous.known.includes(id))]
       : available;
-    const initialName = values.some(document => document.name === 'requirements.md') ? 'requirements.md' : values.some(document => document.name === '指示書.md') ? '指示書.md' : values[0]?.name;
+    const phaseDocument = phaseDocuments.find(item => item.phase === detail()?.task.phase)?.name;
+    const initialName = phaseDocument && values.some(document => document.name === phaseDocument) ? phaseDocument : values.some(document => document.name === 'requirements.md') ? 'requirements.md' : values.some(document => document.name === '指示書.md') ? '指示書.md' : values[0]?.name;
     const newest = values.filter(document => document.name === initialName).reduce<Document | undefined>(
       (latest, document) => !latest || document.version > latest.version ? document : latest, undefined,
     );
@@ -129,6 +152,7 @@ export default function Workspace(props: WorkspaceProps) {
     let active = true;
     let sequence = 0,fetching=false,reload=false;
     let unsubscribe: (() => void) | undefined;
+    let unsubscribeEvents: (() => void) | undefined;
     if (documentOwner !== taskId) {
       batch(() => { setDetail(undefined); restoreDocumentTabs(taskId); });
     }
@@ -142,11 +166,25 @@ export default function Workspace(props: WorkspaceProps) {
         const data = await api<TaskDetail>(`/api/tasks/${taskId}`);
         if (!active || request !== sequence || deletedTasks.has(taskId)) return;
         batch(() => {
+          const previousPhase = detail()?.task.phase;
           setDetail(data);
+          if (previousPhase !== undefined && previousPhase !== data.task.phase) props.onTaskChange?.(data.task.id, data.task);
+          setTasks(previous => previous.map(item => item.id === data.task.id ? data.task : item));
           setProjectId(data.task.projectId);
           adoptDocuments(taskId, data.documents);
+          if (previousPhase !== data.task.phase && data.task.phase === 'retrospective') {
+            const retrospective = data.documents.filter(item => item.name === 'retrospective.md').reduce<Document | undefined>((latest, item) => !latest || item.version > latest.version ? item : latest, undefined);
+            if (retrospective) openDocument(documentId(retrospective));
+          }
           setLoadError('');
         });
+        if (!unsubscribeEvents) {
+          unsubscribeEvents = communication.subscribe('task-events', { projectId: data.task.projectId, taskId }, {
+            subscribed: () => { if (active) void load(); },
+            event: () => { if (active) void load(); },
+            error: message => { if (active) setLoadError(message); },
+          });
+        }
         if (!unsubscribe) {
           unsubscribe = communication.subscribe('documents', { projectId: data.task.projectId, taskId }, {
             subscribed: () => { if (active) void load(); },
@@ -162,7 +200,7 @@ export default function Workspace(props: WorkspaceProps) {
       }while(reload&&active);fetching=false;
     };
     void load();
-    onCleanup(() => { active = false; sequence++; unsubscribe?.(); });
+    onCleanup(() => { active = false; sequence++; unsubscribe?.(); unsubscribeEvents?.(); });
   });
 
   async function renameTask(id: string, name: string) {
@@ -233,11 +271,40 @@ export default function Workspace(props: WorkspaceProps) {
             <Show when={loadError()}><div role="alert" class="alert alert-error text-sm">{loadError()}</div></Show>
             <Show when={loading() && !detail()}><p class="p-4 text-sm text-base-content/60">読み込み中...</p></Show>
             <Show when={detail() && detail()?.task.id === activeTask()}>
-              <PhaseIndicator phase={detail()!.task.phase} onRequirements={() => {
-                const document = documents().filter(item => (item.name === 'requirements.md' || item.name === '指示書.md')).reduce<Document | undefined>((latest, item) => !latest || item.version > latest.version ? item : latest, undefined);
-                if (document) openDocument(documentId(document));
+              <PhaseIndicator phase={detail()!.task.phase} advancing={advancing()} canStart={!!detail()?.canStart && implementationAvailable()} completed={detail()?.task.status === 'completed'} busy={chatBusy()} modelSelect={<select class="select select-bordered select-sm w-auto" style={{ 'field-sizing': 'content' }} aria-label="実装担当モデル" value={implementationModel() ? modelValue(implementationModel()!) : ''} disabled={advancing() || !availableModels().length} onChange={event => { const model = availableModels().find(item => modelValue(item) === event.currentTarget.value); if (model) chooseModel(implementationScope(), model); }}>
+                <Show when={implementationModel() && !implementationAvailable()}><option value={modelValue(implementationModel()!)} disabled>⚠️ {modelLabel(implementationModel()!.name, implementationModel()!.provider)}</option></Show>
+                <Show when={!implementationModel()}><option value="">未確認</option></Show>
+                <For each={availableModels().filter(item => implementationAvailable() || modelValue(item) !== (implementationModel() ? modelValue(implementationModel()!) : ''))}>{item => <option value={modelValue(item)} selected={modelValue(item) === (implementationModel() ? modelValue(implementationModel()!) : '')} disabled={!providerReady(item.provider)}>{modelLabel(item.name, item.provider)}</option>}</For>
+              </select>} onChange={async target => {
+                const current = detail(), requestedModel = implementationModel();
+                if (!current || advancing() || (target === 'start' && !implementationAvailable())) return;
+                setAdvancing(true); setPhaseError('');
+                try {
+                  const result = await api<Task>(`/api/tasks/${current.task.id}/${['start', 'stop', 'complete', 'reopen'].includes(target) ? target : 'phase'}`, {projectId: current.task.projectId, phase: current.task.phase, ...(target === 'start' ? {model: requestedModel?.id, provider: requestedModel?.provider ?? 'codex'} : ['stop', 'complete', 'reopen'].includes(target) ? {} : {target})});
+                  if (detail()?.task.id === current.task.id) {
+                    setDetail({...detail()!, task: result, canStart: false});
+                    setTasks(previous => previous.map(item => item.id === result.id ? result : item));
+                    props.onTaskChange?.(result.id, result);
+                    const next = phaseDocuments.find(item => item.phase === result.phase);
+                    const target = documents().filter(item => item.name === next?.name).reduce<Document | undefined>((latest, item) => !latest || item.version > latest.version ? item : latest, undefined);
+                    if (target) openDocument(documentId(target));
+                    const refreshed = await api<TaskDetail>(`/api/tasks/${current.task.id}`);
+                    if (alive && detail()?.task.id === current.task.id) {
+                      setDetail(refreshed);
+                      adoptDocuments(current.task.id, refreshed.documents);
+                    }
+                  }
+                } catch (error) {
+                  if (error instanceof ApiError && error.code === 'MODEL_UNAVAILABLE' && requestedModel) rejectModel(modelScope(current.task.projectId, current.task.id, 'implementation-assignee'), requestedModel.id, requestedModel.provider);
+                  if (error instanceof ApiError && error.status === 409) {
+                    try { const refreshed = await api<TaskDetail>(`/api/tasks/${current.task.id}`); if (alive && detail()?.task.id === current.task.id) { batch(() => { setDetail(refreshed); adoptDocuments(current.task.id, refreshed.documents); setTasks(previous => previous.map(item => item.id === refreshed.task.id ? refreshed.task : item)); }); props.onTaskChange?.(refreshed.task.id, refreshed.task); } } catch { /* 元のエラーを表示する。 */ }
+                  }
+                  if (alive && detail()?.task.id === current.task.id) setPhaseError(error instanceof Error ? error.message : 'フェーズを更新できませんでした');
+                }
+                finally { setAdvancing(false); }
               }} />
-              <ChatPanel projectId={detail()!.task.projectId} taskId={activeTask()} />
+              <Show when={phaseError()}><p role="alert" class="p-2 text-sm text-error">{phaseError()}</p></Show>
+              <Show when={isTaskPhase(detail()?.task.phase)}><ChatPanel readOnly={detail()?.task.phase === 'implementation' || detail()?.task.status === 'completed'} onBusyChange={setChatBusy} onModelUnavailable={(model, provider) => { if (detail()?.task.phase === 'implementation') rejectModel(implementationScope(), model, provider); }} projectId={detail()!.task.projectId} taskId={activeTask()} phase={isTaskPhase(detail()?.task.phase) ? detail()?.task.phase as TaskPhase : undefined} /></Show>
             </Show>
           </Show>
         </div>
@@ -252,7 +319,10 @@ export default function Workspace(props: WorkspaceProps) {
       <TabBar label="文書" tabs={openDocuments().map(id => { const document = documents().find(item => documentId(item) === id); return {id, label:document ? documentLabel(document) : id}; })} activeId={activeDocument()} onSelect={openDocument} onClose={closeDocument} left={toggle('文書ツリーを開閉', documentTreeOpen(), 'document-tree', () => setDocumentTreeOpen(value => !value), element => { documentTreeToggle = element; })} />
       <div class="relative flex min-h-0 flex-1 flex-col">
         <Show when={documentTreeOpen()}><TreeView id="document-tree" label="文書" nodes={documents().map(document => ({id:documentId(document),label:documentLabel(document)}))} onSelect={id => { openDocument(id); setDocumentTreeOpen(false); }} /></Show>
-        <Show when={currentDocument()}>{document => <MarkdownPreview content={document().content} />}</Show>
+        <Show when={currentDocument()}>{document => <MarkdownPreview content={document().content} documents={documents().map(item => item.name)} onDocument={name => {
+          const target = documents().find(item => item.name === name);
+          if (target) openDocument(documentId(target));
+        }} />}</Show>
       </div>
     </section>
   </section>;

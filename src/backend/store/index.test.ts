@@ -699,3 +699,169 @@ test('recovery discards an initial journal write interrupted before any source w
   expect(store.tasks().map(t=>t.id)).toEqual([t.id]);expect(existsSync(staged)).toBe(false);
  }finally{store.close();rmSync(f.root,{recursive:true,force:true})}
 });
+
+test('task history retains created, updated, renamed and deleted document versions across restart', () => {
+  const f = fixture(); let store = new Store(f.path);
+  try {
+    const p = store.createProject('Demo', f.folder), task = store.createTask(p.id, 'Task');
+    const folder = join(f.folder, '.beni', 'tasks', task.id);
+    const initial = store.taskEvents(p.id, task.id);
+    expect(initial.events.map(event => event.type)).toEqual(['document.created', 'document.created', 'document.created']);
+    expect(initial.events.every(event => event.sourcePhase === null)).toBe(true);
+    const original = initial.events.find(event => event.path === 'requirements.md')!;
+    writeFileSync(join(folder, 'requirements.md'), 'updated\r\n');
+    store.reconcileTaskDocuments(p.id, task.id);
+    const updated = store.taskEvents(p.id, task.id, initial.lastEventId).events[0]!;
+    expect(updated).toMatchObject({type: 'document.updated', previousVersion: original.version, path: 'requirements.md', sourcePhase: null});
+    renameSync(join(folder, 'requirements.md'), join(folder, 'notes.md'));
+    const renamed = store.taskEvents(p.id, task.id, updated.id).events[0]!;
+    expect(renamed).toMatchObject({type: 'document.renamed', previousPath: 'requirements.md', path: 'notes.md', version: updated.version});
+    rmSync(join(folder, 'notes.md'));
+    const deleted = store.taskEvents(p.id, task.id, renamed.id).events[0]!;
+    expect(deleted).toMatchObject({type: 'document.deleted', path: 'notes.md', version: updated.version});
+    store.close(); store = new Store(f.path);
+    expect(store.taskEvents(p.id, task.id).lastEventId).toBe(deleted.id);
+    expect(store.taskEventVersion(p.id, task.id, original.version!).content).toBe('# Task\n');
+    expect(store.taskEventVersion(p.id, task.id, deleted.version!).content).toBe('updated\r\n');
+  } finally { store.close(); rmSync(f.root, {recursive: true, force: true}); }
+});
+
+test('history pagination fixes through and validates unknown cursors and references', () => {
+  const f = fixture(), store = new Store(f.path);
+  try {
+    const p = store.createProject('Demo', f.folder), task = store.createTask(p.id, 'Task');
+    const first = store.taskEvents(p.id, task.id, 0, undefined, 1);
+    expect(first).toMatchObject({lastEventId: 1, through: 3, hasMore: true});
+    writeFileSync(join(f.folder, '.beni', 'tasks', task.id, 'extra.md'), 'later');
+    const next = store.taskEvents(p.id, task.id, first.lastEventId, first.through, 100);
+    expect(next.events.map(event => event.id)).toEqual([2, 3]);
+    expect(next).toMatchObject({lastEventId: 3, through: 3, hasMore: false});
+    expect(store.taskEvents(p.id, task.id, 3).events.map(event => event.id)).toEqual([4]);
+    expect(store.taskEvents(p.id, task.id, 3, 3).lastEventId).toBe(3);
+    for (const args of [[-1], [1.5], [0, 1.5], [3, 2], [0, undefined, 0], [0, undefined, 101]] as [number, number?, number?][]) expect(() => store.taskEvents(p.id, task.id, ...args)).toThrow('Invalid event cursor');
+    expect(() => store.taskEvents(p.id, task.id, 99)).toThrow('Unknown event cursor');
+    expect(() => store.taskEvents(p.id, task.id, 0, 99)).toThrow('Unknown event cursor');
+    expect(() => store.taskEventVersion(p.id, task.id, '../task.json')).toThrow('Invalid history version');
+    expect(() => store.taskEventVersion(p.id, task.id, '0'.repeat(64))).toThrow('Unknown history version');
+  } finally { store.close(); rmSync(f.root, {recursive: true, force: true}); }
+});
+
+test('ambiguous document moves stay separate events and phase transitions preserve history', () => {
+  const f = fixture(), store = new Store(f.path);
+  try {
+    const p = store.createProject('Demo', f.folder), task = store.createTask(p.id, 'Task'), folder = join(f.folder, '.beni', 'tasks', task.id);
+    writeFileSync(join(folder, 'one.md'), 'same'); writeFileSync(join(folder, 'two.md'), 'same');
+    const before = store.taskEvents(p.id, task.id).lastEventId;
+    renameSync(join(folder, 'one.md'), join(folder, 'three.md')); renameSync(join(folder, 'two.md'), join(folder, 'four.md'));
+    expect(store.taskEvents(p.id, task.id, before).events.map(event => event.type)).toEqual(['document.deleted', 'document.deleted', 'document.created', 'document.created']);
+    const start = store.taskEvents(p.id, task.id).lastEventId;
+    store.advanceTaskPhase(p.id, task.id, 'requirements');
+    store.advanceTaskPhase(p.id, task.id, 'documents', 'back');
+    expect(store.taskEvents(p.id, task.id, start).events).toMatchObject([
+      {type: 'phase.changed', from: 'requirements', to: 'documents', sourcePhase: 'requirements'},
+      {type: 'phase.changed', from: 'documents', to: 'requirements', sourcePhase: 'documents'}
+    ]);
+    // メタデータ更新後・履歴確定前に中断した状態も次の照合で取り込む。
+    const file = join(folder, 'task.json'), value = JSON.parse(readFileSync(file, 'utf8'));
+    writeFileSync(file, JSON.stringify({...value, phase: 'implementation-plan'}));
+    expect(store.taskEvents(p.id, task.id).events.at(-1)).toMatchObject({type: 'phase.changed', from: 'requirements', to: 'implementation-plan', sourcePhase: null});
+    expect(() => store.advanceTaskPhase(p.id, task.id, 'requirements')).toThrow('phase conflict');
+  } finally { store.close(); rmSync(f.root, {recursive: true, force: true}); }
+});
+
+test('history rejects linked or corrupted indexes, blobs and current documents', () => {
+  for (const target of ['index', 'blob', 'document', 'hardlink', 'snapshot', 'hash']) {
+    const f = fixture(), store = new Store(f.path);
+    try {
+      const p = store.createProject('Demo', f.folder), task = store.createTask(p.id, 'Task'), folder = join(f.folder, '.beni', 'tasks', task.id);
+      const history = join(folder, '.history'), initial = store.taskEvents(p.id, task.id), version = initial.events[0]!.version!;
+      const file = target === 'index' || target === 'snapshot' ? join(history, 'index.json') : target === 'document' ? join(folder, 'requirements.md') : join(history, 'versions', version + '.md');
+      const external = join(f.root, 'external'); writeFileSync(external, 'outside');
+      if (target === 'snapshot') {
+        const value = JSON.parse(readFileSync(file, 'utf8')); value.snapshot['requirements.md'] = '0'.repeat(64); writeFileSync(file, JSON.stringify(value));
+      } else if (target === 'hash') writeFileSync(file, 'corrupt');
+      else { rmSync(file); if (target === 'hardlink') linkSync(external, file); else symlinkSync(external, file); }
+      expect(() => store.taskEvents(p.id, task.id)).toThrow();
+      expect(readFileSync(external, 'utf8')).toBe('outside');
+    } finally { store.close(); rmSync(f.root, {recursive: true, force: true}); }
+  }
+});
+
+test('clone retains task history while detaching all phase conversations and their cursors', async () => {
+  const f = fixture(), store = new Store(f.path);
+  try {
+    const p = store.createProject('Demo', f.folder), task = store.createTask(p.id, 'Task');
+    const root = join(f.folder, '.beni'), chat = join(root, 'chat', task.id); mkdirSync(chat, {recursive: true});
+    const original = {
+      version: 1, id: 'conversation', projectId: p.id, taskId: task.id,
+      phase: 'requirements', lastEventId: 3, threadId: 'thread', sessionId: 'session',
+      messages: [{id: 'message', sendId: 'send', role: 'user', content: 'Example', provider: 'codex', model: null, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z', threadId: 'thread', sessionId: 'session', status: 'completed'}], packs: []
+    };
+    for (const phase of ['requirements', 'documents']) writeFileSync(join(chat, phase + '.json'), JSON.stringify({...original, phase, id: phase}));
+    const before = store.taskEvents(p.id, task.id), destination = join(f.root, 'clone'), clone = await cloneProject(f.folder, destination);
+    const clonedId = clone.tasks[task.id]!;
+    store.createProject('Clone', destination);
+    expect(store.taskEvents(clone.projectId, clonedId)).toEqual(before);
+    for (const phase of ['requirements', 'documents']) {
+      const value = JSON.parse(readFileSync(join(destination, '.beni', 'chat', clonedId, phase + '.json'), 'utf8'));
+      expect(value).toMatchObject({projectId: clone.projectId, taskId: clonedId, phase, lastEventId: 0, threadId: null, sessionId: null});
+      expect(value.id).not.toBe(phase);
+      expect(value.messages[0]).toMatchObject({threadId: null, sessionId: null});
+    }
+    // 旧会話と全フェーズの会話が併存していても削除対象はタスク内に閉じる。
+    writeFileSync(join(root, 'chat', task.id + '.json'), JSON.stringify(original));
+    store.deleteTask(p.id, task.id);
+    expect(existsSync(join(root, 'tasks', task.id))).toBe(false);
+    expect(existsSync(chat)).toBe(false);
+    expect(existsSync(join(root, 'chat', task.id + '.json'))).toBe(false);
+    expect(store.taskEvents(clone.projectId, clonedId)).toEqual(before);
+  } finally { store.close(); rmSync(f.root, {recursive: true, force: true}); }
+});
+
+test('phase chat deletion recovery restores uncommitted directories and rejects links', () => {
+  const f = fixture(), store = new Store(f.path);
+  try {
+    const p = store.createProject('Demo', f.folder), task = store.createTask(p.id, 'Task'), root = join(f.folder, '.beni');
+    const chat = join(root, 'chat', task.id); mkdirSync(chat, {recursive: true});
+    writeFileSync(join(chat, 'requirements.json'), '{}');
+    const staged = join(root, `.deleting-${task.id}`); mkdirSync(staged);
+    writeFileSync(join(staged, 'journal.json'), JSON.stringify({version: 1, projectId: p.id, taskId: task.id}));
+    renameSync(join(root, 'tasks', task.id), join(staged, 'task')); renameSync(chat, join(staged, 'chat'));
+    expect(store.tasks(p.id).map(value => value.id)).toEqual([task.id]);
+    expect(readFileSync(join(chat, 'requirements.json'), 'utf8')).toBe('{}');
+    const external = join(f.root, 'external.json'); writeFileSync(external, '{}');
+    symlinkSync(external, join(chat, 'documents.json'));
+    expect(() => store.deleteTask(p.id, task.id)).toThrow('Invalid metadata file');
+    expect(store.task(task.id)).not.toBeNull();
+    rmSync(join(chat, 'documents.json'));
+    // 確定済みジャーナルは残ったフェーズ会話を復元せず削除する。
+    mkdirSync(staged); writeFileSync(join(staged, 'committed.json'), JSON.stringify({version: 1, projectId: p.id, taskId: task.id}));
+    renameSync(join(root, 'tasks', task.id), join(staged, 'task')); renameSync(chat, join(staged, 'chat'));
+    expect(store.tasks(p.id)).toEqual([]); expect(existsSync(staged)).toBe(false);
+    expect(readFileSync(external, 'utf8')).toBe('{}');
+  } finally { store.close(); rmSync(f.root, {recursive: true, force: true}); }
+});
+
+test('history publishes blobs before its index and retries a failed commit without event gaps', async () => {
+  const f = fixture(), store = new Store(f.path), fs = await import('node:fs'), original = fs.renameSync;
+  let fault: ReturnType<typeof spyOn> | undefined;
+  try {
+    const p = store.createProject('Demo', f.folder), task = store.createTask(p.id, 'Task'), folder = join(f.folder, '.beni', 'tasks', task.id);
+    const before = store.taskEvents(p.id, task.id), index = join(folder, '.history', 'index.json'), saved = readFileSync(index, 'utf8');
+    writeFileSync(join(folder, 'extra.md'), 'new version');
+    fault = spyOn(fs, 'renameSync').mockImplementation((from, to) => {
+      if (String(to) === index) throw Error('simulated history commit failure');
+      return original(from, to);
+    });
+    expect(() => store.captureTaskHistory(p.id, task.id, 'documents')).toThrow('simulated history commit failure');
+    fault.mockRestore(); fault = undefined;
+    expect(readFileSync(index, 'utf8')).toBe(saved);
+    const crypto = await import('node:crypto'), version = crypto.createHash('sha256').update('new version').digest('hex');
+    expect(readFileSync(join(folder, '.history', 'versions', version + '.md'), 'utf8')).toBe('new version');
+    expect(() => store.taskEventVersion(p.id, task.id, version)).toThrow('Unknown history version');
+    // 中断時の一時本文はhash名を持たず、未完成でも公開履歴に影響しない。
+    writeFileSync(join(folder, '.history', 'versions', '.tmp-abandoned'), 'partial');
+    store.captureTaskHistory(p.id, task.id, 'documents');
+    expect(store.taskEvents(p.id, task.id, before.lastEventId).events).toMatchObject([{id: before.lastEventId + 1, type: 'document.created', path: 'extra.md', sourcePhase: 'documents', version}]);
+  } finally { fault?.mockRestore(); store.close(); rmSync(f.root, {recursive: true, force: true}); }
+});
