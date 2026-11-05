@@ -9,9 +9,7 @@
     "typecheck": "tsc -p tsconfig.json",
     "build:ui": "bun run typecheck && vite build",
     "build": "bun run build:ui && bun run build:css",
-    "test:ui": "node --conditions=browser ./node_modules/vitest/vitest.mjs run --config vitest.config.ts",
-    "migrate:data": "bun src/backend/data-cli.ts migrate",
-    "clone:project": "bun src/backend/data-cli.ts clone"
+    "test:ui": "node --conditions=browser ./node_modules/vitest/vitest.mjs run --config vitest.config.ts"
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.11.0",

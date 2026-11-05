@@ -104,12 +104,12 @@ test('failure, rejection and interrupted packs remain visible and recover on res
   await chat.send('019a0000-0000-7000-8000-000000000003',null,'wait',null,'/tmp');await waitFor(async()=>(await chat.get('019a0000-0000-7000-8000-000000000003',null)).messages[1].status==='streaming');const restarted=new ChatService(p=>projectFolder(root,p),()=>fake);await restarted.send('019a0000-0000-7000-8000-000000000003',null,'hello',null,'/tmp');await waitFor(async()=>(await restarted.get('019a0000-0000-7000-8000-000000000003',null)).messages[3].status==='completed');const packs=(await restarted.get('019a0000-0000-7000-8000-000000000003',null)).packs;expect(packs[1]).toMatchObject({status:'unknown',state:'closed'});expect(packs.every(p=>p.state==='closed')).toBe(true);await chat.interrupt('019a0000-0000-7000-8000-000000000003',null);await Bun.sleep(30);
  }finally{await rm(root,{recursive:true,force:true})}
 });
-test('legacy saved histories gain stable persisted packs without losing text',async()=>{
- const root=await mkdtemp(join(tmpdir(),'beni-pack-legacy-'));try{
-  const {writeFile,mkdir}=await import('node:fs/promises');await mkdir(join(projectFolder(root,'019a0000-0000-7000-8000-000000000001'),'.beni','chat'),{recursive:true});const message={id:'legacy-message',sendId:'legacy-send',role:'assistant' as const,content:'Previous history',provider:'codex' as const,model:null,createdAt:'2026-01-01T00:00:00Z',updatedAt:'2026-01-01T00:00:00Z',status:'completed' as const,threadId:null,sessionId:null};await writeFile(join(root,'019a0000-0000-7000-8000-000000000001','.beni','chat','general.json'),JSON.stringify({version:1,id:'conversation',projectId:'019a0000-0000-7000-8000-000000000001',taskId:null,threadId:null,sessionId:null,messages:[message]}));
-  const chat=new ChatService(p=>projectFolder(root,p),()=>fake);const c=await chat.get('019a0000-0000-7000-8000-000000000001',null);expect(c.messages).toEqual([message]);expect(c.packs[0]).toMatchObject({packId:'legacy-message:legacy',content:'Previous history',state:'closed'});expect(JSON.parse(await readFile(join(root,'019a0000-0000-7000-8000-000000000001','.beni','chat','general.json'),'utf8')).packs).toEqual(c.packs);expect((await new ChatService(p=>projectFolder(root,p),()=>fake).get('019a0000-0000-7000-8000-000000000001',null)).packs).toEqual(c.packs);
-  const {Store}=await import('./store/index');const {createHandler}=await import('./server');const {packHash}=await import('../shared/communication');const store=new Store(':memory:');const {writeJson,newMetadata}=await import('./data');writeJson(join(projectFolder(root,'019a0000-0000-7000-8000-000000000001'),'.beni','project.json'),{...newMetadata('project','Example'),id:'019a0000-0000-7000-8000-000000000001'});store.createProject('Example',projectFolder(root,'019a0000-0000-7000-8000-000000000001'));const handle=createHandler(store,'/tmp',chat);const id=encodeURIComponent(c.packs[0].packId);try{const response=await handle(new Request(`http://127.0.0.1:3210/api/chat/packs/${id}?projectId=019a0000-0000-7000-8000-000000000001`));expect(response.status).toBe(200);expect((await response.json()).pack).toEqual(c.packs[0]);const ack=await handle(new Request(`http://127.0.0.1:3210/api/chat/packs/${id}/ack`,{method:'POST',headers:{origin:'http://127.0.0.1:3210','content-type':'application/json'},body:JSON.stringify({projectId:'019a0000-0000-7000-8000-000000000001',taskId:null,hash:await packHash(c.packs[0])})}));expect(await ack.json()).toEqual({matched:true});expect((await handle(new Request('http://127.0.0.1:3210/api/chat/packs/%XX?projectId=019a0000-0000-7000-8000-000000000001'))).status).toBe(400)}finally{store.close()}
-
+test('パックのない旧履歴は変換せず拒否する',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'beni-old-packs-')),p='019a0000-0000-7000-8000-000000000001';
+ try{
+  const {writeFile,mkdir}=await import('node:fs/promises'),folder=join(root,'.beni','chat'),path=join(folder,'general.json');await mkdir(folder,{recursive:true});
+  const bytes=JSON.stringify({version:1,id:'conversation',projectId:p,taskId:null,threadId:null,sessionId:null,messages:[]});await writeFile(path,bytes);
+  const chat=new ChatService(()=>root,()=>fake);await expect(chat.get(p,null)).rejects.toThrow('Invalid history');expect(await readFile(path,'utf8')).toBe(bytes);
  }finally{await rm(root,{recursive:true,force:true})}
 });
 
@@ -183,15 +183,14 @@ test('フェーズ別の会話・パック・通知を分離し、タスク全�
  }finally{stop();stopDocuments();await rm(root,{recursive:true,force:true})}
 });
 
-test('旧タスク会話を検証して要件定義へ移行し、競合やリンクは破壊しない',async()=>{
- const root=await mkdtemp(join(tmpdir(),'beni-phase-migration-'));const p='019a0000-0000-7000-8000-000000000001',t='019a0000-0000-7100-8000-000000000001';
- const {mkdir,writeFile,lstat,symlink}=await import('node:fs/promises');const folder=join(root,'.beni','chat');
+test('旧タスク会話は移行せず、フェーズ別会話を独立して保存する',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'beni-old-chat-'));const p='019a0000-0000-7000-8000-000000000001',t='019a0000-0000-7100-8000-000000000001';
+ const {mkdir,writeFile}=await import('node:fs/promises');const folder=join(root,'.beni','chat');
  try{
-  await mkdir(folder,{recursive:true});const old=join(folder,`${t}.json`);const legacy={version:1,id:'legacy',projectId:p,taskId:t,threadId:'old-thread',sessionId:'old-session',messages:[],packs:[]};await writeFile(old,JSON.stringify(legacy));
-  const chat=new ChatService(()=>root,()=>fake);expect((await chat.get(p,t,'documents')).messages).toEqual([]);const migrated=await chat.get(p,t);expect(migrated).toMatchObject({...legacy,phase:'requirements',lastEventId:0});await expect(lstat(old)).rejects.toThrow();
-  await writeFile(old,JSON.stringify(legacy));expect(await chat.get(p,t)).toEqual(migrated);await expect(lstat(old)).rejects.toThrow();
-  await writeFile(old,JSON.stringify({...legacy,id:'conflict'}));await expect(chat.get(p,t,'implementation')).rejects.toThrow('Chat migration conflict');expect(JSON.parse(await readFile(old,'utf8')).id).toBe('conflict');expect(JSON.parse(await readFile(join(folder,t,'requirements.json'),'utf8')).id).toBe('legacy');
-  await rm(old);await symlink(join(folder,t,'requirements.json'),old);await expect(chat.get(p,t)).rejects.toThrow('Invalid metadata file');
+  await mkdir(folder,{recursive:true});const old=join(folder,`${t}.json`),bytes=JSON.stringify({version:1,id:'old',projectId:p,taskId:t,threadId:'old-thread',sessionId:'old-session',messages:[],packs:[]});await writeFile(old,bytes);
+  const chat=new ChatService(()=>root,()=>fake);for(const phase of ['requirements','documents','implementation','retrospective'] as const)expect((await chat.get(p,t,phase)).messages).toEqual([]);
+  await chat.send(p,t,'hello',null,root);await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='completed');
+  expect(await readFile(old,'utf8')).toBe(bytes);expect(JSON.parse(await readFile(join(folder,t,'requirements.json'),'utf8')).messages).toHaveLength(2);
  }finally{await rm(root,{recursive:true,force:true})}
 });
 
@@ -326,19 +325,6 @@ test('Claude のモデル拒否・切断を区別し、利用不可なら履歴�
   await chat.send(p,null,'disconnect','sonnet',root,undefined,null,false,'claude');await waitFor(async()=>(await chat.get(p,null)).messages.at(-1)?.status==='unknown');
   process.env.FAKE_CLAUDE_AUTH='api_key';await expect(chat.send(p,null,'hello','sonnet',root,undefined,null,false,'claude')).rejects.toThrow('unavailable');expect((await chat.get(p,null)).messages).toHaveLength(6);
  }finally{delete process.env.FAKE_CLAUDE_AUTH;await rm(root,{recursive:true,force:true})}
-});
-
-test('Claude の複製で接続先とモデルを保持し、セッションを切り離して本文を再送する',async()=>{
- const root=await mkdtemp(join(tmpdir(),'beni-claude-clone-')),p='019a0000-0000-7000-8000-000000000001',log=join(root,'claude.jsonl');
- process.env.FAKE_CLAUDE_LOG=log;
- try{
-  const {rewriteConversation}=await import('./migration'),{writeFile}=await import('node:fs/promises');const chat=new ChatService(()=>root,()=>null,()=>fakeClaude);
-  await chat.send(p,null,'Saved Claude context','haiku',root,undefined,null,false,'claude');await waitFor(async()=>(await chat.get(p,null)).messages.at(-1)?.status==='completed');
-  const original=await chat.get(p,null),clone=await rewriteConversation(structuredClone(original),p,null,true);
-  expect(clone).toMatchObject({sessionProvider:'claude',threadId:null,sessionId:null,selectedModel:{id:'haiku',provider:'claude'}});expect(clone.messages[0]).toMatchObject({provider:'claude',model:'haiku',sessionId:null});
-  await writeFile(join(root,'.beni','chat','general.json'),JSON.stringify(clone));await chat.send(p,null,'Next question',null,root,undefined,null,false,'claude');await waitFor(async()=>(await chat.get(p,null)).messages.at(-1)?.status==='completed');
-  const records=(await readFile(log,'utf8')).trim().split('\n').map(line=>JSON.parse(line));expect(records[1].args).toContain('--session-id');expect(records[1].session).not.toBe(original.sessionId);expect(records[1].prompt).toContain('Saved Claude context');
- }finally{delete process.env.FAKE_CLAUDE_LOG;await rm(root,{recursive:true,force:true})}
 });
 
 test('パックの接続先は検証とハッシュに反映し、既存 Codex ハッシュを変えない',async()=>{

@@ -1,11 +1,10 @@
 import { test, expect, spyOn } from 'bun:test';
 import { Store } from './index';
 import { Database } from 'bun:sqlite';
-import { cpSync, linkSync, symlinkSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, renameSync, rmSync, existsSync } from 'node:fs';
+import { cpSync, linkSync, symlinkSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, readdirSync, renameSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { generateId, validProjectId, validTaskId } from '../../shared/ids';
-import { cloneProject, migrateData } from '../migration';
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'beni-store-'));
   const folder = join(root, 'project');
@@ -48,17 +47,12 @@ test('canonical metadata persists tasks and recovers documents idempotently', ()
     });
   }
 });
-test('moves preserve IDs and live duplicates require explicit clone', async () => {
+test('moves preserve IDs and live duplicate project IDs are rejected', () => {
   const f = fixture();
   try {
     const store = new Store(f.path),
       p = store.createProject('Demo', f.folder),
       t = store.createTask(p.id, 'Task');
-    const copy = join(f.root, 'copy');
-    const clone = await cloneProject(f.folder, copy);
-    expect(clone.projectId).not.toBe(p.id);
-    expect(clone.tasks[t.id]).not.toBe(t.id);
-    store.createProject('Copy', copy);
     const duplicate = join(f.root, 'duplicate');
     cpSync(f.folder, duplicate, {
       recursive: true
@@ -67,7 +61,8 @@ test('moves preserve IDs and live duplicates require explicit clone', async () =
     const moved = join(f.root, 'moved');
     renameSync(f.folder, moved);
     expect(store.createProject('Ignored', moved).id).toBe(p.id);
-    expect(store.projects().length).toBe(2);
+    expect(store.projects().length).toBe(1);
+    expect(store.tasks(p.id).map(task => task.id)).toEqual([t.id]);
     store.close();
   } finally {
     rmSync(f.root, {
@@ -76,74 +71,19 @@ test('moves preserve IDs and live duplicates require explicit clone', async () =
     });
   }
 });
-test('legacy store refuses startup; offline migration preserves bytes and history', async () => {
+test('legacy store refuses startup without changing existing data', () => {
   const f = fixture();
   try {
     const db = new Database(f.path);
-    db.exec(`CREATE TABLE projects(id INTEGER PRIMARY KEY,name TEXT,folder TEXT);CREATE TABLE tasks(id INTEGER PRIMARY KEY,project_id INTEGER,name TEXT,phase TEXT,status TEXT);CREATE TABLE messages(id INTEGER PRIMARY KEY,project_id INTEGER,task_id INTEGER,role TEXT,content TEXT);CREATE TABLE documents(id INTEGER PRIMARY KEY,task_id INTEGER,kind TEXT,version INTEGER,content TEXT);`);
-    db.query('INSERT INTO projects VALUES (1,?,?)').run('Demo', f.folder);
-    db.exec("INSERT INTO tasks VALUES (2,1,'Task','requirements','idle');INSERT INTO messages VALUES (1,1,2,'user','history');INSERT INTO documents VALUES (1,2,'requirements',1,'old');");
+    db.exec('CREATE TABLE projects(id INTEGER PRIMARY KEY,name TEXT,folder TEXT);CREATE TABLE tasks(id INTEGER PRIMARY KEY,project_id INTEGER,name TEXT,phase TEXT,status TEXT)');
+    db.query('INSERT INTO projects VALUES(1,?,?)').run('Demo', f.folder);
+    db.exec("INSERT INTO tasks VALUES(2,1,'Task','requirements','idle')");
     db.close();
-    mkdirSync(join(f.folder, '.beni', 'tasks', '2'), {
-      recursive: true
-    });
-    writeFileSync(join(f.folder, '.beni', 'tasks', '2', 'requirements.md'), 'current\r\n');
-    mkdirSync(join(f.root, 'chat'));
-    const conversation = {
-      version: 1,
-      id: 'history-id',
-      projectId: 1,
-      taskId: 2,
-      threadId: 'thread',
-      sessionId: 'session',
-      messages: [{
-        id: 'message',
-        sendId: 'send',
-        provider: 'codex',
-        model: null,
-        createdAt: '2026-01-01T00:00:00.000Z',
-        updatedAt: '2026-01-01T00:00:00.000Z',
-        threadId: 'thread',
-        sessionId: 'session',
-        role: 'assistant',
-        content: 'current',
-        status: 'unknown'
-      }],
-      packs: [{
-        packId: 'pack',
-        sequence: 1,
-        messageId: 'message',
-        sendId: 'send',
-        role: 'assistant',
-        kind: 'text',
-        content: 'exact',
-        tool: null,
-        model: null,
-        createdAt: '2026-01-01T00:00:00.000Z',
-        status: 'unknown',
-        state: 'closed'
-      }]
-    };
-    writeFileSync(join(f.root, 'chat', '1-2.json'), JSON.stringify(conversation));
-    expect(() => new Store(f.path)).toThrow('migrate:data');
-    await migrateData(f.root);
-    await migrateData(f.root);
-    const store = new Store(f.path),
-      task = store.tasks()[0]!;
-    expect(readFileSync(join(f.folder, '.beni', 'tasks', task.id, 'requirements.md'), 'utf8')).toBe('current\r\n');
-    const migrated = JSON.parse(readFileSync(join(f.folder, '.beni', 'chat', task.id + '.json'), 'utf8'));
-    expect(migrated.packs).toEqual(conversation.packs);
-    expect(migrated.messages).toEqual(conversation.messages);
-    expect(migrated.threadId).toBe('thread');
-    expect(JSON.parse(readFileSync(join(f.folder, '.beni', 'legacy-history.json'), 'utf8')).messages[0].content).toBe('history');
-    expect(existsSync(join(f.root, 'migrations', 'v1', 'backup', 'beni.sqlite'))).toBe(true);
-    store.close();
-  } finally {
-    rmSync(f.root, {
-      recursive: true,
-      force: true
-    });
-  }
+    const before = readFileSync(f.path);
+    expect(() => new Store(f.path)).toThrow('Legacy data is unsupported');
+    expect(readFileSync(f.path)).toEqual(before);
+    expect(readdirSync(f.root).sort()).toEqual(['beni.sqlite', 'project']);
+  } finally { rmSync(f.root, {recursive: true, force: true}); }
 });
 test('invalid and future metadata and unsafe orphan files are never rewritten', () => {
   const f = fixture();
@@ -181,404 +121,6 @@ test('invalid and future metadata and unsafe orphan files are never rewritten', 
     });
   }
 });
-test('interrupted migration reuses journal IDs and refuses changed source rows', async () => {
-  const f = fixture();
-  try {
-    const db = new Database(f.path);
-    db.exec('CREATE TABLE projects(id INTEGER PRIMARY KEY,name TEXT,folder TEXT);CREATE TABLE tasks(id INTEGER PRIMARY KEY,project_id INTEGER,name TEXT,phase TEXT,status TEXT);CREATE TABLE messages(id INTEGER PRIMARY KEY,project_id INTEGER,task_id INTEGER,role TEXT,content TEXT);CREATE TABLE documents(id INTEGER PRIMARY KEY,task_id INTEGER,kind TEXT,version INTEGER,content TEXT)');
-    db.query('INSERT INTO projects VALUES(1,?,?)').run('Demo', f.folder);
-    db.exec("INSERT INTO tasks VALUES(2,1,'Task','requirements','idle')");
-    mkdirSync(join(f.root, 'chat'));
-    writeFileSync(join(f.root, 'chat', '1-general.json'), JSON.stringify({
-      version: 1,
-      id: 'c',
-      projectId: 1,
-      taskId: null,
-      messages: [],
-      packs: [],
-      threadId: null,
-      sessionId: null
-    }));
-    mkdirSync(join(f.folder, '.beni', 'chat'), {
-      recursive: true
-    });
-    const collision = join(f.folder, '.beni', 'chat', 'general.json');
-    writeFileSync(collision, '{"preserve":true}');
-    await expect(migrateData(f.root)).rejects.toThrow('collision');
-    const journalPath = join(f.root, 'migrations', 'v1', 'journal.json'),
-      journal = JSON.parse(readFileSync(journalPath, 'utf8'));
-    expect(JSON.parse(readFileSync(collision, 'utf8'))).toEqual({
-      preserve: true
-    });
-    db.exec("UPDATE tasks SET name='Changed'");
-    await expect(migrateData(f.root)).rejects.toThrow('database changed');
-    db.exec("UPDATE tasks SET name='Task'");
-    db.close();
-    const originalChat = readFileSync(join(f.root, 'chat', '1-general.json'), 'utf8');
-    writeFileSync(join(f.root, 'chat', '1-general.json'), originalChat + ' ');
-    await expect(migrateData(f.root)).rejects.toThrow('Legacy chat changed');
-    expect(readFileSync(join(f.root, 'chat', '1-general.json'), 'utf8')).toBe(originalChat + ' ');
-    writeFileSync(join(f.root, 'chat', '1-general.json'), originalChat);
-    const originalJournal = readFileSync(journalPath, 'utf8');
-    writeFileSync(journalPath, JSON.stringify({
-      ...journal,
-      version: 2
-    }));
-    await expect(migrateData(f.root)).rejects.toThrow('invalid migration journal');
-    expect(JSON.parse(readFileSync(journalPath, 'utf8')).version).toBe(2);
-    writeFileSync(journalPath, originalJournal);
-    rmSync(collision);
-    await migrateData(f.root);
-    const store = new Store(f.path);
-    expect(store.tasks()[0]!.id).toBe(journal.tasks['2']);
-    expect(JSON.parse(readFileSync(journalPath, 'utf8')).complete).toBe(true);
-    store.close();
-  } finally {
-    rmSync(f.root, {
-      recursive: true,
-      force: true
-    });
-  }
-});
-test('migration retries after verified numeric source removal before SQLite cutover', async () => {
-  const f = fixture();
-  let transactionSpy: ReturnType<typeof spyOn> | undefined;
-  try {
-    const db = new Database(f.path);
-    db.exec('CREATE TABLE projects(id INTEGER PRIMARY KEY,name TEXT,folder TEXT);CREATE TABLE tasks(id INTEGER PRIMARY KEY,project_id INTEGER,name TEXT,phase TEXT,status TEXT);CREATE TABLE messages(id INTEGER PRIMARY KEY,project_id INTEGER,task_id INTEGER,role TEXT,content TEXT);CREATE TABLE documents(id INTEGER PRIMARY KEY,task_id INTEGER,kind TEXT,version INTEGER,content TEXT)');
-    db.query('INSERT INTO projects VALUES(1,?,?)').run('Demo', f.folder);
-    db.exec("INSERT INTO tasks VALUES(2,1,'Task','requirements','idle')");
-    db.close();
-    const old = join(f.folder, '.beni', 'tasks', '2');
-    mkdirSync(old, {
-      recursive: true
-    });
-    writeFileSync(join(old, 'requirements.md'), 'verified bytes');
-    mkdirSync(join(f.root, 'chat'));
-    const chat = await richConversation(2);
-    writeFileSync(join(f.root, 'chat', '1-2.json'), JSON.stringify(chat));
-    writeFileSync(join(f.root, 'chat', 'unmatched.json'), 'untouched');
-    transactionSpy = spyOn(Database.prototype, 'transaction').mockImplementationOnce(() => {
-      throw Error('simulated cutover interruption');
-    });
-    await expect(migrateData(f.root)).rejects.toThrow('simulated cutover interruption');
-    transactionSpy.mockRestore();
-    transactionSpy = undefined;
-    expect(existsSync(old)).toBe(false);
-    expect(existsSync(join(f.root, 'chat', '1-2.json'))).toBe(false);
-    expect(readFileSync(join(f.root, 'chat', 'unmatched.json'), 'utf8')).toBe('untouched');
-    expect(() => new Store(f.path)).toThrow('Legacy data');
-    const journal = JSON.parse(readFileSync(join(f.root, 'migrations', 'v1', 'journal.json'), 'utf8'));
-    await migrateData(f.root);
-    const store = new Store(f.path);
-    expect(store.tasks()[0]!.id).toBe(journal.tasks['2']);
-    expect(JSON.parse(readFileSync(join(f.folder, '.beni', 'chat', journal.tasks['2'] + '.json'), 'utf8')).packs).toEqual(chat.packs);
-    expect(readFileSync(join(f.folder, '.beni', 'tasks', journal.tasks['2'], 'requirements.md'), 'utf8')).toBe('verified bytes');
-    store.close();
-  } finally {
-    transactionSpy?.mockRestore();
-    rmSync(f.root, {
-      recursive: true,
-      force: true
-    });
-  }
-});
-function legacyFixture() {
-  const f = fixture(),
-    db = new Database(f.path);
-  db.exec('CREATE TABLE projects(id INTEGER PRIMARY KEY,name TEXT,folder TEXT);CREATE TABLE tasks(id INTEGER PRIMARY KEY,project_id INTEGER,name TEXT,phase TEXT,status TEXT);CREATE TABLE messages(id INTEGER PRIMARY KEY,project_id INTEGER,task_id INTEGER,role TEXT,content TEXT);CREATE TABLE documents(id INTEGER PRIMARY KEY,task_id INTEGER,kind TEXT,version INTEGER,content TEXT)');
-  db.query('INSERT INTO projects VALUES(1,?,?)').run('Demo', f.folder);
-  db.exec("INSERT INTO tasks VALUES(2,1,'Task','requirements','idle')");
-  db.close();
-  mkdirSync(join(f.root, 'chat'));
-  return f;
-}
-async function richConversation(taskId: number | null) {
-  const time = '2026-01-01T00:00:00.000Z';
-  const messages = [{
-    id: 'user-message',
-    sendId: 'send',
-    role: 'user',
-    content: 'request',
-    provider: 'codex',
-    model: 'example-model',
-    createdAt: time,
-    updatedAt: time,
-    status: 'completed',
-    threadId: 'cli-thread',
-    sessionId: 'cli-session'
-  }, {
-    id: 'assistant-message',
-    sendId: 'send',
-    role: 'assistant',
-    content: 'partial answer',
-    provider: 'codex',
-    model: 'example-model',
-    createdAt: time,
-    updatedAt: time,
-    status: 'streaming',
-    threadId: 'cli-thread',
-    sessionId: 'cli-session'
-  }];
-  const packs: any[] = [{
-    packId: 'user-pack',
-    sequence: 1,
-    messageId: 'user-message',
-    sendId: 'send',
-    role: 'user',
-    kind: 'text',
-    content: 'request',
-    tool: null,
-    model: 'example-model',
-    createdAt: time,
-    status: 'completed',
-    state: 'closed'
-  }, {
-    packId: 'tool-pack',
-    sequence: 2,
-    messageId: 'assistant-message',
-    sendId: 'send',
-    role: 'assistant',
-    kind: 'tool',
-    content: 'exact tool bytes',
-    tool: {
-      name: 'example-tool',
-      input: '{"input":"value"}',
-      output: 'failed output'
-    },
-    model: 'example-model',
-    createdAt: time,
-    status: 'failed',
-    state: 'closed'
-  }, {
-    packId: 'partial-pack',
-    sequence: 3,
-    messageId: 'assistant-message',
-    sendId: 'send',
-    role: 'assistant',
-    kind: 'text',
-    content: 'partial answer',
-    tool: null,
-    model: 'example-model',
-    createdAt: time,
-    status: 'streaming',
-    state: 'streaming'
-  }];
-  const {
-    packHash
-  } = await import('../../shared/communication');
-  for (const pack of packs) pack.hash = await packHash(pack);
-  return {
-    version: 1,
-    id: taskId === null ? 'general-conversation' : 'task-conversation',
-    projectId: 1,
-    taskId,
-    threadId: 'cli-thread',
-    sessionId: 'cli-session',
-    messages,
-    packs
-  };
-}
-test('migration preserves general and task chat packs; clone detaches unfinished CLI sessions', async () => {
-  const f = legacyFixture();
-  try {
-    const general = await richConversation(null),
-      task = await richConversation(2),
-      generalBytes = JSON.stringify(general),
-      taskBytes = JSON.stringify(task);
-    writeFileSync(join(f.root, 'chat', '1-general.json'), generalBytes);
-    writeFileSync(join(f.root, 'chat', '1-2.json'), taskBytes);
-    await migrateData(f.root);
-    const store = new Store(f.path),
-      project = store.projects()[0]!,
-      migratedTask = store.tasks()[0]!;
-    for (const [name, original] of [['general.json', general], [migratedTask.id + '.json', task]] as const) {
-      const migrated = JSON.parse(readFileSync(join(f.folder, '.beni', 'chat', name), 'utf8'));
-      expect(migrated.projectId).toBe(project.id);
-      expect(migrated.taskId).toBe(name === 'general.json' ? null : migratedTask.id);
-      expect(migrated.id).toBe(original.id);
-      expect(migrated.packs).toEqual(original.packs);
-      expect(migrated.messages).toEqual(original.messages);
-      expect(migrated.threadId).toBe(original.threadId);
-      expect(migrated.sessionId).toBe(original.sessionId);
-    }
-    expect(existsSync(join(f.root, 'chat', '1-general.json'))).toBe(false);
-    expect(existsSync(join(f.root, 'chat', '1-2.json'))).toBe(false);
-    expect(readFileSync(join(f.root, 'migrations', 'v1', 'backup', 'chat', '1-general.json'), 'utf8')).toBe(generalBytes);
-    expect(readFileSync(join(f.root, 'migrations', 'v1', 'backup', 'chat', '1-2.json'), 'utf8')).toBe(taskBytes);
-    const destination = join(f.root, 'clone');
-    mkdirSync(destination);
-    writeFileSync(join(destination, 'existing-project.txt'), 'preserved');
-    const clone = await cloneProject(f.folder, destination);
-    expect(clone.projectId).not.toBe(project.id);
-    expect(clone.tasks[migratedTask.id]).not.toBe(migratedTask.id);
-    for (const filename of ['general.json', clone.tasks[migratedTask.id] + '.json']) {
-      const cloned = JSON.parse(readFileSync(join(destination, '.beni', 'chat', filename), 'utf8'));
-      expect(cloned.projectId).toBe(clone.projectId);
-      expect(cloned.threadId).toBe(null);
-      expect(cloned.sessionId).toBe(null);
-      expect(cloned.messages.every((m: any) => m.threadId === null && m.sessionId === null)).toBe(true);
-      expect(cloned.messages[1].status).toBe('unknown');
-      expect(cloned.packs.map((p: any) => p.packId)).toEqual(task.packs.map(p => p.packId));
-      expect(cloned.packs[1]).toEqual(task.packs[1]);
-      expect(cloned.packs[2]).toEqual({
-        ...task.packs[2],
-        status: 'unknown',
-        state: 'closed'
-      });
-    }
-    expect(readFileSync(join(destination, 'existing-project.txt'), 'utf8')).toBe('preserved');
-    store.close();
-  } finally {
-    rmSync(f.root, {
-      recursive: true,
-      force: true
-    });
-  }
-});
-test('mismatched chat scope and malformed message or pack history prevent migration cutover', async () => {
-  for (const invalid of ['scope', 'sendId', 'model', 'date', 'order', 'duplicate']) {
-    const f = legacyFixture();
-    try {
-      const conversation = await richConversation(2);
-      if (invalid === 'scope') conversation.projectId = 99;
-      if (invalid === 'sendId') (conversation.messages[0] as any).sendId = null;
-      if (invalid === 'model') (conversation.messages[0] as any).model = 42;
-      if (invalid === 'date') conversation.messages[0]!.createdAt = 'invalid';
-      if (invalid === 'order') conversation.packs[1].sequence = 8;
-      if (invalid === 'duplicate') conversation.packs[1].packId = conversation.packs[0].packId;
-      const original = JSON.stringify(conversation);
-      writeFileSync(join(f.root, 'chat', '1-2.json'), original);
-      await expect(migrateData(f.root)).rejects.toThrow();
-      expect(() => new Store(f.path)).toThrow('Legacy data');
-      expect(readFileSync(join(f.root, 'chat', '1-2.json'), 'utf8')).toBe(original);
-    } finally {
-      rmSync(f.root, {
-        recursive: true,
-        force: true
-      });
-    }
-  }
-});
-test('clone publishes only a fully validated .beni and leaves failed source and destination intact', async () => {
-  const f = fixture();
-  try {
-    const store = new Store(f.path),
-      project = store.createProject('Demo', f.folder),
-      task = store.createTask(project.id, 'Task');
-    const chatDirectory = join(f.folder, '.beni', 'chat');
-    mkdirSync(chatDirectory);
-    const chatPath = join(chatDirectory, task.id + '.json');
-    const valid: any = await richConversation(2);
-    Object.assign(valid, {
-      projectId: project.id,
-      taskId: task.id
-    });
-    const destination = join(f.root, 'destination');
-    mkdirSync(destination);
-    const existing = join(destination, 'existing.txt');
-    writeFileSync(existing, 'existing bytes');
-    for (const invalid of ['json', 'project-scope', 'task-scope']) {
-      const value = structuredClone(valid);
-      if (invalid === 'project-scope') value.projectId = generateId('project');
-      if (invalid === 'task-scope') value.taskId = generateId('task');
-      const bytes = invalid === 'json' ? '{ malformed original JSON' : JSON.stringify(value);
-      writeFileSync(chatPath, bytes);
-      const sourceMetadata = readFileSync(join(f.folder, '.beni', 'project.json'), 'utf8');
-      await expect(cloneProject(f.folder, destination)).rejects.toThrow();
-      expect(existsSync(join(destination, '.beni'))).toBe(false);
-      expect(readFileSync(existing, 'utf8')).toBe('existing bytes');
-      expect(readFileSync(chatPath, 'utf8')).toBe(bytes);
-      expect(readFileSync(join(f.folder, '.beni', 'project.json'), 'utf8')).toBe(sourceMetadata);
-      expect((await import('node:fs')).readdirSync(destination)).toEqual(['existing.txt']);
-    }
-    writeFileSync(chatPath, JSON.stringify(valid));
-    const cloned = await cloneProject(f.folder, destination);
-    expect(existsSync(join(destination, '.beni', 'project.json'))).toBe(true);
-    expect(JSON.parse(readFileSync(join(destination, '.beni', 'chat', cloned.tasks[task.id] + '.json'), 'utf8')).projectId).toBe(cloned.projectId);
-    expect(readFileSync(chatPath, 'utf8')).toBe(JSON.stringify(valid));
-    expect(readFileSync(existing, 'utf8')).toBe('existing bytes');
-    store.close();
-  } finally {
-    rmSync(f.root, {
-      recursive: true,
-      force: true
-    });
-  }
-});
-test('clone rejects missing source data and destination symlinks without creating metadata', async () => {
-  const f = fixture();
-  try {
-    const destination = join(f.root, 'destination');
-    mkdirSync(destination);
-    await expect(cloneProject(f.folder, destination)).rejects.toThrow();
-    expect(existsSync(join(f.folder, '.beni'))).toBe(false);
-    expect(existsSync(join(destination, '.beni'))).toBe(false);
-    const store = new Store(f.path);
-    store.createProject('Demo', f.folder);
-    const alias = join(f.root, 'alias');
-    symlinkSync(destination, alias);
-    await expect(cloneProject(f.folder, alias)).rejects.toThrow();
-    expect(existsSync(join(destination, '.beni'))).toBe(false);
-    symlinkSync(join(f.root, 'missing'), join(destination, '.beni'));
-    await expect(cloneProject(f.folder, destination)).rejects.toThrow();
-    expect((await import('node:fs')).lstatSync(join(destination, '.beni')).isSymbolicLink()).toBe(true);
-    store.close();
-  } finally {
-    rmSync(f.root, {
-      recursive: true,
-      force: true
-    });
-  }
-});
-test('clone rejects its source .beni as destination without changing source entries', async () => {
-  const f = fixture();
-  try {
-    const store = new Store(f.path),
-      project = store.createProject('Demo', f.folder);
-    store.createTask(project.id, 'Task');
-    const source = join(f.folder, '.beni'),
-      metadataPath = join(source, 'project.json'),
-      before = readFileSync(metadataPath, 'utf8'),
-      fs = await import('node:fs'),
-      entries = fs.readdirSync(source).sort();
-    await expect(cloneProject(f.folder, source)).rejects.toThrow('inside source data');
-    expect(fs.readdirSync(source).sort()).toEqual(entries);
-    expect(readFileSync(metadataPath, 'utf8')).toBe(before);
-    store.close();
-  } finally {
-    rmSync(f.root, {
-      recursive: true,
-      force: true
-    });
-  }
-});
-test('clone rejects source data reached through an ancestor alias before creating anything', async () => {
-  const f = fixture();
-  try {
-    const store = new Store(f.path),
-      project = store.createProject('Demo', f.folder);
-    store.createTask(project.id, 'Task');
-    const alias = join(f.root, 'alias');
-    symlinkSync(f.folder, alias);
-    const fs = await import('node:fs'),
-      source = join(f.folder, '.beni'),
-      before = fs.readdirSync(source).sort(),
-      bytes = readFileSync(join(source, 'project.json'), 'utf8');
-    for (const destination of [join(alias, '.beni'), join(alias, '.beni', 'new-destination')]) {
-      await expect(cloneProject(f.folder, destination)).rejects.toThrow('inside source data');
-      expect(fs.readdirSync(source).sort()).toEqual(before);
-      expect(readFileSync(join(source, 'project.json'), 'utf8')).toBe(bytes);
-    }
-    store.close();
-  } finally {
-    rmSync(f.root, {
-      recursive: true,
-      force: true
-    });
-  }
-});
-
 test('task rows expose canonical creation dates including unknown dates', () => {
   const f = fixture();
   const store = new Store(f.path);
@@ -691,11 +233,10 @@ test('task deletion rolls back filesystem failures before commit', async () => {
  }finally{fault?.mockRestore();store.close();rmSync(f.root,{recursive:true,force:true})}
 });
 
-test('recovery discards an initial journal write interrupted before any source was moved', async () => {
+test('recovery discards an initial journal write interrupted before any source was moved', () => {
  const f=fixture(),store=new Store(f.path);
  try {
   const p=store.createProject('Demo',f.folder),t=store.createTask(p.id,'Target'),staged=join(f.folder,'.beni',`.deleting-${t.id}`);mkdirSync(staged);writeFileSync(join(staged,'journal.json.tmp-00000000-0000-0000-0000-000000000000'),'{');
-  const clone=join(f.root,'clone');await expect(cloneProject(f.folder,clone)).rejects.toThrow('Pending task deletion');expect(existsSync(join(clone,'.beni'))).toBe(false);
   expect(store.tasks().map(t=>t.id)).toEqual([t.id]);expect(existsSync(staged)).toBe(false);
  }finally{store.close();rmSync(f.root,{recursive:true,force:true})}
 });
@@ -787,7 +328,7 @@ test('history rejects linked or corrupted indexes, blobs and current documents',
   }
 });
 
-test('clone retains task history while detaching all phase conversations and their cursors', async () => {
+test('task deletion removes legacy and all phase conversations while preserving other task history', () => {
   const f = fixture(), store = new Store(f.path);
   try {
     const p = store.createProject('Demo', f.folder), task = store.createTask(p.id, 'Task');
@@ -798,23 +339,14 @@ test('clone retains task history while detaching all phase conversations and the
       messages: [{id: 'message', sendId: 'send', role: 'user', content: 'Example', provider: 'codex', model: null, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z', threadId: 'thread', sessionId: 'session', status: 'completed'}], packs: []
     };
     for (const phase of ['requirements', 'documents']) writeFileSync(join(chat, phase + '.json'), JSON.stringify({...original, phase, id: phase}));
-    const before = store.taskEvents(p.id, task.id), destination = join(f.root, 'clone'), clone = await cloneProject(f.folder, destination);
-    const clonedId = clone.tasks[task.id]!;
-    store.createProject('Clone', destination);
-    expect(store.taskEvents(clone.projectId, clonedId)).toEqual(before);
-    for (const phase of ['requirements', 'documents']) {
-      const value = JSON.parse(readFileSync(join(destination, '.beni', 'chat', clonedId, phase + '.json'), 'utf8'));
-      expect(value).toMatchObject({projectId: clone.projectId, taskId: clonedId, phase, lastEventId: 0, threadId: null, sessionId: null});
-      expect(value.id).not.toBe(phase);
-      expect(value.messages[0]).toMatchObject({threadId: null, sessionId: null});
-    }
+    const remaining = store.createTask(p.id, 'Remaining'), before = store.taskEvents(p.id, remaining.id);
     // 旧会話と全フェーズの会話が併存していても削除対象はタスク内に閉じる。
     writeFileSync(join(root, 'chat', task.id + '.json'), JSON.stringify(original));
     store.deleteTask(p.id, task.id);
     expect(existsSync(join(root, 'tasks', task.id))).toBe(false);
     expect(existsSync(chat)).toBe(false);
     expect(existsSync(join(root, 'chat', task.id + '.json'))).toBe(false);
-    expect(store.taskEvents(clone.projectId, clonedId)).toEqual(before);
+    expect(store.taskEvents(p.id, remaining.id)).toEqual(before);
   } finally { store.close(); rmSync(f.root, {recursive: true, force: true}); }
 });
 

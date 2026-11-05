@@ -158,7 +158,7 @@ export function cleanDeletedTask(staged: string) {
   rmSync(staged, {recursive:true});
 }
 
-// フェーズ会話の隔離・複製では、管理外ファイルやリンクを巻き込まない。
+// フェーズ会話の隔離では、管理外ファイルやリンクを巻き込まない。
 export function validateChatDirectory(path: string) {
   directory(path);
   for (const name of readdirSync(path)) {

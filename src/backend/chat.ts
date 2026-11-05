@@ -2,11 +2,10 @@ import { projectKnowledge } from './documents';
 import { spawn, execFile, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { join } from 'node:path';
-import { rmSync, readFileSync } from 'node:fs';
-import { isDeepStrictEqual } from 'node:util';
+import { readFileSync } from 'node:fs';
 import { isTaskPhase, type TaskPhase } from '../shared/task-phase';
 import { randomUUID } from 'node:crypto';
-import { directory, projectRoot, readJson, writeJson, pathExists } from './data';
+import { directory, projectRoot, readJson, writeJson } from './data';
 import { validProjectId, validTaskId } from '../shared/ids';
 import { packHash, packHeader, validPack, isProvider, type Provider, type Pack, type TopicEvent } from '../shared/communication';
 
@@ -113,30 +112,17 @@ export class ChatService {
  private async locked<T>(k:string,fn:()=>Promise<T>):Promise<T>{const prior=this.locks.get(k)??Promise.resolve();const job=prior.catch(()=>{}).then(fn);this.locks.set(k,job);try{return await job}finally{if(this.locks.get(k)===job)this.locks.delete(k)}}
  private path(p:string,t:string|null,phase:TaskPhase|null){conversationKey(p,t,phase);const root=directory(join(projectRoot(this.resolveProjectFolder(p)),'chat'));return t===null?join(root,'general.json'):join(directory(join(root,t)),`${phase}.json`)}
  private async save(c:Conversation,activity=false){writeJson(this.path(c.projectId,c.taskId,c.phase),c);if(activity&&c.taskId!==null)this.activity(c.projectId,c.taskId)}
- private validateHistory(value:unknown,p:string,t:string|null,phase:TaskPhase|null,legacy=false):Conversation {
+ private validateHistory(value:unknown,p:string,t:string|null,phase:TaskPhase|null):Conversation {
   const c=value as Conversation;
-  if(c.version!==1||c.projectId!==p||c.taskId!==t||!Array.isArray(c.messages)||(c.phase!==undefined&&c.phase!==phase)||(!legacy&&t!==null&&c.phase===undefined)||(c.lastEventId!==undefined&&(!Number.isSafeInteger(c.lastEventId)||c.lastEventId<0)))throw Error('Invalid history');
+  if(c.version!==1||c.projectId!==p||c.taskId!==t||!Array.isArray(c.messages)||(c.phase!==undefined&&c.phase!==phase)||(t!==null&&c.phase===undefined)||(c.lastEventId!==undefined&&(!Number.isSafeInteger(c.lastEventId)||c.lastEventId<0)))throw Error('Invalid history');
   c.phase=phase;c.lastEventId??=0;c.selectedModel??=null;if(c.selectedModel!==null&&(typeof c.selectedModel.id!=='string'||!c.selectedModel.id||typeof c.selectedModel.name!=='string'||(c.selectedModel.provider!==undefined&&!isProvider(c.selectedModel.provider))))throw Error('Invalid history');
   if((c.sessionProvider!==undefined&&!isProvider(c.sessionProvider))||c.messages.some(m=>!isProvider(m.provider)))throw Error('Invalid history');
-  if(c.packs===undefined)c.packs=c.messages.map((m,i)=>({packId:m.id+':legacy',sequence:i+1,messageId:m.id,sendId:m.sendId,role:m.role,kind:'text',content:m.content,tool:null,...(m.provider==='claude'?{provider:m.provider}:{}),model:m.model,createdAt:m.createdAt,status:m.role==='user'?'completed':m.status,state:m.status==='pending'||m.status==='streaming'?'streaming':'closed'}));
   if(!Array.isArray(c.packs)||c.packs.some((pack,i)=>!validPack(pack)||pack.sequence!==i+1)||new Set(c.packs.map(pack=>pack.packId)).size!==c.packs.length)throw Error('Invalid history');
   return c;
  }
  private async load(p:string,t:string|null,phase:TaskPhase|null):Promise<Conversation>{
   const path=this.path(p,t,phase);
-  if(t!==null){
-   const destination=this.path(p,t,'requirements');
-   const old=join(projectRoot(this.resolveProjectFolder(p)),'chat',`${t}.json`);
-   if(pathExists(old)){
-    const migrated=this.validateHistory(readJson(old),p,t,'requirements',true);
-    if(pathExists(destination)){if(!isDeepStrictEqual(this.validateHistory(readJson(destination),p,t,'requirements'),migrated))throw Error('Chat migration conflict')}
-    else writeJson(destination,migrated);
-    // 両方の検証と保存を終えてから旧ファイルを除去する。失敗時は次回照合する。
-    if(!isDeepStrictEqual(this.validateHistory(readJson(destination),p,t,'requirements'),migrated))throw Error('Chat migration conflict');
-    rmSync(old);
-   }
-  }
-  try {const raw=readJson(path);const needsSave=raw.packs===undefined||raw.phase===undefined||raw.lastEventId===undefined;const c=this.validateHistory(raw,p,t,phase,t===null);if(needsSave)await this.save(c);return c}
+  try {const raw=readJson(path);const needsSave=raw.phase===undefined||raw.lastEventId===undefined;const c=this.validateHistory(raw,p,t,phase);if(needsSave)await this.save(c);return c}
   catch(e:any){if(e.code!=='ENOENT')throw e;return {selectedModel:null,version:1,id:randomUUID(),projectId:p,taskId:t,phase,lastEventId:0,threadId:null,sessionId:null,messages:[],packs:[]}}
  }
  async get(p:string,t:string|null,phase:TaskPhase|null=t===null?null:'requirements'){const k=conversationKey(p,t,phase);return this.locked(k,async()=>{const c=await this.load(p,t,phase);if(!this.active.has(k)){let changed=false;const events:TopicEvent[]=[];for(const m of c.messages)if(m.status==='pending'||m.status==='streaming'){m.status='unknown';m.updatedAt=now();changed=true}for(const pack of c.packs)if(pack.state==='streaming'){this.closePack(pack,pack.role==='user'?'completed':'unknown',events);changed=true}if(changed){await this.save(c);if(t!==null&&phase==='implementation')this.finishImplementation(p,t);for(const event of events)this.emit(c,event);this.emit(c,{name:'chat.changed',data:{}})}}return c})}
@@ -192,7 +178,7 @@ export class ChatService {
     }
     let c:Conversation;try{c=await this.load(p,t,phase)}catch(error){rpc.close();throw error}
     if((c.sessionProvider??'codex')!==provider){c.threadId=null;c.sessionId=null}
-    // 接続先の変更や複製後は、別 CLI のセッション ID を使わず保存済み本文を参考にする。
+    // 接続先の変更後は、別 CLI のセッション ID を使わず保存済み本文を参考にする。
     const referenceHistory=!c.threadId?c.messages.filter(m=>m.content).map(m=>({role:m.role,content:m.content})):[];
     c.sessionProvider=provider;
     if(c.messages.some(m=>m.status==='pending'||m.status==='streaming')){for(const m of c.messages)if(m.status==='pending'||m.status==='streaming')m.status='unknown'}

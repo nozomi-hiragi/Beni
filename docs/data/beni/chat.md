@@ -1,6 +1,6 @@
 # .beni/chat の会話
 
-保存仕様を定義します。旧形式と移行処理は [会話の移行](migration.md#会話の移行) に分けます。
+保存仕様を定義します。
 
 会話はバックエンドで永続化し、プロジェクトのジェネラル会話とタスクのフェーズごとの会話を区別します。JSONは人が直接開いて確認できる形式とします。
 
@@ -18,7 +18,7 @@
 
 `phase` は `requirements`、`documents`、`implementation-plan`、`implementation`、`retrospective`。各会話は独立した会話ID・発言・パック列・CLIセッション・`lastEventId` を持つ。未送信のフェーズは空の会話として扱い、保存ファイルは必要時に作成する。Generalのphaseはnull。
 
-旧タスク会話は要件定義の会話へ引き継ぐ。具体的な移行・競合時の扱いは [会話の移行](migration.md#フェーズ別会話への移行) に定義する。変更イベントと本文の版は [タスクの変更履歴](../../objects/task-events.md) に従う。
+変更イベントと本文の版は [タスクの変更履歴](../../objects/task-events.md) に従う。
 
 ## 選択モデル
 

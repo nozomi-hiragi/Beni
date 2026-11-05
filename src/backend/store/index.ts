@@ -34,7 +34,7 @@ export class Store {
     }[];
     if (tables.length || columns.some(c => c.name === 'id' && c.type.toUpperCase() !== 'TEXT')) {
       this.db.close();
-      throw Error('Legacy data detected. Stop Beni and run bun run migrate:data -- <data-directory> before restarting.');
+      throw Error('Legacy data is unsupported.');
     }
     this.db.exec('CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY,name TEXT NOT NULL,folder TEXT NOT NULL UNIQUE)');
   }
@@ -60,7 +60,7 @@ export class Store {
       file = join(root, 'project.json');
     const data = pathExists(file) ? metadata(file, 'project') : newMetadata('project', name.trim());
     const old = this.db.query('SELECT * FROM projects WHERE id=?').get(data.id) as Project | null;
-    if (old && old.folder !== normalized && existsSync(old.folder)) throw Error('Duplicate live project copy. Use bun run clone:project to create a separate project.');
+    if (old && old.folder !== normalized && existsSync(old.folder)) throw Error('Duplicate live project copy.');
     if (!pathExists(file)) writeJson(file, data);
     recoverTasks(normalized);
     this.db.query('INSERT INTO projects(id,name,folder) VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,folder=excluded.folder').run(data.id, data.name, normalized);
