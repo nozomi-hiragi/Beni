@@ -8,6 +8,11 @@
 :root { --fx-noise: none; }
 
 .workspace-resize { display: none; }
+.instructions-shell { display: flex; flex-direction: column; height: 100dvh; overflow: hidden; }
+.instructions-shell > :first-child { flex-shrink: 0; }
+.instructions-shell > main { flex: 1; min-height: 0; overflow: hidden; }
+.instructions-page { height: 100%; min-height: 0; overflow: auto; }
+.instructions-content { max-height: 80vh; }
 @media (min-width: 1024px) {
   .workspace { grid-template-columns: minmax(0, var(--left-ratio)) 12px minmax(0, var(--right-ratio)); column-gap: 0; }
   .workspace-left { grid-template-rows: minmax(0, 1fr); gap: 0; }
@@ -22,6 +27,15 @@
   .workspace-resize:focus-visible { outline: 2px solid var(--color-primary); outline-offset: -2px; }
 }
 
+@media (min-width: 1024px) {
+  .instructions-page { overflow: hidden; }
+  .instructions-layout { height: 100%; min-height: 0; grid-template-columns: minmax(0, var(--instructions-left-ratio)) 12px minmax(0, var(--instructions-right-ratio)); column-gap: 0; }
+  .instructions-layout > .workspace-resize { align-self: stretch; }
+  .instructions-left { display: grid; height: 100%; min-height: 0; grid-template-rows: minmax(0, var(--instructions-chat-ratio)) 12px minmax(0, var(--instructions-references-ratio)); }
+  .instructions-content { height: 100%; min-height: 0; max-height: none; }
+  .instructions-left > * { margin-block: 0; }
+  .instructions-chat-content { height: auto; flex: 1; }
+}
 
 .markdown-preview { overflow-wrap: anywhere; }
 .markdown-preview > :first-child { margin-top: 0; }

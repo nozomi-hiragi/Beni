@@ -1,0 +1,22 @@
+import { expect, it, vi } from 'vitest';
+import { ChatSync } from './chat-sync';
+import { api } from './api';
+import type { Pack } from '../shared/communication';
+vi.mock('./api',()=>({api:vi.fn()}));
+it('clears cached packs when another client replaces the conversation',async()=>{
+ const pack:Pack={packId:'old-pack',sequence:1,messageId:'message',sendId:'send',role:'user',kind:'text',content:'Old conversation',tool:null,model:null,createdAt:'2026-01-01T00:00:00Z',status:'completed',state:'closed'};
+ vi.mocked(api).mockResolvedValueOnce({packs:[{packId:pack.packId,state:'closed'}]}).mockResolvedValueOnce({pack});
+ const update=vi.fn(), error=vi.fn();
+ const scope={projectId:'sync-reset-test',taskId:null};
+ const original=new ChatSync(scope,update,error);
+ original.conversation('original-conversation'); original.refresh();
+ await vi.waitFor(()=>expect(update).toHaveBeenLastCalledWith([pack]));
+ original.dispose();
+ vi.mocked(api).mockResolvedValue({packs:[]});
+ const reopened=new ChatSync(scope,update,error);
+ expect(update).toHaveBeenLastCalledWith([pack]);
+ reopened.conversation('replacement-conversation');
+ expect(update).toHaveBeenLastCalledWith([]);
+ await vi.waitFor(()=>expect(api).toHaveBeenLastCalledWith('/api/chat/packs?projectId=sync-reset-test',undefined,expect.anything()));
+ reopened.dispose();
+});

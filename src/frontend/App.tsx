@@ -3,14 +3,16 @@ import { createMemo, createSignal, onCleanup, onMount, Show } from 'solid-js';
 import Home from './Home';
 import Menu from './components/Menu';
 import CodexSettings from './components/CodexSettings';
+import Instructions from './Instructions';
 import Workspace from './Workspace';
 import { api } from './api';
 import type { AppState, Task } from './types';
 
-type Route = { kind: 'home' } | { kind: 'settings' } | { kind: 'project'; id: string; task?: string; invalidTask: boolean } | { kind: 'not-found' };
+type Route = { kind: 'home' } | { kind: 'settings' } | { kind: 'instructions' } | { kind: 'project'; id: string; task?: string; invalidTask: boolean } | { kind: 'not-found' };
 export function parseRoute(url: URL): Route {
   if (url.pathname === '/') return { kind: 'home' };
   if (url.pathname === '/settings') return { kind: 'settings' };
+  if (url.pathname === '/instructions') return { kind: 'instructions' };
   const match = /^\/project\/([^/]+)$/.exec(url.pathname);
   const id = validProjectId(match?.[1]) ? match![1] : undefined;
   if (id === undefined) return { kind: 'not-found' };
@@ -74,13 +76,14 @@ export default function App() {
     window.addEventListener('popstate', pop);
     onCleanup(() => window.removeEventListener('popstate', pop));
   });
-  return <>
-    <Menu title={route().kind === 'project' ? (projectTitle()?.id === projectId() ? projectTitle()!.name : 'プロジェクト') : route().kind === 'settings' ? '設定' : 'Beni'} showHome={route().kind !== 'home'} query={query()} onHome={home} onQueryChange={setQuery} onSettings={() => navigate('/settings')} />
+  return <div classList={{ 'instructions-shell': route().kind === 'instructions' }}>
+    <Menu title={route().kind === 'project' ? (projectTitle()?.id === projectId() ? projectTitle()!.name : 'プロジェクト') : route().kind === 'settings' ? '設定' : route().kind === 'instructions' ? 'インストラクション管理' : 'Beni'} showHome={route().kind !== 'home'} query={query()} onHome={home} onQueryChange={setQuery} onInstructions={() => navigate('/instructions')} onSettings={() => navigate('/settings')} />
     <main class="mx-auto w-full max-w-screen-2xl px-4 py-6 sm:px-6">
       <Show when={route().kind === 'home'}><Home query={query()} onOpenProject={project => { setProjectTitle({id:project.id,name:project.name}); navigate(`/project/${project.id}`); }} onOpenTask={(task, project) => { setProjectTitle({id:project.id,name:project.name}); navigate(`/project/${project.id}?task=${task.id}`); }} /></Show>
       <Show when={projectId()} keyed>{id => <ProjectScreen id={id} task={projectRoute()?.task} invalidTask={projectRoute()?.invalidTask ?? false} onHome={home} onTitle={name => setProjectTitle({id,name})} onTaskChange={task => navigate(`/project/${id}${task === undefined ? '' : `?task=${task}`}`)} />}</Show>
       <Show when={route().kind === 'settings'}><CodexSettings /></Show>
+      <Show when={route().kind === 'instructions'}><Instructions /></Show>
       <Show when={route().kind === 'not-found'}><p role="alert">画面が見つかりません</p></Show>
     </main>
-  </>;
+  </div>;
 }

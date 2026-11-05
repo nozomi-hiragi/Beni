@@ -20,7 +20,7 @@ const restoreDraft = (draft: Draft, content: string) => {
 };
 const stateLabel: Record<ChatMessage['status'], string> = { pending: '送信待ち', streaming: '応答中', completed: '完了', failed: '失敗', interrupted: '中断', unknown: '結果不明' };
 
-export default function ChatPanel(props: { projectId: string; taskId?: string; phase?: TaskPhase; readOnly?: boolean; onModelUnavailable?: (model: string, provider?: Model['provider']) => void; onBusyChange?: (busy: boolean) => void; onModelChange?: (model: Model | null) => void }) {
+export default function ChatPanel(props: { projectId: string; taskId?: string; phase?: TaskPhase; readOnly?: boolean; instructionFocus?: string | null; instructionFocusLabel?: string; onModelUnavailable?: (model: string, provider?: Model['provider']) => void; onBusyChange?: (busy: boolean) => void; onModelChange?: (model: Model | null) => void }) {
   const [conversationState,setConversationState]=createStore<{value?:Conversation}>({});
   const conversation=()=>conversationState.value;
   const setConversation=(value:Conversation|undefined)=>setConversationState('value',value===undefined?undefined:reconcile(value,{key:'id'}));
@@ -67,7 +67,7 @@ export default function ChatPanel(props: { projectId: string; taskId?: string; p
       if(fetching){reload=true;return}fetching=true;
       do {reload=false;
       const request = ++sequence;
-      try { const value = await api<Conversation>(url, undefined, controller.signal); if (active && request === sequence) { if (!untrack(() => selectedModel(currentKey)) && value.selectedModel) { chooseModel(currentKey, value.selectedModel); if (hadModels && !untrack(() => modelIsAvailable(currentKey)) && modelRefreshRequested) {modelRefreshRequested = false; void loadModels(true, value.selectedModel.provider ?? 'codex').catch(() => {});} } setConversation(value); setLoadError(''); } }
+      try { const value = await api<Conversation>(url, undefined, controller.signal); if (active && request === sequence) { if (!untrack(() => selectedModel(currentKey)) && value.selectedModel) { chooseModel(currentKey, value.selectedModel); if (hadModels && !untrack(() => modelIsAvailable(currentKey)) && modelRefreshRequested) {modelRefreshRequested = false; void loadModels(true, value.selectedModel.provider ?? 'codex').catch(() => {});} } sync.conversation(value.id); setConversation(value); setLoadError(''); } }
       catch { if (active && request === sequence) setLoadError('履歴を取得できませんでした'); }
       }while(reload&&active);fetching=false;
     };
@@ -108,14 +108,15 @@ export default function ChatPanel(props: { projectId: string; taskId?: string; p
   };
   const busy = () => sending() || !!conversation()?.messages.some(message => message.status === 'pending' || message.status === 'streaming');
   createEffect(() => props.onBusyChange?.(busy()));
+  const validInstructionFocus = () => props.projectId !== 'instructions' || ['common','requirements','documents','implementation','execution','retrospective','editor'].includes(props.instructionFocus ?? '');
   async function send(event: SubmitEvent) {
     event.preventDefault();
-    const currentKey = key(), draft = draftFor(currentKey), content = draft.text, version = draft.version, sentModel = selection();
-    if (props.readOnly || draft.sending || busy() || !conversation() || loadError() || !content.trim() || !modelAvailable()) return;
+    const currentKey = key(), draft = draftFor(currentKey), content = draft.text, version = draft.version, sentModel = selection(), sentInstructionFocus = props.instructionFocus;
+    if (!validInstructionFocus() || props.readOnly || draft.sending || busy() || !conversation() || loadError() || !content.trim() || !modelAvailable()) return;
     draft.sending = true; draft.error = ''; draft.listeners.forEach(listener => listener());
     try {
       draft.pending = {content, version};
-      const accepted = await api<Conversation>('/api/chat/send', { projectId: props.projectId, taskId: props.taskId ?? null, ...(props.taskId === undefined ? {} : { phase: props.phase }), content, model: sentModel!.id, provider: sentModel!.provider ?? 'codex' });
+      const accepted = await api<Conversation>('/api/chat/send', { projectId: props.projectId, taskId: props.taskId ?? null, ...(props.taskId === undefined ? {} : { phase: props.phase }), ...(props.projectId === 'instructions' ? {instructionFocus: sentInstructionFocus} : {}), content, model: sentModel!.id, provider: sentModel!.provider ?? 'codex' });
       if (draft.pending) { draft.pending.sendId = accepted.messages?.findLast(message => message.role === 'user')?.sendId; if (draft.version === version) draft.text = ''; }
       draft.listeners.forEach(listener => listener());
       draft.refresh?.();
@@ -152,7 +153,7 @@ export default function ChatPanel(props: { projectId: string; taskId?: string; p
     <Show when={error()}><p role="alert" class="mx-4 mb-2 text-sm text-error">{error()}</p></Show>
     <Show when={!props.readOnly}><form class="border-t border-base-300 p-4" onSubmit={send}>
       <textarea class="textarea textarea-bordered min-h-24 w-full resize-y" aria-label="希望や回答を入力" placeholder="希望や回答を入力" required value={text()} onInput={event => { const draft = draftFor(key()); draft.text = event.currentTarget.value; draft.version++; setText(draft.text); }} />
-      <div class="mt-2 flex items-center justify-end gap-2"><select ref={modelSelect} class="select select-bordered select-sm w-auto" style={{ 'field-sizing': 'content' }} aria-label="モデル" value={model()} disabled={busy() || !models().length} onChange={event => selectModel(event.currentTarget.value)}><Show when={model() && !modelAvailable()}><option value={model()} selected disabled>⚠️ {modelLabel(selection()?.name ?? model(), selection()?.provider)}</option></Show><Show when={models().length} fallback={<Show when={!model()}><option value="">未確認</option></Show>}><For each={models().filter(item => modelAvailable() || modelValue(item) !== model())}>{item => <option value={modelValue(item)} selected={modelValue(item) === model()} disabled={!providerReady(item.provider)}>{modelLabel(item.name, item.provider)}</option>}</For></Show></select><Show when={busy()}><button type="button" class="btn btn-sm" disabled={interrupting()} onClick={interrupt}>中断</button></Show><button class="btn btn-primary btn-sm" type="submit" disabled={busy() || !text().trim() || !modelAvailable() || !conversation() || !!loadError()}>{busy() ? '応答中...' : '送信'}</button></div>
+      <div class="mt-2 flex flex-wrap items-center justify-end gap-2"><Show when={props.projectId==='instructions'}><span class="mr-auto text-xs text-base-content/70">フォーカス: {props.instructionFocusLabel ?? '未選択'}</span></Show><select ref={modelSelect} class="select select-bordered select-sm w-auto" style={{ 'field-sizing': 'content' }} aria-label="モデル" value={model()} disabled={busy() || !models().length} onChange={event => selectModel(event.currentTarget.value)}><Show when={model() && !modelAvailable()}><option value={model()} selected disabled>⚠️ {modelLabel(selection()?.name ?? model(), selection()?.provider)}</option></Show><Show when={models().length} fallback={<Show when={!model()}><option value="">未確認</option></Show>}><For each={models().filter(item => modelAvailable() || modelValue(item) !== model())}>{item => <option value={modelValue(item)} selected={modelValue(item) === model()} disabled={!providerReady(item.provider)}>{modelLabel(item.name, item.provider)}</option>}</For></Show></select><Show when={busy()}><button type="button" class="btn btn-sm" disabled={interrupting()} onClick={interrupt}>中断</button></Show><button class="btn btn-primary btn-sm" type="submit" disabled={!validInstructionFocus() || busy() || !text().trim() || !modelAvailable() || !conversation() || !!loadError()}>{busy() ? '応答中...' : '送信'}</button></div>
     </form></Show>
   </>;
 }
