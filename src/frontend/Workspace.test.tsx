@@ -1,3 +1,4 @@
+import { createSignal } from 'solid-js';
 import { resetModelCache } from './model-cache';
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-library';
@@ -339,4 +340,88 @@ it('保存した実装担当モデルが利用不可なら警告を表示し開�
  expect((screen.getByRole('button',{name:'開始'}) as HTMLButtonElement).disabled).toBe(true);
  fireEvent.change(screen.getByRole('combobox',{name:'実装担当モデル'}),{target:{value:'codex:new'}});
  await waitFor(()=>expect((screen.getByRole('button',{name:'開始'}) as HTMLButtonElement).disabled).toBe(false));
+});
+
+async function executionHistory(status = 'idle', initialPhase = 'retrospective') {
+  const projectId = '019a0000-0000-7000-8000-000000000095';
+  const tasks = ['096','097'].map((suffix,index) => ({id:`019a0000-0000-7100-8000-000000000${suffix}`,projectId,name:`履歴タスク${index+1}`,phase:initialPhase,status}));
+  const [taskId,setTaskId] = createSignal(tasks[0].id);
+  const posted: {path:string; body:Record<string,unknown>}[] = [];
+  const fetchMock = vi.fn(async (path:string,init?:RequestInit) => {
+    if (path === '/api/state') return json({projects:[],tasks});
+    const task = tasks.find(item => path === `/api/tasks/${item.id}`);
+    if (task) return json({task:{...task},documents:[{name:'retrospective.md',content:'# 反省会の文書',version:1}],canStart:true});
+    if (path === '/api/codex/status') return json({installed:true,auth:'chatgpt',models:[{id:'sample',name:'Sample'}]});
+    if (path === '/api/claude/status') return json({installed:false,auth:'none',models:[]});
+    if (path.startsWith('/api/chat?') || path.startsWith('/api/chat/packs')) {
+      const query = new URL(path,'http://localhost').searchParams;
+      const phase = query.get('phase'), id = query.get('taskId');
+      const messages = [{id:`history-${id}-${phase}`,role:'assistant',content:`${id} ${phase}の会話`,status:'completed'}];
+      return packResponse(path,messages) ?? json({id:`conversation-${id}-${phase}`,messages});
+    }
+    if (init?.method === 'POST') {
+      const body = JSON.parse(String(init.body)); posted.push({path,body});
+      const current = tasks.find(item => path.startsWith(`/api/tasks/${item.id}/`));
+      if (current && (path.endsWith('/complete') || path.endsWith('/reopen'))) {current.status=path.endsWith('/complete')?'completed':'idle';return json({...current});}
+      throw Error(`Unexpected mutation: ${path}`);
+    }
+    return json({sessions:[]});
+  });
+  vi.stubGlobal('fetch',fetchMock);
+  render(()=><Workspace taskId={taskId()} projectId={projectId} onHome={()=>{}} />);
+  await screen.findByText(`${tasks[0].id} ${initialPhase}の会話`);
+  const socket = FakeWebSocket.instances.find(item=>!item.closed)!;
+  await waitFor(()=>expect([...socket.subscriptions.values()].some(item=>item.topic==='task-events')).toBe(true));
+  return {tasks,setTaskId,posted,fetchMock,socket};
+}
+
+it.each(['idle','completed'])('実装終了後は実装中からreadOnly履歴を閲覧し、反省会へ戻れる %s', async status => {
+  const {tasks,posted,fetchMock} = await executionHistory(status);
+  fireEvent.click(screen.getByRole('button',{name:'実装中'}));
+  await screen.findByText(`${tasks[0].id} executionの会話`);
+  expect(screen.getByRole('button',{name:'実装中'}).getAttribute('aria-current')).toBe('step');
+  expect(screen.queryByRole('textbox',{name:'希望や回答を入力'})).toBeNull();
+  expect(screen.queryByRole('combobox',{name:'モデル'})).toBeNull();
+  expect(screen.queryByRole('button',{name:'送信'})).toBeNull();expect(screen.queryByRole('button',{name:'停止'})).toBeNull();
+  expect(screen.getByRole('heading',{name:'反省会の文書'})).toBeTruthy();
+  expect(fetchMock.mock.calls.some(([path])=>path.startsWith('/api/chat?')&&path.includes('phase=execution'))).toBe(true);
+  fireEvent.click(screen.getByRole('button',{name:'反省会'}));
+  await screen.findByText(`${tasks[0].id} retrospectiveの会話`);
+  expect(screen.getByRole('button',{name:'反省会'}).getAttribute('aria-current')).toBe('step');
+  if(status==='idle')expect(screen.getByRole('textbox',{name:'希望や回答を入力'})).toBeTruthy();
+  else expect(screen.queryByRole('textbox',{name:'希望や回答を入力'})).toBeNull();
+  expect(posted).toEqual([]);
+});
+
+it('同じ実フェーズの再取得では履歴閲覧を維持し、タスク変更と実フェーズ変更で戻す', async () => {
+  const {tasks,setTaskId,posted,socket} = await executionHistory();
+  fireEvent.click(screen.getByRole('button',{name:'実装中'}));await screen.findByText(`${tasks[0].id} executionの会話`);
+  tasks[0].name='再取得した履歴タスク';socket.event('task-events',{name:'task.events.changed',data:{lastEventId:1}});
+  await screen.findByRole('tab',{name:'再取得した履歴タスク'});
+  expect(screen.getByRole('button',{name:'実装中'}).getAttribute('aria-current')).toBe('step');
+  expect(screen.getByText(`${tasks[0].id} executionの会話`)).toBeTruthy();
+  setTaskId(tasks[1].id);await screen.findByText(`${tasks[1].id} retrospectiveの会話`);
+  expect(screen.getByRole('button',{name:'反省会'}).getAttribute('aria-current')).toBe('step');
+  fireEvent.click(screen.getByRole('button',{name:'実装中'}));await screen.findByText(`${tasks[1].id} executionの会話`);
+  tasks[1].phase='implementation';socket.event('task-events',{name:'task.events.changed',data:{lastEventId:2}});
+  await screen.findByText(`${tasks[1].id} implementationの会話`);
+  expect(screen.getByRole('button',{name:'実装手順'}).getAttribute('aria-current')).toBe('step');
+  expect(screen.getByRole('textbox',{name:'希望や回答を入力'})).toBeTruthy();expect(posted).toEqual([]);
+});
+
+it.each(['idle','completed'])('履歴閲覧中の完了と再開は実際の反省会を操作する %s', async status => {
+  const {tasks,posted} = await executionHistory(status);
+  fireEvent.click(screen.getByRole('button',{name:'実装中'}));await screen.findByText(`${tasks[0].id} executionの会話`);
+  fireEvent.click(screen.getByRole('button',{name:status==='idle'?'タスク完了':'再開'}));
+  await waitFor(()=>expect(posted).toEqual([{path:`/api/tasks/${tasks[0].id}/${status==='idle'?'complete':'reopen'}`,body:{projectId:tasks[0].projectId,phase:'retrospective'}}]));
+  expect(screen.queryByRole('button',{name:'停止'})).toBeNull();
+});
+
+
+it('初回から実装実行中のタスクはexecution会話をreadOnlyで表示し停止だけを提供する', async () => {
+ const {tasks,posted}=await executionHistory('running','execution');
+ expect(screen.getByText(`${tasks[0].id} executionの会話`)).toBeTruthy();
+ expect(screen.queryByRole('textbox',{name:'希望や回答を入力'})).toBeNull();expect(screen.queryByRole('combobox',{name:'モデル'})).toBeNull();
+ expect(screen.queryByRole('button',{name:'実装中'})).toBeNull();expect(screen.getByRole('button',{name:'停止'})).toBeTruthy();
+ expect(posted).toEqual([]);
 });
