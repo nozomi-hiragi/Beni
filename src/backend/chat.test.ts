@@ -216,3 +216,183 @@ test('受理不明の切断では引継ぎカーソルを進めず、読込中�
   await chat.send(p,t,'hello',null,root,root);await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='completed');expect((await chat.get(p,t)).lastEventId).toBe(1);expect(delivered).toBe(2);
  }finally{await rm(root,{recursive:true,force:true})}
 });
+
+test('停止は送信準備と実行完了を待ち、新送信とphase変更を拒否する',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'beni-stop-')),p='019a0000-0000-7000-8000-000000000001',t='019a0000-0000-7100-8000-000000000001';
+ const chat=new ChatService(()=>root,()=>fake);
+ try{
+  const sending=chat.send(p,t,'wait',null,root,root,'documents');
+  let changed=false;
+  const stopping=chat.stopTask(p,t,()=>{changed=true});
+  await expect(chat.send(p,t,'duplicate',null,root,root,'requirements')).rejects.toThrow('busy');
+  expect(()=>chat.withIdleTask(p,t,()=>{})).toThrow('busy');
+  await sending;await stopping;
+  expect(changed).toBe(true);expect((await chat.get(p,t,'documents')).messages.at(-1)?.status).toBe('interrupted');
+  expect(()=>chat.withIdleTask(p,t,()=>{})).not.toThrow();
+  const again=chat.send(p,t,'wait',null,root,root,'documents');await again;
+  await expect(chat.stopTask(p,t,()=>{},()=>{throw Error('phase conflict')})).rejects.toThrow('phase conflict');
+  await waitFor(async()=>(await chat.get(p,t,'documents')).messages.at(-1)?.status==='streaming');
+  await chat.stopTask(p,t,()=>{});
+ }finally{await rm(root,{recursive:true,force:true})}
+});
+
+test('送信したモデルをフェーズごとに保存し、不在モデルでは履歴を追加しない',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'beni-models-'));const p='019a0000-0000-7000-8000-000000000001',t='019a0000-0000-7100-8000-000000000001';
+ try{
+  const chat=new ChatService(p=>projectFolder(root,p),()=>fake);
+  await chat.send(p,t,'hello','model-a',root);
+  await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='completed');
+  const status=await chat.status();chat.status=async()=>({...status,models:[...status.models!,{id:'model-b',name:'Model B'}]});
+  await chat.send(p,t,'hello','model-b',root);
+  await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='completed');
+  const restarted=new ChatService(p=>projectFolder(root,p),()=>fake);
+  expect((await restarted.get(p,t)).selectedModel).toEqual({id:'model-b',name:'Model B'});
+  expect((await restarted.get(p,t)).messages[0]!.model).toBe('model-a');
+  expect((await restarted.get(p,t,'documents')).selectedModel).toBe(null);
+  expect((await restarted.get(p,null)).selectedModel).toBe(null);
+  await expect(restarted.send(p,t,'hello','missing',root)).rejects.toThrow('model unavailable');
+  expect((await restarted.get(p,t)).messages).toHaveLength(4);
+ }finally{await rm(root,{recursive:true,force:true})}
+});
+
+test('モデル拒否と一般的な拒否を区別し、生成中の重複送信では選択を変えない',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'beni-model-reject-'));const p='019a0000-0000-7000-8000-000000000001';
+ try{
+  const chat=new ChatService(()=>root,()=>fake);
+  await chat.send(p,null,'reject model','model-a',root);
+  await waitFor(async()=>(await chat.get(p,null)).messages.at(-1)?.status==='failed');
+  expect((await chat.get(p,null)).messages.at(-1)?.errorCode).toBe('MODEL_UNAVAILABLE');
+  await chat.send(p,null,'reject','model-a',root);
+  await waitFor(async()=>(await chat.get(p,null)).messages.at(-1)?.status==='failed');
+  expect((await chat.get(p,null)).messages.at(-1)?.errorCode).toBeUndefined();
+  await chat.send(p,null,'wait','model-a',root);
+  await expect(chat.send(p,null,'hello','missing',root)).rejects.toThrow('busy');
+  await waitFor(async()=>(await chat.get(p,null)).messages.at(-1)?.status==='streaming');
+  await chat.interrupt(p,null);
+  await waitFor(async()=>(await chat.get(p,null)).messages.at(-1)?.status==='interrupted');
+  expect((await chat.get(p,null)).selectedModel?.id).toBe('model-a');
+ }finally{await rm(root,{recursive:true,force:true})}
+});
+
+const fakeClaude=join(import.meta.dir,'test/fake-claude.ts');
+test('Claude の送信・ツール・中断と同じ接続先の再開を保存する',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'beni-claude-chat-')),p='019a0000-0000-7000-8000-000000000001',log=join(root,'claude.jsonl');
+ process.env.FAKE_CLAUDE_LOG=log;
+ try{
+  const chat=new ChatService(()=>root,()=>null,()=>fakeClaude),events:any[]=[];chat.subscribe(p,null,event=>events.push(event));
+  expect((await chat.claudeStatus()).auth).toBe('claude');
+  await chat.send(p,null,'tools','opus',root,undefined,null,false,'claude');
+  await waitFor(async()=>(await chat.get(p,null)).messages.at(-1)?.status==='completed');
+  const first=await chat.get(p,null),session=first.sessionId;
+  expect(first.selectedModel).toEqual({id:'opus',name:'Opus',provider:'claude'});expect(first.sessionProvider).toBe('claude');
+  expect(first.messages.every(m=>m.provider==='claude'&&m.model==='opus')).toBe(true);
+  expect(first.packs.every(pack=>pack.provider==='claude')).toBe(true);
+  expect(first.packs.find(pack=>pack.kind==='tool')?.tool).toMatchObject({name:'Read',output:'Example contents'});
+  expect(events.some(event=>event.name==='chat.pack.delta')).toBe(true);
+  const restarted=new ChatService(()=>root,()=>null,()=>fakeClaude);
+  await restarted.send(p,null,'wait',null,root,undefined,null,false,'claude');
+  await waitFor(async()=>(await restarted.get(p,null)).messages.at(-1)?.status==='streaming');
+  await restarted.interrupt(p,null);await waitFor(async()=>(await restarted.get(p,null)).messages.at(-1)?.status==='interrupted');
+  expect((await restarted.get(p,null)).sessionId).toBe(session);
+  const records=(await readFile(log,'utf8')).trim().split('\n').map(line=>JSON.parse(line));
+  expect(records[1].args).toContain('--resume');expect(records[1].session).toBe(session);expect(records[1].prompt).toBe('wait');
+ }finally{delete process.env.FAKE_CLAUDE_LOG;await rm(root,{recursive:true,force:true})}
+});
+
+test('接続先を往復しても他 CLI のセッションを再開せず、本文の履歴だけ引き継ぐ',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'beni-provider-switch-')),p='019a0000-0000-7000-8000-000000000001',claudeLog=join(root,'claude.jsonl'),codexLog=join(root,'codex.jsonl');
+ process.env.FAKE_CLAUDE_LOG=claudeLog;process.env.FAKE_CODEX_LOG=codexLog;
+ try{
+  const chat=new ChatService(()=>root,()=>fake,()=>fakeClaude);
+  await chat.send(p,null,'Codex context','model-a',root);await waitFor(async()=>(await chat.get(p,null)).messages.at(-1)?.status==='completed');
+  await chat.send(p,null,'Claude question',null,root,undefined,null,false,'claude');await waitFor(async()=>(await chat.get(p,null)).messages.at(-1)?.status==='completed');
+  const claude=await chat.get(p,null);expect(claude.threadId).not.toBe('thread-1');expect(claude.selectedModel?.id).toBe('sonnet');
+  const invocation=JSON.parse((await readFile(claudeLog,'utf8')).trim());expect(invocation.args).toContain('--session-id');expect(invocation.args).not.toContain('--resume');expect(invocation.prompt).toContain('Codex context');expect(invocation.prompt).toContain('Hello');
+  await chat.send(p,null,'Codex returns',null,root);await waitFor(async()=>(await chat.get(p,null)).messages.at(-1)?.status==='completed');
+  const result=await chat.get(p,null);expect(result.messages.map(m=>m.provider)).toEqual(['codex','codex','claude','claude','codex','codex']);expect(result.messages[0]?.model).toBe('model-a');expect(result.messages[2]?.model).toBe('sonnet');
+  const records=(await readFile(codexLog,'utf8')).trim().split('\n').map(line=>JSON.parse(line));
+  expect(records.filter(record=>record.method==='thread/resume')).toHaveLength(0);expect(records.filter(record=>record.method==='thread/start')).toHaveLength(2);
+  const turn=records.filter(record=>record.method==='turn/start').at(-1);expect(turn.params.input[1].text).toContain('Claude question');expect(turn.params.input[1].text).not.toContain('sessionId');
+ }finally{delete process.env.FAKE_CLAUDE_LOG;delete process.env.FAKE_CODEX_LOG;await rm(root,{recursive:true,force:true})}
+});
+
+test('Claude のモデル拒否・切断を区別し、利用不可なら履歴を追加しない',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'beni-claude-reject-')),p='019a0000-0000-7000-8000-000000000001';
+ try{
+  const chat=new ChatService(()=>root,()=>null,()=>fakeClaude);
+  await expect(chat.send(p,null,'hello','missing',root,undefined,null,false,'claude')).rejects.toThrow('model unavailable');expect((await chat.get(p,null)).messages).toHaveLength(0);
+  await chat.send(p,null,'reject model','sonnet',root,undefined,null,false,'claude');await waitFor(async()=>(await chat.get(p,null)).messages.at(-1)?.status==='failed');expect((await chat.get(p,null)).messages.at(-1)?.errorCode).toBe('MODEL_UNAVAILABLE');
+  await chat.send(p,null,'reject','sonnet',root,undefined,null,false,'claude');await waitFor(async()=>(await chat.get(p,null)).messages.at(-1)?.status==='failed');expect((await chat.get(p,null)).messages.at(-1)?.errorCode).toBeUndefined();
+  await chat.send(p,null,'disconnect','sonnet',root,undefined,null,false,'claude');await waitFor(async()=>(await chat.get(p,null)).messages.at(-1)?.status==='unknown');
+  process.env.FAKE_CLAUDE_AUTH='api_key';await expect(chat.send(p,null,'hello','sonnet',root,undefined,null,false,'claude')).rejects.toThrow('unavailable');expect((await chat.get(p,null)).messages).toHaveLength(6);
+ }finally{delete process.env.FAKE_CLAUDE_AUTH;await rm(root,{recursive:true,force:true})}
+});
+
+test('Claude の複製で接続先とモデルを保持し、セッションを切り離して本文を再送する',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'beni-claude-clone-')),p='019a0000-0000-7000-8000-000000000001',log=join(root,'claude.jsonl');
+ process.env.FAKE_CLAUDE_LOG=log;
+ try{
+  const {rewriteConversation}=await import('./migration'),{writeFile}=await import('node:fs/promises');const chat=new ChatService(()=>root,()=>null,()=>fakeClaude);
+  await chat.send(p,null,'Saved Claude context','haiku',root,undefined,null,false,'claude');await waitFor(async()=>(await chat.get(p,null)).messages.at(-1)?.status==='completed');
+  const original=await chat.get(p,null),clone=await rewriteConversation(structuredClone(original),p,null,true);
+  expect(clone).toMatchObject({sessionProvider:'claude',threadId:null,sessionId:null,selectedModel:{id:'haiku',provider:'claude'}});expect(clone.messages[0]).toMatchObject({provider:'claude',model:'haiku',sessionId:null});
+  await writeFile(join(root,'.beni','chat','general.json'),JSON.stringify(clone));await chat.send(p,null,'Next question',null,root,undefined,null,false,'claude');await waitFor(async()=>(await chat.get(p,null)).messages.at(-1)?.status==='completed');
+  const records=(await readFile(log,'utf8')).trim().split('\n').map(line=>JSON.parse(line));expect(records[1].args).toContain('--session-id');expect(records[1].session).not.toBe(original.sessionId);expect(records[1].prompt).toContain('Saved Claude context');
+ }finally{delete process.env.FAKE_CLAUDE_LOG;await rm(root,{recursive:true,force:true})}
+});
+
+test('パックの接続先は検証とハッシュに反映し、既存 Codex ハッシュを変えない',async()=>{
+ const {packHash,validPack}=await import('../shared/communication');const pack={packId:'pack',sequence:1,messageId:'message',sendId:'send',role:'user' as const,kind:'text' as const,content:'Example',tool:null,model:null,createdAt:'2026-01-01T00:00:00.000Z',status:'completed' as const,state:'closed' as const};
+ expect(validPack({...pack,provider:'claude'})).toBe(true);expect(validPack({...pack,provider:'other'})).toBe(false);
+ expect(await packHash({...pack,provider:'codex'})).toBe(await packHash(pack));expect(await packHash({...pack,provider:'claude'})).not.toBe(await packHash(pack));
+});
+
+test('Claude は受理前にセッションとカーソルを保存せず、中断しても自動再送しない',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'beni-claude-accept-')),p='019a0000-0000-7000-8000-000000000001',t='019a0000-0000-7100-8000-000000000001',log=join(root,'claude.jsonl');
+ process.env.FAKE_CLAUDE_LOG=log;process.env.FAKE_CLAUDE_ACCEPT_DELAY_MS='500';
+ try{
+  const chat=new ChatService(()=>root,()=>null,()=>fakeClaude);chat.setTaskEvents({capture:()=>{},events:()=>({events:[{id:1,type:'document.updated',path:'requirements.md'}],lastEventId:1,through:1,hasMore:false})});
+  await chat.send(p,t,'hello','sonnet',root,undefined,'requirements',false,'claude');
+  await waitFor(async()=>{try{return (await readFile(log,'utf8')).includes('session')}catch{return false}});
+  const pending=await chat.get(p,t);expect(pending).toMatchObject({threadId:null,sessionId:null,lastEventId:0});expect(pending.messages.every(message=>message.sessionId===null&&message.threadId===null)).toBe(true);
+  await chat.interrupt(p,t);await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='interrupted');
+  expect(await chat.get(p,t)).toMatchObject({threadId:null,sessionId:null,lastEventId:0});
+  await Bun.sleep(30);expect((await readFile(log,'utf8')).trim().split('\n')).toHaveLength(1);
+  delete process.env.FAKE_CLAUDE_ACCEPT_DELAY_MS;
+  await chat.send(p,t,'Try again','sonnet',root,undefined,'requirements',false,'claude');await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='completed');
+  expect((await chat.get(p,t)).lastEventId).toBe(1);
+  const records=(await readFile(log,'utf8')).trim().split('\n').map(line=>JSON.parse(line));expect(records[1].args).toContain('--session-id');expect(records[1].args).not.toContain('--resume');expect(records[1].session).not.toBe(records[0].session);expect(records[1].prompt).toContain('"id":1');
+  const accepted=await chat.get(p,t);process.env.FAKE_CLAUDE_ACCEPT_DELAY_MS='500';
+  await chat.send(p,t,'Pending resume','sonnet',root,undefined,'requirements',false,'claude');await waitFor(async()=>(await readFile(log,'utf8')).trim().split('\n').length===3);
+  await chat.interrupt(p,t);await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='interrupted');expect(await chat.get(p,t)).toMatchObject({threadId:accepted.threadId,sessionId:accepted.sessionId,lastEventId:1});
+ }finally{delete process.env.FAKE_CLAUDE_LOG;delete process.env.FAKE_CLAUDE_ACCEPT_DELAY_MS;await rm(root,{recursive:true,force:true})}
+});
+
+test('Claude の受理前終了・モデル拒否では新規セッションや引継ぎ済みカーソルを残さない',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'beni-claude-early-exit-')),p='019a0000-0000-7000-8000-000000000001',t='019a0000-0000-7100-8000-000000000001';
+ try{
+  const chat=new ChatService(()=>root,()=>null,()=>fakeClaude);chat.setTaskEvents({capture:()=>{},events:()=>({events:[{id:1,type:'document.updated'}],lastEventId:1,through:1,hasMore:false})});
+  await chat.send(p,t,'early exit','sonnet',root,undefined,'requirements',false,'claude');await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='unknown');
+  expect(await chat.get(p,t)).toMatchObject({threadId:null,sessionId:null,lastEventId:0});expect((await chat.get(p,t)).messages).toHaveLength(2);
+  await chat.send(p,t,'reject model','sonnet',root,undefined,'requirements',false,'claude');await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='failed');
+  expect(await chat.get(p,t)).toMatchObject({threadId:null,sessionId:null,lastEventId:0});expect((await chat.get(p,t)).messages.at(-1)).toMatchObject({errorCode:'MODEL_UNAVAILABLE',sessionId:null,threadId:null});
+  await chat.send(p,t,'hello','sonnet',root,undefined,'requirements',false,'claude');await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='completed');
+  const accepted=await chat.get(p,t);expect(accepted.threadId).not.toBeNull();expect(accepted.lastEventId).toBe(1);
+ }finally{await rm(root,{recursive:true,force:true})}
+});
+
+test('Claude の存在しない再開セッションは明示失敗として残し、カーソルを進めない',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'beni-claude-missing-resume-')),p='019a0000-0000-7000-8000-000000000001',t='019a0000-0000-7100-8000-000000000001',log=join(root,'claude.jsonl');
+ process.env.FAKE_CLAUDE_LOG=log;
+ try{
+  const chat=new ChatService(()=>root,()=>null,()=>fakeClaude);let through=1;
+  chat.setTaskEvents({capture:()=>{},events:(_p,_t,after)=>({events:after<through?[{id:through,type:'document.updated'}]:[],lastEventId:through,through,hasMore:false})});
+  await chat.send(p,t,'hello','sonnet',root,undefined,'requirements',false,'claude');await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='completed');
+  const accepted=await chat.get(p,t);through=2;process.env.FAKE_CLAUDE_RESUME_MISSING='1';
+  await chat.send(p,t,'Next question','sonnet',root,undefined,'requirements',false,'claude');await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='failed');
+  expect(await chat.get(p,t)).toMatchObject({threadId:null,sessionId:null,lastEventId:1});expect((await chat.get(p,t)).messages).toHaveLength(4);
+  await Bun.sleep(30);const records=(await readFile(log,'utf8')).trim().split('\n').map(line=>JSON.parse(line));expect(records).toHaveLength(2);expect(records[1].args).toContain('--resume');expect(records[1].session).toBe(accepted.sessionId);expect(records[1].prompt).toContain('"id":2');
+  delete process.env.FAKE_CLAUDE_RESUME_MISSING;await chat.send(p,t,'Explicit retry','sonnet',root,undefined,'requirements',false,'claude');await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='completed');
+  const retried=(await readFile(log,'utf8')).trim().split('\n').map(line=>JSON.parse(line)).at(-1);expect(retried.args).toContain('--session-id');expect(retried.args).not.toContain('--resume');expect(retried.session).not.toBe(accepted.sessionId);expect(retried.prompt).toContain('Next question');expect(retried.prompt).toContain('"id":2');expect((await chat.get(p,t)).lastEventId).toBe(2);
+ }finally{delete process.env.FAKE_CLAUDE_LOG;delete process.env.FAKE_CLAUDE_RESUME_MISSING;await rm(root,{recursive:true,force:true})}
+});

@@ -173,6 +173,18 @@ export class Store {
     const {file} = this.scopedTask(projectId, taskId);
     return taskEventVersion(join(file, '..'), version);
   }
+  selectTaskPhase(projectId: string, taskId: string, expectedPhase: string, target: TaskPhase): TaskRow {
+    const {file, value} = this.scopedTask(projectId, taskId);
+    if (!taskPhases.includes(target)) throw Error('invalid phase');
+    if (value.phase !== expectedPhase) throw Error('phase conflict');
+    if(value.phase===target)return {id:value.id,project_id:projectId,name:value.name,phase:value.phase,status:value.status,createdAt:value.createdAt,updatedAt:value.updatedAt};
+    captureTaskHistory(join(file, '..'), value.phase);
+    value.phase = target;
+    value.updatedAt = new Date(Math.max(Date.now(), (Date.parse(value.updatedAt ?? '') || 0) + 1)).toISOString();
+    writeJson(file, value);
+    captureTaskHistory(join(file, '..'), target, expectedPhase as TaskPhase);
+    return {id: value.id, project_id: projectId, name: value.name, phase: value.phase, status: value.status, createdAt: value.createdAt, updatedAt: value.updatedAt};
+  }
   advanceTaskPhase(projectId: string, taskId: string, expectedPhase: string, direction: 'next' | 'back' = 'next'): TaskRow {
     const {file, value} = this.scopedTask(projectId, taskId);
     const index = taskPhases.indexOf(expectedPhase as typeof taskPhases[number]);
@@ -180,13 +192,9 @@ export class Store {
     if (direction !== 'next' && direction !== 'back') throw Error('invalid direction');
     const next = index + (direction === 'next' ? 1 : -1);
     if (value.phase !== expectedPhase || next < 0 || next >= taskPhases.length) throw Error('phase conflict');
-    captureTaskHistory(join(file, '..'), value.phase);
-    value.phase = taskPhases[next]!;
-    value.updatedAt = new Date(Math.max(Date.now(), (Date.parse(value.updatedAt ?? '') || 0) + 1)).toISOString();
-    writeJson(file, value);
-    captureTaskHistory(join(file, '..'), value.phase, expectedPhase as TaskPhase);
-    return {id: value.id, project_id: projectId, name: value.name, phase: value.phase, status: value.status, createdAt: value.createdAt, updatedAt: value.updatedAt};
+    return this.selectTaskPhase(projectId,taskId,expectedPhase,taskPhases[next]!);
   }
+
   deleteTask(projectId: string, taskId: string) {
     const {project} = this.scopedTask(projectId, taskId);
     const root = projectRoot(project.folder), task = join(root, 'tasks', taskId);

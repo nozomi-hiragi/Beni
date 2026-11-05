@@ -1,3 +1,4 @@
+import { loadModels, resetModelCache } from '../model-cache';
 import { createSignal } from 'solid-js';
 import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-library';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
@@ -6,20 +7,22 @@ import CodexSettings from './CodexSettings';
 import { FakeWebSocket, packResponse, testPack } from '../test-events';
 
 const json = (data: unknown) => ({ ok: true, json: async () => data }) as Response;
-beforeEach(() => { FakeWebSocket.instances = []; vi.stubGlobal('WebSocket', FakeWebSocket); });
+beforeEach(() => { resetModelCache(); localStorage.clear(); FakeWebSocket.instances = []; vi.stubGlobal('WebSocket', FakeWebSocket); });
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 it('refreshes installation and login state without starting login', async () => {
   let calls = 0;
   vi.stubGlobal('fetch', vi.fn((url: string) => {
+    if (url === '/api/claude/status') return Promise.resolve(json({installed:false,auth:'none',models:[]}));
     expect(url).toBe('/api/codex/status');
     calls++;
     return Promise.resolve(json(calls === 1 ? { installed: false, auth: 'unknown', models: null, usage: 'unknown' } : { installed: true, path: '/usr/bin/codex', version: '1.2.3', checkedAt: '2026-01-02T03:04:05Z', auth: 'none', models: null, usage: 'unknown' }));
   }));
   render(() => <CodexSettings />);
   expect(await screen.findByText('Codex CLI をインストールしてください')).toBeTruthy();
-  fireEvent.click(screen.getByRole('button', { name: '更新' }));
+  await waitFor(() => expect((screen.getByRole('button', { name: 'Codex の接続状態を更新' }) as HTMLButtonElement).disabled).toBe(false));
+  fireEvent.click(screen.getByRole('button', { name: 'Codex の接続状態を更新' }));
   expect(await screen.findByText('Codex にログインしてください')).toBeTruthy();
   expect(screen.getByText('/usr/bin/codex')).toBeTruthy();
   expect(screen.getByText('1.2.3')).toBeTruthy();
@@ -33,9 +36,9 @@ it('keeps task histories separate and displays streamed status and interruption'
   vi.stubGlobal('fetch', vi.fn((url: string, init?: RequestInit) => {
     requests.push(url);
     if (url === '/api/codex/status') return Promise.resolve(json(status));
-    if (url.startsWith('/api/chat?')) return Promise.resolve(json({id:'c', projectId:'019a0000-0000-7000-8000-00000000007b', taskId:'019a0000-0000-7100-8000-000000000005', threadId:null, messages: streaming ? [{id:'m',sendId:'s',role:'assistant',content:'途中の回答',provider:'codex',model:'test',status:'streaming'}] : []}));
+    if (url.startsWith('/api/chat?')) return Promise.resolve(json({id:'c', projectId:'019a0000-0000-7000-8000-00000000007b', taskId:'019a0000-0000-7100-8000-000000000005', threadId:null, selectedModel:{id:'test',name:'Test'}, messages: streaming ? [{id:'m',sendId:'s',role:'assistant',content:'途中の回答',provider:'codex',model:'test',status:'streaming'}] : []}));
     const pack = packResponse(url, streaming ? [{id:'m', role:'assistant', content:'途中の回答'}] : []); if (pack) return Promise.resolve(pack);
-    if (url === '/api/chat/send') { expect(JSON.parse(String(init?.body))).toEqual({projectId:'019a0000-0000-7000-8000-00000000007b',taskId:'019a0000-0000-7100-8000-000000000005',phase:'requirements',content:'質問',model:'test'}); streaming = true; return Promise.resolve(json({})); }
+    if (url === '/api/chat/send') { expect(JSON.parse(String(init?.body))).toEqual({projectId:'019a0000-0000-7000-8000-00000000007b',taskId:'019a0000-0000-7100-8000-000000000005',phase:'requirements',content:'質問',model:'test',provider:'codex'}); streaming = true; return Promise.resolve(json({})); }
     if (url === '/api/chat/interrupt') { expect(JSON.parse(String(init?.body))).toEqual({projectId:'019a0000-0000-7000-8000-00000000007b',taskId:'019a0000-0000-7100-8000-000000000005',phase:'requirements'}); return Promise.resolve(json({})); }
     throw new Error(url);
   }));
@@ -105,7 +108,7 @@ it('shows the final turn failure even when the saved text pack completed before 
   let failed = false;
   vi.stubGlobal('fetch', vi.fn((url: string) => {
     if (url === '/api/codex/status') return Promise.resolve(json({installed:true,auth:'chatgpt',models:[{id:'test',name:'Test'}]}));
-    if (url.startsWith('/api/chat?')) return Promise.resolve(json({id:'failed-turn',messages:[{id:'assistant',role:'assistant',status:failed?'failed':'streaming',content:pack.content}]}));
+    if (url.startsWith('/api/chat?')) return Promise.resolve(json({id:'failed-turn',selectedModel:{id:'test',name:'Test'},messages:[{id:'assistant',role:'assistant',status:failed?'failed':'streaming',content:pack.content}]}));
     if (url.startsWith('/api/chat/packs?')) return Promise.resolve(json({packs:url.includes('afterPackId')?[]:[{packId:pack.packId,state:'closed'}]}));
     return Promise.resolve(json({pack}));
   }));
@@ -177,7 +180,7 @@ it.each(['completed', 'interrupted', 'failed'] as const)('keeps Aura visible dur
   const user = testPack('New request', {packId:`user-${outcome}`,sequence:2,role:'user'});
   vi.stubGlobal('fetch', vi.fn((url: string) => {
     if (url === '/api/codex/status') return Promise.resolve(json({installed:true,auth:'chatgpt',models:[{id:'test',name:'Test'}]}));
-    if (url.startsWith('/api/chat?')) return Promise.resolve(json({id:`tool-turn-${outcome}`,messages:[{id:'assistant',role:'assistant',status:working?'streaming':outcome,content:''}]}));
+    if (url.startsWith('/api/chat?')) return Promise.resolve(json({id:`tool-turn-${outcome}`,selectedModel:{id:'test',name:'Test'},messages:[{id:'assistant',role:'assistant',status:working?'streaming':outcome,content:''}]}));
     if (url.startsWith('/api/chat/packs?')) return Promise.resolve(json({packs:url.includes('afterPackId')?[]:[earlier,user,pack].map(item => ({packId:item.packId,state:item.state}))}));
     return Promise.resolve(json({pack:url.includes(`/packs/${earlier.packId}?`)?earlier:url.includes(`/packs/${user.packId}?`)?user:pack}));
   }));
@@ -223,7 +226,7 @@ it('isolates phase history, drafts, requests and subscriptions and ignores a lat
     const current = new URL(url, 'http://localhost').searchParams.get('phase');
     if (url.startsWith('/api/chat?')) {
       if (delay && current === 'documents') return new Promise<Response>(resolve => { release = resolve; });
-      return Promise.resolve(json({id:current,messages:[]}));
+      return Promise.resolve(json({id:current,selectedModel:{id:'test',name:'Test'},messages:[]}));
     }
     if (url === '/api/chat/send') return Promise.resolve(json({}));
     const pack = testPack(`${current} history`, {packId:`phase-${current}`});
@@ -250,4 +253,151 @@ it('isolates phase history, drafts, requests and subscriptions and ignores a lat
   await waitFor(() => expect(textarea().value).toBe('documents draft'));
   const socket = FakeWebSocket.instances.find(socket => !socket.closed)!;
   await waitFor(() => expect([...socket.subscriptions.values()].filter(sub => sub.topic === 'chat').map(sub => sub.scope.phase)).toEqual(['documents']));
+});
+
+it('モデル保存前に始まった遅い履歴取得で選択を巻き戻さない',async()=>{
+ let selected='a', stale=false;
+ let resolveOld!:(response:Response)=>void;
+ const old=new Promise<Response>(resolve=>{resolveOld=resolve;});
+ const snapshot=(id:string)=>json({id:'race',messages:[],selectedModel:{id,name:id}});
+ vi.stubGlobal('fetch',vi.fn((url:string,init?:RequestInit)=>{
+  if(url==='/api/codex/status')return Promise.resolve(json({installed:true,auth:'chatgpt',models:[{id:'a',name:'a'},{id:'b',name:'b'}]}));
+  if(url.startsWith('/api/chat/packs'))return Promise.resolve(json({packs:[]}));
+  if(url.startsWith('/api/chat?')){if(stale){stale=false;return old;}return Promise.resolve(snapshot(selected));}
+  if(url==='/api/chat/model'){selected=JSON.parse(String(init?.body)).model;return Promise.resolve(snapshot(selected));}
+  throw Error(url);
+ }));
+ render(()=><ChatPanel projectId="019a0000-0000-7000-8000-000000000abc" />);
+ const model=screen.getByRole('combobox',{name:'モデル'}) as HTMLSelectElement;
+ await waitFor(()=>expect(model.value).toBe('codex:a'));
+ const socket=FakeWebSocket.instances[0];
+ await waitFor(()=>expect(socket.subscriptions.size).toBe(1));
+ stale=true;socket.event('chat',{name:'chat.changed',data:{}});
+ fireEvent.change(model,{target:{value:'codex:b'}});
+ await waitFor(()=>expect(model.value).toBe('codex:b'));
+ expect(selected).toBe('a');
+ resolveOld(snapshot('a'));
+ await waitFor(()=>expect(model.value).toBe('codex:b'));
+ fireEvent.input(screen.getByRole('textbox',{name:'希望や回答を入力'}),{target:{value:'hello'}});
+ await waitFor(()=>expect((screen.getByRole('button',{name:'送信'}) as HTMLButtonElement).disabled).toBe(false));
+ expect(model.value).toBe('codex:b');
+});
+
+it('保存モデルが先に届いても後から追加したモデル一覧で選択表示を一致させる',async()=>{
+ let release!:(response:Response)=>void;
+ const status=new Promise<Response>(resolve=>{release=resolve;});
+ vi.stubGlobal('fetch',vi.fn((url:string)=>{
+  if(url==='/api/codex/status')return status;
+  if(url.startsWith('/api/chat/packs'))return Promise.resolve(json({packs:[]}));
+  if(url.startsWith('/api/chat?'))return Promise.resolve(json({id:'late-models',messages:[],selectedModel:{id:'b',name:'Model B'}}));
+  throw Error(url);
+ }));
+ render(()=><ChatPanel projectId="019a0000-0000-7000-8000-000000000abd" />);
+ await screen.findByRole('option',{name:'⚠️ Codex/Model B'});
+ release(json({installed:true,auth:'chatgpt',models:[{id:'a',name:'Model A'},{id:'b',name:'Model B'}]}));
+ await waitFor(()=>expect((screen.getByRole('combobox',{name:'モデル'}) as HTMLSelectElement).value).toBe('codex:b'));
+ expect((await screen.findByRole('option',{name:'Codex/Model B'}) as HTMLOptionElement).selected).toBe(true);
+});
+
+it('一覧取得を共有し通常フェーズ移動では選択を即復元し、警告フェーズだけ再同期する',async()=>{
+ const [phase,setPhase]=createSignal<'requirements'|'documents'>('requirements');
+ const projectId='019a0000-0000-7000-8000-000000000ac0';
+ let models=[{id:'a',name:'A'},{id:'b',name:'B'}],calls=0;
+ const requests:string[]=[];
+ vi.stubGlobal('fetch',vi.fn((url:string)=>{
+  requests.push(url);
+  if(url==='/api/codex/status'){calls++;return Promise.resolve(json({installed:true,auth:'chatgpt',models}));}
+  if(url.startsWith('/api/chat/packs'))return Promise.resolve(json({packs:[]}));
+  if(url.startsWith('/api/chat?'))return Promise.resolve(json({id:phase(),messages:[],selectedModel:phase()==='documents'?{id:'missing',name:'Missing'}:{id:'a',name:'A'}}));
+  throw Error(url);
+ }));
+ render(()=><ChatPanel projectId={projectId} taskId="019a0000-0000-7100-8000-000000000ac0" phase={phase()}/>);
+ const select=screen.getByRole('combobox',{name:'モデル'}) as HTMLSelectElement;
+ await waitFor(()=>expect(select.value).toBe('codex:a'));
+ fireEvent.change(select,{target:{value:'codex:b'}});
+ expect(select.value).toBe('codex:b');expect(calls).toBe(1);
+ setPhase('documents');
+ await screen.findByRole('option',{name:'⚠️ Codex/Missing'});
+ await waitFor(()=>expect(calls).toBe(2));
+ await loadModels();
+ setPhase('requirements');expect(select.value).toBe('codex:b');expect(calls).toBe(2);
+ models=[...models,{id:'missing',name:'Missing'}];
+ setPhase('documents');expect(select.value).toBe('codex:missing');
+ await waitFor(()=>expect(calls).toBe(3));
+ await screen.findByRole('option',{name:'Codex/Missing'});
+ expect(requests.filter(url=>url==='/api/chat/model')).toHaveLength(0);
+});
+
+it.each(['MODEL_UNAVAILABLE',undefined])('受理前エラー%sではモデル不可だけ警告にして追記を保持する',async(code)=>{
+ let release!:(response:Response)=>void;
+ const response=new Promise<Response>(resolve=>{release=resolve;});
+ vi.stubGlobal('fetch',vi.fn((url:string)=>{
+  if(url==='/api/codex/status')return Promise.resolve(json({installed:true,auth:'chatgpt',models:[{id:'a',name:'A'},{id:'b',name:'B'}]}));
+  if(url.startsWith('/api/chat/packs'))return Promise.resolve(json({packs:[]}));
+  if(url.startsWith('/api/chat?'))return Promise.resolve(json({id:'preflight',messages:[],selectedModel:{id:'a',name:'A'}}));
+  if(url==='/api/chat/send')return response;
+  throw Error(url);
+ }));
+ render(()=><ChatPanel projectId={`019a0000-0000-7000-8000-${code?'000000000ac1':'000000000ac2'}`} />);
+ const text=screen.getByRole('textbox',{name:'希望や回答を入力'}) as HTMLTextAreaElement;
+ fireEvent.input(text,{target:{value:'original'}});
+ const send=screen.getByRole('button',{name:'送信'}) as HTMLButtonElement;
+ await waitFor(()=>expect(send.disabled).toBe(false));fireEvent.click(send);
+ fireEvent.input(text,{target:{value:'new note'}});
+ release({ok:false,status:code?400:500,json:async()=>({error:'rejected',code})} as Response);
+ await screen.findByRole('alert');
+ if(code){expect(text.value).toBe('original\nnew note');expect(send.disabled).toBe(true);await screen.findByRole('option',{name:'⚠️ Codex/A'});fireEvent.change(screen.getByRole('combobox'),{target:{value:'codex:b'}});expect(send.disabled).toBe(false);}
+ else{expect(text.value).toBe('new note');expect(send.disabled).toBe(false);expect(screen.queryByRole('option',{name:'⚠️ Codex/A'})).toBeNull();}
+});
+
+it('受理後のモデル拒否は元フェーズの送信IDへ一度だけ復元し、古い拒否で新選択を戻さない',async()=>{
+ const [phase,setPhase]=createSignal<'requirements'|'documents'>('requirements');
+ let rejected=false,accepted=false;
+ const messages=()=>accepted?[{id:'u',sendId:'send-unique',role:'user',content:'original',status:'completed',model:'a'},{id:'a',sendId:'send-unique',role:'assistant',content:'',status:rejected?'failed':'streaming',model:'a',...(rejected?{errorCode:'MODEL_UNAVAILABLE'}:{})}]:[];
+ vi.stubGlobal('fetch',vi.fn((url:string)=>{
+  if(url==='/api/codex/status')return Promise.resolve(json({installed:true,auth:'chatgpt',models:[{id:'a',name:'A'},{id:'b',name:'B'}]}));
+  if(url.startsWith('/api/chat/packs'))return Promise.resolve(json({packs:[]}));
+  if(url.startsWith('/api/chat?'))return Promise.resolve(json({id:phase(),messages:phase()==='requirements'?messages():[],selectedModel:{id:'a',name:'A'}}));
+  if(url==='/api/chat/send'){accepted=true;return Promise.resolve(json({messages:messages()}));}
+  throw Error(url);
+ }));
+ render(()=><ChatPanel projectId="019a0000-0000-7000-8000-000000000ac3" taskId="019a0000-0000-7100-8000-000000000ac3" phase={phase()}/>);
+ const text=()=>screen.getByRole('textbox',{name:'希望や回答を入力'}) as HTMLTextAreaElement;
+ fireEvent.input(text(),{target:{value:'original'}});
+ await waitFor(()=>expect((screen.getByRole('button',{name:'送信'}) as HTMLButtonElement).disabled).toBe(false));fireEvent.click(screen.getByRole('button',{name:'送信'}));
+ await waitFor(()=>expect(text().value).toBe(''));
+ fireEvent.input(text(),{target:{value:'new note'}});
+ setPhase('documents');rejected=true;setPhase('requirements');
+ await waitFor(()=>expect(text().value).toBe('original\nnew note'));
+ await screen.findByRole('option',{name:'⚠️ Codex/A'});
+ fireEvent.change(screen.getByRole('combobox'),{target:{value:'codex:b'}});
+ const socket=FakeWebSocket.instances.find(socket=>!socket.closed)!;
+ socket.event('chat',{name:'chat.changed',data:{}});
+ await waitFor(()=>expect((screen.getByRole('combobox') as HTMLSelectElement).value).toBe('codex:b'));
+ expect(text().value).toBe('original\nnew note');
+ expect((screen.getByRole('button',{name:'送信'}) as HTMLButtonElement).disabled).toBe(false);
+});
+
+it('同時パネルは一覧取得を共有し、ローカル選択は再初期化後も古い履歴より優先する',async()=>{
+ let release!:(response:Response)=>void;
+ let calls=0;
+ const pending=new Promise<Response>(resolve=>{release=resolve;});
+ vi.stubGlobal('fetch',vi.fn((url:string)=>{
+  if(url==='/api/codex/status'){calls++;return calls===1?pending:Promise.resolve(json({installed:true,auth:'chatgpt',models:[{id:'a',name:'A'},{id:'b',name:'B'}]}));}
+  if(url.startsWith('/api/chat/packs'))return Promise.resolve(json({packs:[]}));
+  if(url.startsWith('/api/chat?'))return Promise.resolve(json({id:'cached',messages:[],selectedModel:{id:'a',name:'A'}}));
+  throw Error(url);
+ }));
+ const first='019a0000-0000-7000-8000-000000000ac4',second='019a0000-0000-7000-8000-000000000ac5';
+ render(()=><><ChatPanel projectId={first}/><ChatPanel projectId={second}/></>);
+ expect(calls).toBe(1);
+ release(json({installed:true,auth:'chatgpt',models:[{id:'a',name:'A'},{id:'b',name:'B'}]}));
+ await waitFor(()=>expect((screen.getAllByRole('combobox')[0] as HTMLSelectElement).value).toBe('codex:a'));
+ fireEvent.change(screen.getAllByRole('combobox')[0]!,{target:{value:'codex:b'}});
+ cleanup();resetModelCache();
+ render(()=><ChatPanel projectId={first}/>);
+ expect((screen.getByRole('combobox') as HTMLSelectElement).value).toBe('codex:b');
+ await screen.findByRole('option',{name:'Codex/B'});
+ expect((screen.getByRole('combobox') as HTMLSelectElement).value).toBe('codex:b');
+ expect(calls).toBe(2);
 });

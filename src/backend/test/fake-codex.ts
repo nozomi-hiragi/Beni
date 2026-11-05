@@ -17,6 +17,7 @@ for await (const line of createInterface({input:process.stdin})) {
   if(text==='write documents'&&!['shell_tool','code_mode_host'].every(feature=>process.argv.some((arg,index)=>arg==='--enable'&&process.argv[index+1]===feature))){send({id:msg.id,error:{code:-32600,message:'Required tools disabled'}});continue}
   if(text==='write documents'){writeFileSync(join(msg.params.cwd,'requirements.md'),'# Updated requirements\n');writeFileSync(join(msg.params.cwd,'implementation-plan.md'),'# Updated plan\n')}
   if(text==='disconnect')process.exit(0);
+  if(text==='reject model'){send({id:msg.id,error:{code:-32600,data:{code:'model_not_found'},message:'Model unavailable'}});continue}
   if(text==='reject'){send({id:msg.id,error:{code:-32600,message:'rejected'}});continue}
   if(text==='tools'){
    send({method:'turn/started',params:{threadId:'thread-1',turn:{id:turn}}});

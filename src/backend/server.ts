@@ -1,12 +1,12 @@
-import { Store, taskPhases } from './store/index';
-import { ChatService } from './chat';
+import { Store } from './store/index';
+import { ChatService, ModelUnavailable } from './chat';
 import { TerminalService, TerminalError } from './terminal';
 import { communicationSocket, type SocketData } from './events';
 import type { Server } from 'bun';
 import { isTaskPhase, type TaskPhase } from '../shared/task-phase';
-import { validId } from '../shared/communication';
+import { validId, isProvider, type Provider } from '../shared/communication';
 import { validProjectId, validTaskId } from '../shared/ids';
-import { readTaskDocuments, watchTaskDocuments } from './documents';
+import { implementationPlanReady, readTaskDocuments, watchTaskDocuments } from './documents';
 import { isAbsolute, dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { mkdir, opendir, realpath } from 'node:fs/promises';
@@ -75,6 +75,7 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
    }
    if (url.pathname === '/api/terminals') {const p=url.searchParams.get('projectId');if(!scope(p,null))return json({error:'プロジェクトが見つかりません'},404);return json(terminals.list(p as string))}
    if (url.pathname === '/api/codex/status') return json(await chat.status());
+   if (url.pathname === '/api/claude/status') return json(await chat.claudeStatus());
    const packMatch=url.pathname.match(/^\/api\/chat\/packs(?:\/([^/]+))?$/);
    if(packMatch){const p=url.searchParams.get('projectId');const raw=url.searchParams.get('taskId');const t=raw;if(!scope(p,t))return json({error:'会話が見つかりません'},404);const phase=url.searchParams.get('phase');if(!validChatPhase(t,phase))return json({error:'フェーズを確認してください'},400);try{const id=packMatch[1]===undefined?undefined:decodePackId(packMatch[1]);if(id!==undefined&&!validId(id))return json({error:'入力を確認してください'},400);const after=url.searchParams.get('afterPackId');if(after!==null&&!validId(after))return json({error:'入力を確認してください'},400);return json(id?await chat.pack(p as string,t,id,chatPhase(t,phase)):await chat.packs(p as string,t,url.searchParams.get('afterPackId')??undefined,chatPhase(t,phase)))}catch(error){const m=error instanceof Error?error.message:'';return json({error:m==='not found'?'パックが見つかりません':m==='not closed'?'生成中のパックです':'パックを読み込めませんでした'},m==='not found'?404:m==='not closed'?409:500)}}
    if (url.pathname === '/api/chat') {const p=url.searchParams.get('projectId');const raw=url.searchParams.get('taskId');const t=raw;if(!scope(p,t))return json({error:'会話が見つかりません'},404);const phase=url.searchParams.get('phase');if(!validChatPhase(t,phase))return json({error:'フェーズを確認してください'},400);try{const {packs,...conversation}=await chat.get(p as string,t,chatPhase(t,phase));return json(conversation)}catch{return json({error:'履歴を読み込めませんでした'},500)}}
@@ -90,7 +91,7 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
     }catch(error){const message=error instanceof Error?error.message:'';return json({error:'変更履歴を取得できませんでした'},message==='invalid cursor'?400:message.includes('not found')||message.includes('Unknown')?404:500)}
    }
    const match = url.pathname.match(/^\/api\/tasks\/([^/]+)$/);
-   if (match) { if(!validTaskId(match[1]))return json({error:'タスクが見つかりません'},404);const task=store.task(match[1]); if (!task) return json({error:'タスクが見つかりません'},404); const t=projectTask(task); try {const project=scope(t.projectId,t.id)!;const path=documentFolder(store,project,t);return json({task:projectTask(store.task(t.id)),documents:readTaskDocuments(path)});}catch{return json({error:'文書を読み込めませんでした'},500)} }
+   if (match) { if(!validTaskId(match[1]))return json({error:'タスクが見つかりません'},404);const task=store.task(match[1]); if (!task) return json({error:'タスクが見つかりません'},404); const t=projectTask(task); try {const project=scope(t.projectId,t.id)!;const path=documentFolder(store,project,t);const documents=readTaskDocuments(path);return json({task:projectTask(store.task(t.id)),documents,canStart:implementationPlanReady(documents)});}catch{return json({error:'文書を読み込めませんでした'},500)} }
    return json({error:'見つかりません'},404);
    } catch {return json({error:'保存データを読み込めませんでした'},500)}
   }
@@ -113,10 +114,10 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
     const p=input.projectId,t=input.taskId??null;const project=scope(p,t);if(!project)return json({error:'会話が見つかりません'},404);
     if(!validChatPhase(t,input.phase))return json({error:'フェーズを確認してください'},400);
     try {if(url.pathname.endsWith('/interrupt')){await chat.interrupt(p as string,t as string|null,chatPhase(t,input.phase));return json({ok:true})}
-     if(typeof input.content!=='string'||!input.content.trim()||!(input.model===null||(typeof input.model==='string'&&input.model.length<=256)))return json({error:'入力を確認してください'},400);
+     if((input.provider!==undefined&&!isProvider(input.provider))||typeof input.content!=='string'||!input.content.trim()||!(input.model===null||(typeof input.model==='string'&&input.model.length<=256)))return json({error:'入力を確認してください'},400);
      if(t!==null&&store.task(t as string)!.phase!==input.phase)return json({error:'フェーズが変更されています'},409);
-     const {packs,...conversation}=await chat.send(p as string,t as string|null,input.content,input.model as string|null,project.folder,t===null?undefined:documentFolder(store,project,projectTask(store.task(t as string))),chatPhase(t,input.phase));return json(conversation,202);
-    } catch(e) {const message=e instanceof Error?e.message:'';return json({error:message==='busy'?'送信中です':message==='unavailable'?'Codex の接続状態を確認してください':message==='unsafe configuration'?'Codex の外部ツールを無効にできませんでした':message==='not running'?'停止できる処理がありません':'保存または接続に失敗しました'},message==='busy'||message==='not running'?409:message==='unavailable'||message==='unsafe configuration'?400:500)}
+     const {packs,...conversation}=await chat.send(p as string,t as string|null,input.content,input.model as string|null,project.folder,t===null?undefined:documentFolder(store,project,projectTask(store.task(t as string))),chatPhase(t,input.phase),false,input.provider as Provider|undefined);return json(conversation,202);
+    } catch(e) {const message=e instanceof Error?e.message:'';return json({...(e instanceof ModelUnavailable ? {code:'MODEL_UNAVAILABLE'} : {}),error:e instanceof ModelUnavailable?'選択したモデルを利用できません':message==='busy'?'送信中です':message==='unavailable'?`${input.provider==='claude'?'Claude Code':'Codex'} の接続状態を確認してください`:message==='unsafe configuration'?'Codex の外部ツールを無効にできませんでした':message==='not running'?'停止できる処理がありません':'保存または接続に失敗しました'},message==='busy'||message==='not running'?409:e instanceof ModelUnavailable||message==='unavailable'||message==='unsafe configuration'?400:500)}
    }
    if (url.pathname === '/api/folders/list') {
     const path = input.path === undefined ? initialFolder : input.path;
@@ -125,19 +126,29 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
     catch { return json({error:'フォルダを開けませんでした'},400); }
    }
    if (url.pathname === '/api/projects') {if(typeof input.name!=='string'||typeof input.folder!=='string'||!isAbsolute(input.folder)) return json({error:'名前と絶対パスを入力してください'},400);if(!input.name.trim())return json({error:'名前を入力してください'},400);return json(store.createProject(input.name,input.folder),201)}
-   const phaseMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/phase$/);
+   const phaseMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/(phase|start|stop)$/);
    if (phaseMatch) {
-    if (typeof input.phase !== 'string' || !taskPhases.includes(input.phase as typeof taskPhases[number]) || !validProjectId(input.projectId) || (input.direction!==undefined&&input.direction!=='next'&&input.direction!=='back')) return json({error:'フェーズを確認してください'},400);
-    if (!validTaskId(phaseMatch[1]) || !scope(input.projectId, phaseMatch[1])) return json({error:'タスクが見つかりません'},404);
+    if (!isTaskPhase(input.phase) || !validProjectId(input.projectId) || (phaseMatch[2]==='phase'&&(!isTaskPhase(input.target)||input.target==='implementation'))) return json({error:'フェーズを確認してください'},400);
+    const taskId=phaseMatch[1]!, projectId=input.projectId, expectedPhase=input.phase;
+    if(phaseMatch[2]==='start'&&((input.provider!==undefined&&!isProvider(input.provider))||!(input.model===null||(typeof input.model==='string'&&input.model.length<=256))))return json({error:'入力を確認してください'},400);
+    if (!validTaskId(taskId) || !scope(input.projectId, taskId)) return json({error:'タスクが見つかりません'},404);
     try {
-     const task = chat.withIdleTask(input.projectId, phaseMatch[1]!, () => store.advanceTaskPhase(input.projectId as string, phaseMatch[1]!, input.phase as string, input.direction as 'next'|'back'|undefined));
-     taskEventsChanged(input.projectId,phaseMatch[1]!);
+     const change=()=>{
+      if(store.task(taskId)!.phase!==input.phase)throw Error('phase conflict');
+      const action=phaseMatch[2];
+      if((action==='stop')!==(input.phase==='implementation'))throw Error('phase conflict');
+      if(action==='start'&&!implementationPlanReady(readTaskDocuments(store.taskDocumentFolder(projectId,taskId))))throw Error('plan required');
+      return store.selectTaskPhase(projectId,taskId,expectedPhase,action==='start'?'implementation':action==='stop'?'implementation-plan':input.target as TaskPhase);
+     };
+     const task=phaseMatch[2]==='start'?await chat.startTask(projectId,taskId,change,()=>{store.selectTaskPhase(projectId,taskId,'implementation',expectedPhase)},input.model as string|null,scope(projectId,taskId)!.folder,store.taskDocumentFolder(projectId,taskId),input.provider as Provider|undefined):phaseMatch[2]==='stop'?await chat.stopTask(projectId,taskId,change,()=>{if(expectedPhase!=='implementation'||store.task(taskId)!.phase!==expectedPhase)throw Error('phase conflict')}):chat.withIdleTask(projectId,taskId,change);
+     taskEventsChanged(input.projectId,taskId);
      return json(projectTask(task));
     } catch (error) {
      const message = error instanceof Error ? error.message : '';
-     return json({error:message === 'busy' ? 'チャットの処理中はフェーズを変更できません' : message === 'phase conflict' ? 'フェーズが変更されています' : 'フェーズを保存できませんでした'}, message === 'busy' || message === 'phase conflict' ? 409 : 500);
+     return json({...(error instanceof ModelUnavailable ? {code:'MODEL_UNAVAILABLE'} : {}),error:error instanceof ModelUnavailable?'選択したモデルを利用できません':message === 'busy' ? 'チャットの処理中はフェーズを変更できません' : message === 'phase conflict' ? 'フェーズが変更されています' : message==='plan required'?'実装手順を作成してください':message==='unavailable'?`${input.provider==='claude'?'Claude Code':'Codex'} の接続状態を確認してください`:'フェーズを保存できませんでした'}, ['busy','phase conflict','plan required'].includes(message) ? 409 : error instanceof ModelUnavailable||message==='unavailable'?400:500);
     }
    }
+
    const deleteMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/delete$/);
    if (deleteMatch) {
     if (!validTaskId(deleteMatch[1]) || !scope(input.projectId, deleteMatch[1])) return json({error:'タスクが見つかりません'},404);

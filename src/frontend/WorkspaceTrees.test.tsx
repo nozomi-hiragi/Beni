@@ -1,3 +1,4 @@
+import { resetModelCache } from './model-cache';
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-library';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -17,7 +18,7 @@ function json(value: unknown): Response {
   return { ok: true, json: async () => value } as Response;
 }
 
-beforeEach(() => {
+beforeEach(() => { resetModelCache(); localStorage.clear();
   // jsdom has no layout or ResizeObserver; chat scrolling is tested separately.
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} });
   FakeWebSocket.instances = []; vi.stubGlobal('WebSocket', FakeWebSocket); });
@@ -152,8 +153,9 @@ describe('Workspace task and document tabs', () => {
     vi.stubGlobal('fetch', vi.fn((path: string, init?: RequestInit) => {
       if (path === '/api/state' && !init) return Promise.resolve(json({ projects: [], tasks: [task] }));
       if (path === '/api/tasks/019a0000-0000-7100-8000-00000000000b' && !init) return Promise.resolve(json({ task, messages: [], documents: [] }));
+      if (path === '/api/chat/model') return Promise.resolve(json({id:'c',messages:[...messages],selectedModel:{id:JSON.parse(String(init?.body)).model,name:'Test'}}));
       if (path === '/api/codex/status') return Promise.resolve(json({installed:true,auth:'chatgpt',models:[{id:'test',name:'Test'}],usage:'unknown'}));
-      if (path.startsWith('/api/chat?')) return Promise.resolve(json({id:'c',projectId:'019a0000-0000-7000-8000-000000000008',taskId:'019a0000-0000-7100-8000-00000000000b',threadId:null,messages:[...messages]}));
+      if (path.startsWith('/api/chat?')) return Promise.resolve(json({id:'c',projectId:'019a0000-0000-7000-8000-000000000008',taskId:'019a0000-0000-7100-8000-00000000000b',threadId:null,selectedModel:{id:'test',name:'Test'},messages:[...messages]}));
       const pack = packResponse(path, messages); if (pack) return Promise.resolve(pack);
       if (path === '/api/chat/send' && init?.method === 'POST') { posts++; return post.promise; }
       throw new Error(`Unexpected request: ${path}`);
@@ -216,8 +218,9 @@ describe('Workspace task and document tabs', () => {
     vi.stubGlobal('fetch', vi.fn((path: string, init?: RequestInit) => {
       if (path === '/api/state' && !init) return Promise.resolve(json({ projects: [], tasks: [task] }));
       if (path === '/api/tasks/019a0000-0000-7100-8000-00000000001f' && !init) return Promise.resolve(json({ task, messages: [], documents: [] }));
+      if (path === '/api/chat/model') return Promise.resolve(json({id:'c',messages:[...messages],selectedModel:{id:JSON.parse(String(init?.body)).model,name:'Test'}}));
       if (path === '/api/codex/status') return Promise.resolve(json({installed:true,auth:'chatgpt',models:[{id:'test',name:'Test'}],usage:'unknown'}));
-      if (path.startsWith('/api/chat?')) return Promise.resolve(json({id:'c',projectId:'019a0000-0000-7000-8000-00000000000e',taskId:'019a0000-0000-7100-8000-00000000001f',threadId:null,messages:[...messages]}));
+      if (path.startsWith('/api/chat?')) return Promise.resolve(json({id:'c',projectId:'019a0000-0000-7000-8000-00000000000e',taskId:'019a0000-0000-7100-8000-00000000001f',threadId:null,selectedModel:{id:'test',name:'Test'},messages:[...messages]}));
       const pack = packResponse(path, messages); if (pack) return Promise.resolve(pack);
       if (path === '/api/chat/send' && init?.method === 'POST') return post.promise;
       throw new Error(`Unexpected request: ${path}`);
@@ -293,25 +296,29 @@ describe('Workspace task and document tabs', () => {
 
   it('distinguishes document versions and opens the latest revision from the phase indicator', async () => {
     const task = { id:'019a0000-0000-7100-8000-00000000003d', projectId:'019a0000-0000-7000-8000-000000000011', name: '版', phase: 'requirements', status: 'idle' };
-    const documents = [{ name: '指示書.md', content: '第一版の内容', version: 1 }, { name: '指示書.md', content: '第二版の内容', version: 2 }];
+    const documents = [{ name: 'requirements.md', content: '第一版の内容', version: 1 }, { name: 'requirements.md', content: '第二版の内容', version: 2 }];
     vi.stubGlobal('fetch', vi.fn((path: string, init?: RequestInit) => {
       if (path === '/api/state' && !init) return Promise.resolve(json({ projects: [], tasks: [task] }));
       if (path === '/api/tasks/019a0000-0000-7100-8000-00000000003d' && !init) return Promise.resolve(json({ task, messages: [], documents }));
+      if (path === `/api/tasks/${task.id}/phase`) {
+        expect(JSON.parse(String(init?.body))).toEqual({projectId:task.projectId,phase:'requirements',target:'requirements'});
+        return Promise.resolve(json(task));
+      }
       throw new Error(`Unexpected request: ${path}`);
     }));
     render(() => <Workspace taskId={'019a0000-0000-7100-8000-00000000003d'} onHome={() => {}} />);
-    await screen.findByRole('tab', { name: '指示書.md · v2' });
+    await screen.findByRole('tab', { name: '要件定義 · v2' });
     expect(screen.getByText('第二版の内容')).toBeTruthy();
-    fireEvent.click(screen.getByRole('tab', { name: '指示書.md · v1' }));
+    fireEvent.click(screen.getByRole('tab', { name: '要件定義 · v1' }));
     expect(screen.getByText('第一版の内容')).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: '指示書.md · v2 を閉じる' }));
-    expect(screen.queryByRole('tab', { name: '指示書.md · v2' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: '要件定義 · v2 を閉じる' }));
+    expect(screen.queryByRole('tab', { name: '要件定義 · v2' })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: '要件定義' }));
-    expect(screen.getByText('第二版の内容')).toBeTruthy();
-    expect(screen.getByRole('tab', { name: '指示書.md · v2' }).getAttribute('aria-selected')).toBe('true');
+    expect(await screen.findByText('第二版の内容')).toBeTruthy();
+    expect(screen.getByRole('tab', { name: '要件定義 · v2' }).getAttribute('aria-selected')).toBe('true');
     fireEvent.click(screen.getByRole('button', { name: '文書ツリーを開閉' }));
-    expect(screen.getByRole('button', { name: '指示書.md · v1' })).toBeTruthy();
-    expect(screen.getByRole('button', { name: '指示書.md · v2' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '要件定義 · v1' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '要件定義 · v2' })).toBeTruthy();
   });
 });
 

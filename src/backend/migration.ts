@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import { generateId, validProjectId, validTaskId } from '../shared/ids';
 import { directory, metadata, newMetadata, projectRoot, pathExists, readJson, writeJson, validateChatDirectory } from './data';
 import { isTaskPhase } from '../shared/task-phase';
-import { packHash, validId, validPack } from '../shared/communication';
+import { packHash, validId, validPack, isProvider } from '../shared/communication';
 const digest = (path: string) => {
   const stat = lstatSync(path);
   if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) throw Error('Invalid migration file');
@@ -33,8 +33,9 @@ function equalJson(path: string, value: any) {
 export async function rewriteConversation(value: any, projectId: string, taskId: string | null, clone = false) {
   const nullableId = (id: unknown) => id === null || validId(id);
   const date = (value: unknown) => typeof value === 'string' && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value;
-  const validMessage = (m: any) => m && validId(m.id) && validId(m.sendId) && typeof m.content === 'string' && ['user', 'assistant'].includes(m.role) && m.provider === 'codex' && (m.model === null || typeof m.model === 'string') && date(m.createdAt) && date(m.updatedAt) && nullableId(m.threadId) && nullableId(m.sessionId) && ['pending', 'streaming', 'completed', 'failed', 'interrupted', 'unknown'].includes(m.status);
+  const validMessage = (m: any) => m && validId(m.id) && validId(m.sendId) && typeof m.content === 'string' && ['user', 'assistant'].includes(m.role) && isProvider(m.provider) && (m.model === null || typeof m.model === 'string') && date(m.createdAt) && date(m.updatedAt) && nullableId(m.threadId) && nullableId(m.sessionId) && ['pending', 'streaming', 'completed', 'failed', 'interrupted', 'unknown'].includes(m.status);
   if (!value || value.version !== 1 || !validId(value.id) || !nullableId(value.threadId) || !nullableId(value.sessionId) || !Array.isArray(value.messages) || !value.messages.every(validMessage) || new Set(value.messages.map((m: any) => m.id)).size !== value.messages.length) throw Error('Unsupported chat history');
+  if ((value.sessionProvider !== undefined && !isProvider(value.sessionProvider)) || (value.selectedModel != null && (typeof value.selectedModel.id !== 'string' || typeof value.selectedModel.name !== 'string' || (value.selectedModel.provider !== undefined && !isProvider(value.selectedModel.provider))))) throw Error('Unsupported chat provider');
   if (value.packs !== undefined && (!Array.isArray(value.packs) || value.packs.some((pack: any, index: number) => !validPack(pack) || pack.sequence !== index + 1 || !value.messages.some((m: any) => m.id === pack.messageId && m.sendId === pack.sendId && m.role === pack.role)) || new Set(value.packs.map((pack: any) => pack.packId)).size !== value.packs.length)) throw Error('Unsupported chat pack history');
   value.projectId = projectId;
   value.taskId = taskId;

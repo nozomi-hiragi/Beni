@@ -1,3 +1,4 @@
+import { modelScope, rejectModel } from './model-cache';
 import { batch, createEffect, createMemo, createSignal, onCleanup, onMount, Show } from 'solid-js';
 import { createStore, reconcile } from 'solid-js/store';
 import { api, ApiError } from './api';
@@ -10,7 +11,7 @@ import TabBar from './components/TabBar';
 import TreeView from './components/TreeView';
 import TerminalPanel from './components/TerminalPanel';
 import ResizeHandle from './components/ResizeHandle';
-import type { AppState, Document, Task, TaskDetail } from './types';
+import type { AppState, Document, Model, Task, TaskDetail } from './types';
 
 export interface WorkspaceProps {
   taskId?: string;
@@ -24,6 +25,7 @@ const documentId = (document: Document) => document.path ?? JSON.stringify([docu
 type DocumentTabs = { known: string[]; open: string[]; selected?: string };
 
 export default function Workspace(props: WorkspaceProps) {
+  const [selectedModel, setSelectedModel] = createSignal<Model | null>(null);
   const [detailState,setDetailState]=createStore<{value?:TaskDetail}>({});
   const detail=()=>detailState.value;
   const setDetail=(value:TaskDetail|undefined)=>setDetailState('value',value===undefined?undefined:reconcile(value,{key:'id'}));
@@ -249,33 +251,36 @@ export default function Workspace(props: WorkspaceProps) {
             <Show when={loadError()}><div role="alert" class="alert alert-error text-sm">{loadError()}</div></Show>
             <Show when={loading() && !detail()}><p class="p-4 text-sm text-base-content/60">読み込み中...</p></Show>
             <Show when={detail() && detail()?.task.id === activeTask()}>
-              <PhaseIndicator phase={detail()!.task.phase} advancing={advancing()} onChange={async direction => {
-                const current = detail();
-                if (!current || advancing()) return;
+              <PhaseIndicator phase={detail()!.task.phase} advancing={advancing()} canStart={!!detail()?.canStart && !!selectedModel()} onChange={async target => {
+                const current = detail(), requestedModel = selectedModel();
+                if (!current || advancing() || (target === 'start' && !selectedModel())) return;
                 setAdvancing(true); setPhaseError('');
                 try {
-                  const result = await api<Task>(`/api/tasks/${current.task.id}/phase`, {projectId: current.task.projectId, phase: current.task.phase, direction});
+                  const result = await api<Task>(`/api/tasks/${current.task.id}/${target === 'start' || target === 'stop' ? target : 'phase'}`, {projectId: current.task.projectId, phase: current.task.phase, ...(target === 'start' ? {model: requestedModel?.id, provider: requestedModel?.provider ?? 'codex'} : target === 'stop' ? {} : {target})});
                   if (detail()?.task.id === current.task.id) {
-                    setDetail({...detail()!, task: result});
+                    setDetail({...detail()!, task: result, canStart: false});
                     setTasks(previous => previous.map(item => item.id === result.id ? result : item));
                     props.onTaskChange?.(result.id, result);
                     const next = phaseDocuments.find(item => item.phase === result.phase);
                     const target = documents().filter(item => item.name === next?.name).reduce<Document | undefined>((latest, item) => !latest || item.version > latest.version ? item : latest, undefined);
                     if (target) openDocument(documentId(target));
+                    const refreshed = await api<TaskDetail>(`/api/tasks/${current.task.id}`);
+                    if (alive && detail()?.task.id === current.task.id) {
+                      setDetail(refreshed);
+                      adoptDocuments(current.task.id, refreshed.documents);
+                    }
                   }
                 } catch (error) {
+                  if (error instanceof ApiError && error.code === 'MODEL_UNAVAILABLE' && requestedModel) rejectModel(modelScope(current.task.projectId, current.task.id, current.task.phase), requestedModel.id, requestedModel.provider);
                   if (error instanceof ApiError && error.status === 409) {
                     try { const refreshed = await api<TaskDetail>(`/api/tasks/${current.task.id}`); if (alive && detail()?.task.id === current.task.id) { batch(() => { setDetail(refreshed); adoptDocuments(current.task.id, refreshed.documents); setTasks(previous => previous.map(item => item.id === refreshed.task.id ? refreshed.task : item)); }); props.onTaskChange?.(refreshed.task.id, refreshed.task); } } catch { /* 元のエラーを表示する。 */ }
                   }
                   if (alive && detail()?.task.id === current.task.id) setPhaseError(error instanceof Error ? error.message : 'フェーズを更新できませんでした');
                 }
                 finally { setAdvancing(false); }
-              }} onDocument={name => {
-                const document = documents().filter(item => (item.name === name || name === 'requirements.md' && item.name === '指示書.md')).reduce<Document | undefined>((latest, item) => !latest || item.version > latest.version ? item : latest, undefined);
-                if (document) openDocument(documentId(document));
               }} />
               <Show when={phaseError()}><p role="alert" class="p-2 text-sm text-error">{phaseError()}</p></Show>
-              <Show when={isTaskPhase(detail()?.task.phase)}><ChatPanel projectId={detail()!.task.projectId} taskId={activeTask()} phase={isTaskPhase(detail()?.task.phase) ? detail()?.task.phase as TaskPhase : undefined} /></Show>
+              <Show when={isTaskPhase(detail()?.task.phase)}><ChatPanel onModelChange={setSelectedModel} projectId={detail()!.task.projectId} taskId={activeTask()} phase={isTaskPhase(detail()?.task.phase) ? detail()?.task.phase as TaskPhase : undefined} /></Show>
             </Show>
           </Show>
         </div>

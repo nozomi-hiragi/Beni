@@ -369,7 +369,7 @@ test('phase advances once per expected phase and rejects busy preparations and a
  const project=store.createProject('Example',folder);const task=store.createTask(project.id,'Task');
  const chat=new ChatService(()=>folder,()=>join(import.meta.dir,'test/fake-codex.ts'));const handle=createHandler(store,folder,chat);
  const post=(path:string,data:unknown)=>handle(new Request(`http://127.0.0.1:3210${path}`,{method:'POST',headers:{origin:'http://127.0.0.1:3210','content-type':'application/json'},body:JSON.stringify(data)}));
- const advance=(phase:unknown,projectId=project.id)=>post(`/api/tasks/${task.id}/phase`,{projectId,phase});
+ const advance=(phase:unknown,projectId=project.id)=>post(`/api/tasks/${task.id}/phase`,{projectId,phase,target:phase==='requirements'?'documents':phase==='documents'?'implementation-plan':'requirements'});
  try {
   expect((await advance('unknown')).status).toBe(400);
   expect((await advance('requirements',generateId('project'))).status).toBe(404);
@@ -384,7 +384,7 @@ test('phase advances once per expected phase and rejects busy preparations and a
   expect(response!.status).toBe(200);const updated=await response!.json();expect(updated.phase).toBe('documents');expect(Date.parse(updated.updatedAt)).toBeGreaterThan(Date.parse(task.updatedAt!));
   expect((await advance('requirements')).status).toBe(409);
   expect((await (await advance('documents')).json()).phase).toBe('implementation-plan');
-  expect((await (await advance('implementation-plan')).json()).phase).toBe('implementation');
+  expect((await (await advance('implementation-plan')).json()).phase).toBe('requirements');
   expect((await advance('implementation')).status).toBe(409);
  } finally {store.close();await rm(folder,{recursive:true,force:true})}
 });
@@ -405,9 +405,9 @@ test('HTTPはタスク会話phaseを必須とし、イベントのページ・�
   const event=first.events[0];const version=await (await get(`/api/tasks/${task.id}/events/versions/${event.version}?projectId=${project.id}`)).json();expect(version.version).toBe(event.version);expect(typeof version.content).toBe('string');
   for(const suffix of ['&after=-1','&after=1.5','&after=NaN','&limit=0','&limit=101','&through=0&after=1'])expect((await get(path+suffix)).status).toBe(400);
   expect((await get(path+'&after=999999')).status).toBe(404);expect((await get(`/api/tasks/${task.id}/events/versions/${'0'.repeat(64)}?projectId=${project.id}`)).status).toBe(404);
-  expect((await post(`/api/tasks/${task.id}/phase`,{projectId:project.id,phase:'requirements',direction:'back'})).status).toBe(409);
-  expect((await post(`/api/tasks/${task.id}/phase`,{projectId:project.id,phase:'requirements'})).status).toBe(200);
-  expect((await post(`/api/tasks/${task.id}/phase`,{projectId:project.id,phase:'documents',direction:'back'})).status).toBe(200);
+  expect((await post(`/api/tasks/${task.id}/phase`,{projectId:project.id,phase:'requirements',target:'implementation'})).status).toBe(400);
+  expect((await post(`/api/tasks/${task.id}/phase`,{projectId:project.id,phase:'requirements',target:'documents'})).status).toBe(200);
+  expect((await post(`/api/tasks/${task.id}/phase`,{projectId:project.id,phase:'documents',target:'requirements'})).status).toBe(200);
  }finally{store.close();await rm(folder,{recursive:true,force:true})}
 });
 
@@ -420,7 +420,58 @@ test('WSのphaseスコープを検証し、タスク全体の文書・フェー�
   subscribe('requirements','chat','requirements');expect(await inbox.next()).toMatchObject({type:'subscribed'});subscribe('documents','chat','documents');expect(await inbox.next()).toMatchObject({type:'subscribed'});
   subscribe('events','task-events');expect(await inbox.next()).toEqual({type:'subscribed',subscriptionId:'events'});const initial=await inbox.next();expect(initial).toMatchObject({name:'task.events.changed'});
   await writeFile(join(folder,'.beni','tasks',task.id,'requirements.md'),'# External change');const changed=await inbox.next();expect(changed.name).toBe('task.events.changed');expect(changed.data.lastEventId).toBeGreaterThan(initial.data.lastEventId);
-  const phase=await fetch(origin+`/api/tasks/${task.id}/phase`,{method:'POST',headers:{origin,'content-type':'application/json'},body:JSON.stringify({projectId:project.id,phase:'requirements'})});expect(phase.status).toBe(200);expect(await inbox.next()).toMatchObject({subscriptionId:'events',name:'task.events.changed'});
+  const phase=await fetch(origin+`/api/tasks/${task.id}/phase`,{method:'POST',headers:{origin,'content-type':'application/json'},body:JSON.stringify({projectId:project.id,phase:'requirements',target:'documents'})});expect(phase.status).toBe(200);expect(await inbox.next()).toMatchObject({subscriptionId:'events',name:'task.events.changed'});
   ws.send(JSON.stringify({type:'unsubscribe',subscriptionId:'events'}));expect(await inbox.next()).toMatchObject({type:'unsubscribed'});
  }finally{ws.close();server.stop(true);store.close();await rm(folder,{recursive:true,force:true})}
+});
+
+test('準備phaseを直接選び、本文のある実装手順から開始して停止する',async()=>{
+ const folder=await mkdtemp(join(tmpdir(),'beni-start-stop-')),store=new Store(':memory:');
+ const project=store.createProject('Example',folder),task=store.createTask(project.id,'Task');
+ const chat=new ChatService(()=>folder,()=>join(import.meta.dir,'test/fake-codex.ts')),handle=createHandler(store,folder,chat);
+ const post=(action:string,input:object)=>handle(new Request(`http://127.0.0.1:3210/api/tasks/${task.id}/${action}`,{method:'POST',headers:{origin:'http://127.0.0.1:3210','content-type':'application/json'},body:JSON.stringify({projectId:project.id,...input})}));
+ const detail=async()=>await(await handle(new Request(`http://127.0.0.1:3210/api/tasks/${task.id}`))).json();
+ try {
+  expect((await detail()).canStart).toBe(false);
+  expect((await post('start',{phase:'requirements',model:null})).status).toBe(409);
+  expect((await post('phase',{phase:'requirements',target:'implementation-plan'})).status).toBe(200);
+  expect((await post('phase',{phase:'requirements',target:'documents'})).status).toBe(409);
+  expect((await post('phase',{phase:'implementation-plan',target:'implementation'})).status).toBe(400);
+  const plan=join(folder,'.beni','tasks',task.id,'implementation-plan.md');
+  await writeFile(plan,'  \n');expect((await detail()).canStart).toBe(false);
+  await writeFile(plan,'# 実装手順\n\n1. 仕様を実装する');expect((await detail()).canStart).toBe(true);
+  const started=await post('start',{phase:'implementation-plan',model:'model-a'});expect(started.status).toBe(200);expect((await started.json()).phase).toBe('implementation');
+  expect((await post('phase',{phase:'implementation',target:'requirements'})).status).toBe(409);
+  expect((await post('start',{phase:'implementation-plan',model:null})).status).toBe(409);
+  const stopped=await post('stop',{phase:'implementation'});expect(stopped.status).toBe(200);expect((await stopped.json()).phase).toBe('implementation-plan');
+  const messages=(await chat.get(project.id,task.id,'implementation')).messages;
+  expect(messages[0]).toMatchObject({role:'user',model:'model-a'});expect(messages[0]!.content).toContain('実装手順');
+  expect(['completed','interrupted']).toContain(messages[1]!.status);
+  const unavailable=createHandler(store,folder,new ChatService(()=>folder,()=>null));
+  const failed=await unavailable(new Request(`http://127.0.0.1:3210/api/tasks/${task.id}/start`,{method:'POST',headers:{origin:'http://127.0.0.1:3210','content-type':'application/json'},body:JSON.stringify({projectId:project.id,phase:'implementation-plan',model:null})}));
+  expect(failed.status).toBe(400);expect(store.task(task.id)!.phase).toBe('implementation-plan');
+ }finally{store.close();await rm(folder,{recursive:true,force:true})}
+});
+
+test('Claude の状態・送信と実装開始は接続先を検証して引き継ぐ',async()=>{
+ const folder=await mkdtemp(join(tmpdir(),'beni-claude-http-')),store=new Store(':memory:');
+ const project=store.createProject('Example',folder),task=store.createTask(project.id,'Task');
+ const chat=new ChatService(()=>folder,()=>null,()=>join(import.meta.dir,'test/fake-claude.ts')),handle=createHandler(store,folder,chat);
+ const post=(path:string,input:object)=>handle(new Request(`http://127.0.0.1:3210${path}`,{method:'POST',headers:{origin:'http://127.0.0.1:3210','content-type':'application/json'},body:JSON.stringify({projectId:project.id,...input})}));
+ const wait=async(phase:null|'implementation')=>{for(let i=0;i<100;i++){if((await chat.get(project.id,phase===null?null:task.id,phase)).messages.at(-1)?.status==='completed')return;await Bun.sleep(20)}throw Error('timed out')};
+ try{
+  const status=await handle(new Request('http://127.0.0.1:3210/api/claude/status'));expect(status.status).toBe(200);expect(await status.json()).toMatchObject({installed:true,auth:'claude',models:[{id:'sonnet',name:'Sonnet'},{id:'opus',name:'Opus'},{id:'haiku',name:'Haiku'}]});
+  expect(await(await handle(new Request('http://127.0.0.1:3210/api/codex/status'))).json()).toMatchObject({installed:false,models:null});
+  for(const provider of ['other',null,1,{}]){
+   expect((await post('/api/chat/send',{taskId:null,content:'hello',model:null,provider})).status).toBe(400);
+   expect((await post(`/api/tasks/${task.id}/start`,{phase:'requirements',model:null,provider})).status).toBe(400);
+  }
+  const unavailable=await post('/api/chat/send',{taskId:null,content:'hello',model:'missing',provider:'claude'});expect(unavailable.status).toBe(400);expect(await unavailable.json()).toMatchObject({code:'MODEL_UNAVAILABLE'});expect((await chat.get(project.id,null)).messages).toHaveLength(0);
+  expect((await post('/api/chat/send',{taskId:null,content:'hello',model:'opus',provider:'claude'})).status).toBe(202);await wait(null);expect((await chat.get(project.id,null)).messages.at(-1)).toMatchObject({provider:'claude',model:'opus'});
+  expect((await post(`/api/tasks/${task.id}/phase`,{phase:'requirements',target:'implementation-plan'})).status).toBe(200);
+  await writeFile(join(store.taskDocumentFolder(project.id,task.id),'implementation-plan.md'),'# 実装手順\n\n1. 仕様を実装する');
+  const started=await post(`/api/tasks/${task.id}/start`,{phase:'implementation-plan',model:'haiku',provider:'claude'});expect(started.status).toBe(200);expect((await started.json()).phase).toBe('implementation');
+  await wait('implementation');expect((await chat.get(project.id,task.id,'implementation')).messages[0]).toMatchObject({provider:'claude',model:'haiku'});
+  expect((await post(`/api/tasks/${task.id}/stop`,{phase:'implementation'})).status).toBe(200);
+ }finally{store.close();await rm(folder,{recursive:true,force:true})}
 });
