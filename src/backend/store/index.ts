@@ -3,7 +3,10 @@ import { Database } from 'bun:sqlite';
 import { existsSync, lstatSync, mkdirSync, readdirSync, renameSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { validProjectId, validTaskId } from '../../shared/ids';
-import { cleanDeletedTask, directory, metadata, newMetadata, projectRoot, recoverTasks, pathExists, writeJson, type TaskMetadata } from '../data';
+import { cleanDeletedTask, directory, metadata, newMetadata, projectRoot, recoverTasks, pathExists, writeJson, validateChatDirectory, type TaskMetadata } from '../data';
+import { taskPhases, type TaskPhase } from '../../shared/task-phase';
+import { captureTaskHistory, taskEvents, taskEventVersion } from '../task-history';
+export { taskPhases } from '../../shared/task-phase';
 export type Project = {
   id: string;
   name: string;
@@ -114,6 +117,7 @@ export class Store {
       value.documentBaseline = baseline;
       writeJson(file, value);
     }
+    captureTaskHistory(path, value.phase);
     return value;
   }
   private scopedTask(projectId: string, taskId: string) {
@@ -157,6 +161,32 @@ export class Store {
     writeJson(file, value);
     return {id: value.id, project_id: projectId, name: value.name, phase: value.phase, status: value.status, createdAt: value.createdAt, updatedAt: value.updatedAt};
   }
+  captureTaskHistory(projectId: string, taskId: string, sourcePhase: TaskPhase | null = null) {
+    const {file, value} = this.scopedTask(projectId, taskId);
+    captureTaskHistory(join(file, '..'), value.phase, sourcePhase);
+  }
+  taskEvents(projectId: string, taskId: string, after = 0, through?: number, limit = 100) {
+    const {file, value} = this.scopedTask(projectId, taskId);
+    return taskEvents(join(file, '..'), value.phase, after, through, limit);
+  }
+  taskEventVersion(projectId: string, taskId: string, version: string) {
+    const {file} = this.scopedTask(projectId, taskId);
+    return taskEventVersion(join(file, '..'), version);
+  }
+  advanceTaskPhase(projectId: string, taskId: string, expectedPhase: string, direction: 'next' | 'back' = 'next'): TaskRow {
+    const {file, value} = this.scopedTask(projectId, taskId);
+    const index = taskPhases.indexOf(expectedPhase as typeof taskPhases[number]);
+    if (index < 0) throw Error('invalid phase');
+    if (direction !== 'next' && direction !== 'back') throw Error('invalid direction');
+    const next = index + (direction === 'next' ? 1 : -1);
+    if (value.phase !== expectedPhase || next < 0 || next >= taskPhases.length) throw Error('phase conflict');
+    captureTaskHistory(join(file, '..'), value.phase);
+    value.phase = taskPhases[next]!;
+    value.updatedAt = new Date(Math.max(Date.now(), (Date.parse(value.updatedAt ?? '') || 0) + 1)).toISOString();
+    writeJson(file, value);
+    captureTaskHistory(join(file, '..'), value.phase, expectedPhase as TaskPhase);
+    return {id: value.id, project_id: projectId, name: value.name, phase: value.phase, status: value.status, createdAt: value.createdAt, updatedAt: value.updatedAt};
+  }
   deleteTask(projectId: string, taskId: string) {
     const {project} = this.scopedTask(projectId, taskId);
     const root = projectRoot(project.folder), task = join(root, 'tasks', taskId);
@@ -167,6 +197,8 @@ export class Store {
       const stat = lstatSync(chat);
       if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) throw Error('Invalid chat file');
     }
+    const phaseChat = join(chatRoot, taskId);
+    if (pathExists(phaseChat)) validateChatDirectory(phaseChat);
     const staged = join(root, `.deleting-${taskId}`);
     mkdirSync(staged, {mode:0o700});
     try { writeJson(join(staged, 'journal.json'), {version:1, projectId, taskId}); }
@@ -174,6 +206,7 @@ export class Store {
     try {
       renameSync(task, join(staged, 'task'));
       if (pathExists(chat)) renameSync(chat, join(staged, 'chat.json'));
+      if (pathExists(phaseChat)) renameSync(phaseChat, join(staged, 'chat'));
       renameSync(join(staged, 'journal.json'), join(staged, 'committed.json'));
     } catch (error) {
       recoverTasks(project.folder);

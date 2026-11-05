@@ -306,7 +306,7 @@ describe('Workspace task and document tabs', () => {
     expect(screen.getByText('第一版の内容')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: '指示書.md · v2 を閉じる' }));
     expect(screen.queryByRole('tab', { name: '指示書.md · v2' })).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: 'タスク内容' }));
+    fireEvent.click(screen.getByRole('button', { name: '要件定義' }));
     expect(screen.getByText('第二版の内容')).toBeTruthy();
     expect(screen.getByRole('tab', { name: '指示書.md · v2' }).getAttribute('aria-selected')).toBe('true');
     fireEvent.click(screen.getByRole('button', { name: '文書ツリーを開閉' }));

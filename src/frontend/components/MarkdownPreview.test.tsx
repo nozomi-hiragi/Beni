@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from '@solidjs/testing-library';
+import { cleanup, fireEvent, render, screen } from '@solidjs/testing-library';
 import { createSignal } from 'solid-js';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import MarkdownPreview from './MarkdownPreview';
 
 afterEach(cleanup);
@@ -93,6 +93,15 @@ const value = '<safe>';
     expect((screen.getByRole('checkbox') as HTMLInputElement).disabled).toBe(true);
     expect(container.textContent).toContain('Diagram');
     expect(container.textContent).toContain('Raw diagram');
+  });
+
+  it('opens only known task Markdown links without navigating the browser', () => {
+    const onDocument = vi.fn();
+    render(() => <MarkdownPreview content="[Spec](./api.md) [Outside](../api.md) [Unknown](unknown.md)" documents={['api.md']} onDocument={onDocument} />);
+    fireEvent.click(screen.getByRole('link', {name: 'Spec'}));
+    expect(onDocument).toHaveBeenCalledWith('api.md');
+    expect(screen.getByText('Outside').closest('a')?.hasAttribute('href')).toBe(false);
+    expect(screen.getByText('Unknown').closest('a')?.hasAttribute('href')).toBe(false);
   });
 
   it('keeps wide code and tables inside the preview scroll boundary', () => {

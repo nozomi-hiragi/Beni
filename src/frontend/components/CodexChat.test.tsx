@@ -35,24 +35,24 @@ it('keeps task histories separate and displays streamed status and interruption'
     if (url === '/api/codex/status') return Promise.resolve(json(status));
     if (url.startsWith('/api/chat?')) return Promise.resolve(json({id:'c', projectId:'019a0000-0000-7000-8000-00000000007b', taskId:'019a0000-0000-7100-8000-000000000005', threadId:null, messages: streaming ? [{id:'m',sendId:'s',role:'assistant',content:'途中の回答',provider:'codex',model:'test',status:'streaming'}] : []}));
     const pack = packResponse(url, streaming ? [{id:'m', role:'assistant', content:'途中の回答'}] : []); if (pack) return Promise.resolve(pack);
-    if (url === '/api/chat/send') { expect(JSON.parse(String(init?.body))).toEqual({projectId:'019a0000-0000-7000-8000-00000000007b',taskId:'019a0000-0000-7100-8000-000000000005',content:'質問',model:'test'}); streaming = true; return Promise.resolve(json({})); }
-    if (url === '/api/chat/interrupt') { expect(JSON.parse(String(init?.body))).toEqual({projectId:'019a0000-0000-7000-8000-00000000007b',taskId:'019a0000-0000-7100-8000-000000000005'}); return Promise.resolve(json({})); }
+    if (url === '/api/chat/send') { expect(JSON.parse(String(init?.body))).toEqual({projectId:'019a0000-0000-7000-8000-00000000007b',taskId:'019a0000-0000-7100-8000-000000000005',phase:'requirements',content:'質問',model:'test'}); streaming = true; return Promise.resolve(json({})); }
+    if (url === '/api/chat/interrupt') { expect(JSON.parse(String(init?.body))).toEqual({projectId:'019a0000-0000-7000-8000-00000000007b',taskId:'019a0000-0000-7100-8000-000000000005',phase:'requirements'}); return Promise.resolve(json({})); }
     throw new Error(url);
   }));
-  render(() => <ChatPanel projectId={'019a0000-0000-7000-8000-00000000007b'} taskId={'019a0000-0000-7100-8000-000000000005'} />);
+  render(() => <ChatPanel phase="requirements" projectId={'019a0000-0000-7000-8000-00000000007b'} taskId={'019a0000-0000-7100-8000-000000000005'} />);
   fireEvent.input(screen.getByRole('textbox', { name:'希望や回答を入力' }), {target:{value:'質問'}});
   await waitFor(() => expect((screen.getByRole('button', {name:'送信'}) as HTMLButtonElement).disabled).toBe(false));
   fireEvent.click(screen.getByRole('button', {name:'送信'}));
   expect(await screen.findByText('途中の回答')).toBeTruthy();
   fireEvent.click(screen.getByRole('button', {name:'中断'}));
   await waitFor(() => expect(requests).toContain('/api/chat/interrupt'));
-  expect(requests).toContain('/api/chat?projectId=019a0000-0000-7000-8000-00000000007b&taskId=019a0000-0000-7100-8000-000000000005');
+  expect(requests).toContain('/api/chat?projectId=019a0000-0000-7000-8000-00000000007b&taskId=019a0000-0000-7100-8000-000000000005&phase=requirements');
 });
 
 it('shows previous task history from the saved pack API', async () => {
   const previous=[{id:'previous-request',role:'user',content:'以前の依頼'}];
   vi.stubGlobal('fetch', vi.fn((url: string) => Promise.resolve(packResponse(url,previous) ?? json(url === '/api/codex/status' ? {installed:false,auth:'unknown',models:null,usage:'unknown'} : {id:'c',projectId:'019a0000-0000-7000-8000-00000000000b',taskId:'019a0000-0000-7100-8000-000000000009',threadId:null,messages:[]}))));
-  render(() => <ChatPanel projectId={'019a0000-0000-7000-8000-00000000000b'} taskId={'019a0000-0000-7100-8000-000000000009'} />);
+  render(() => <ChatPanel phase="requirements" projectId={'019a0000-0000-7000-8000-00000000000b'} taskId={'019a0000-0000-7100-8000-000000000009'} />);
   const request=await screen.findByText('以前の依頼');
   expect(request.closest('article')?.classList.contains('chat-end')).toBe(true);
   expect(screen.queryByRole('region',{name:'以前の履歴'})).toBeNull();
@@ -74,7 +74,7 @@ it('streams pack deltas without fetching conversation snapshots, then confirms w
     return Promise.resolve(json({pack: packs.find(pack => url.includes(`/packs/${pack.packId}?`))}));
   });
   vi.stubGlobal('fetch', fetchMock);
-  render(() => <ChatPanel projectId={'019a0000-0000-7000-8000-00000000002c'} taskId={'019a0000-0000-7100-8000-000000000004'} />);
+  render(() => <ChatPanel phase="requirements" projectId={'019a0000-0000-7000-8000-00000000002c'} taskId={'019a0000-0000-7100-8000-000000000004'} />);
   const initial = await screen.findByText('Initial');
   const socket = FakeWebSocket.instances[0];
   await waitFor(() => expect(socket.subscriptions.size).toBe(1));
@@ -109,7 +109,7 @@ it('shows the final turn failure even when the saved text pack completed before 
     if (url.startsWith('/api/chat/packs?')) return Promise.resolve(json({packs:url.includes('afterPackId')?[]:[{packId:pack.packId,state:'closed'}]}));
     return Promise.resolve(json({pack}));
   }));
-  render(() => <ChatPanel projectId={'019a0000-0000-7000-8000-000000000037'} taskId={'019a0000-0000-7100-8000-000000000006'} />);
+  render(() => <ChatPanel phase="requirements" projectId={'019a0000-0000-7000-8000-000000000037'} taskId={'019a0000-0000-7100-8000-000000000006'} />);
   const paragraph = await screen.findByText('Saved explanation'), article = paragraph.closest('article');
   expect(article?.textContent).toContain('完了');
   const socket = FakeWebSocket.instances[0];
@@ -142,7 +142,7 @@ it('follows streamed content only at the bottom and resets following when the sc
     return Promise.resolve(packResponse(url, [])!);
   }));
   const [taskId, setTaskId] = createSignal('019a0000-0000-7100-8000-00000000003d');
-  render(() => <ChatPanel projectId={'019a0000-0000-7000-8000-00000000003d'} taskId={taskId()} />);
+  render(() => <ChatPanel phase="requirements" projectId={'019a0000-0000-7000-8000-00000000003d'} taskId={taskId()} />);
   const log = screen.getByRole('log', {name:'チャット履歴'});
   let height = 1000, viewport = 300;
   Object.defineProperties(log, {scrollHeight:{get:()=>height},clientHeight:{get:()=>viewport}});
@@ -181,7 +181,7 @@ it.each(['completed', 'interrupted', 'failed'] as const)('keeps Aura visible dur
     if (url.startsWith('/api/chat/packs?')) return Promise.resolve(json({packs:url.includes('afterPackId')?[]:[earlier,user,pack].map(item => ({packId:item.packId,state:item.state}))}));
     return Promise.resolve(json({pack:url.includes(`/packs/${earlier.packId}?`)?earlier:url.includes(`/packs/${user.packId}?`)?user:pack}));
   }));
-  render(() => <ChatPanel projectId={'019a0000-0000-7000-8000-000000000047'} taskId={'019a0000-0000-7100-8000-000000000007'} />);
+  render(() => <ChatPanel phase="requirements" projectId={'019a0000-0000-7000-8000-000000000047'} taskId={'019a0000-0000-7100-8000-000000000007'} />);
   const tool = await screen.findByText('read_file');
   const article = tool.closest('article')!;
   const details = tool.closest('details')!;
@@ -209,4 +209,45 @@ it.each(['completed', 'interrupted', 'failed'] as const)('keeps Aura visible dur
   expect(screen.queryByRole('button',{name:'中断'})).toBeNull();
   expect(screen.getByText('read_file').closest('article')).toBe(article);
   expect(details.open).toBe(true);
+});
+
+it('isolates phase history, drafts, requests and subscriptions and ignores a late previous-phase load', async () => {
+  const projectId = '019a0000-0000-7000-8000-000000000088', taskId = '019a0000-0000-7100-8000-000000000088';
+  const [phase, setPhase] = createSignal<'requirements' | 'documents'>('requirements');
+  let release: ((value: Response) => void) | undefined;
+  let delay = false;
+  const requests: {url: string; body?: Record<string, unknown>}[] = [];
+  vi.stubGlobal('fetch', vi.fn((url: string, init?: RequestInit) => {
+    requests.push({url, body: init?.body ? JSON.parse(String(init.body)) : undefined});
+    if (url === '/api/codex/status') return Promise.resolve(json({installed:true,auth:'chatgpt',models:[{id:'test',name:'Test'}]}));
+    const current = new URL(url, 'http://localhost').searchParams.get('phase');
+    if (url.startsWith('/api/chat?')) {
+      if (delay && current === 'documents') return new Promise<Response>(resolve => { release = resolve; });
+      return Promise.resolve(json({id:current,messages:[]}));
+    }
+    if (url === '/api/chat/send') return Promise.resolve(json({}));
+    const pack = testPack(`${current} history`, {packId:`phase-${current}`});
+    if (url.startsWith('/api/chat/packs?')) return Promise.resolve(json({packs:url.includes('afterPackId') ? [] : [{packId:pack.packId,state:'closed'}]}));
+    return Promise.resolve(json({pack}));
+  }));
+  render(() => <ChatPanel projectId={projectId} taskId={taskId} phase={phase()} />);
+  await screen.findByText('requirements history');
+  const textarea = () => screen.getByRole('textbox', {name:'希望や回答を入力'}) as HTMLTextAreaElement;
+  fireEvent.input(textarea(), {target:{value:'requirements draft'}});
+  delay = true; setPhase('documents');
+  await screen.findByText('documents history');
+  expect(screen.queryByText('requirements history')).toBeNull();
+  expect(textarea().value).toBe('');
+  fireEvent.input(textarea(), {target:{value:'documents draft'}});
+  setPhase('requirements');
+  expect(await screen.findByText('requirements history')).toBeTruthy();
+  expect(textarea().value).toBe('requirements draft');
+  release?.(json({id:'late',messages:[{role:'assistant',status:'streaming'}]}));
+  await waitFor(() => expect((screen.getByRole('button',{name:'送信'}) as HTMLButtonElement).disabled).toBe(false));
+  fireEvent.click(screen.getByRole('button',{name:'送信'}));
+  await waitFor(() => expect(requests.some(request => request.body?.content === 'requirements draft' && request.body.phase === 'requirements')).toBe(true));
+  delay = false; setPhase('documents');
+  await waitFor(() => expect(textarea().value).toBe('documents draft'));
+  const socket = FakeWebSocket.instances.find(socket => !socket.closed)!;
+  await waitFor(() => expect([...socket.subscriptions.values()].filter(sub => sub.topic === 'chat').map(sub => sub.scope.phase)).toEqual(['documents']));
 });

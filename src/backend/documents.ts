@@ -27,7 +27,7 @@ export function taskDocuments(folder: string, taskId: string, seeds: {requiremen
  }
  const target=newTask?mkdtempSync(join(root,'.creating-')):directory(path);
  try {
- for(const [name,content] of [['requirements.md',seeds.requirements],['implementation-plan.md',seeds.plan ?? '# Implementation plan\n\nNot planned yet.\n']]) {
+ for(const [name,content] of [['requirements.md',seeds.requirements],['documents.md','# 仕様整理\n\n## 資料\n\n## 仕様\n'],['implementation-plan.md',seeds.plan ?? '# Implementation plan\n\nNot planned yet.\n']]) {
   const file=join(target,name);
   try { writeFileSync(file,content,{flag:'wx',mode:0o600}); } catch(error:any) { if(error.code!=='EEXIST') throw error; }
   regularFile(file);

@@ -4,7 +4,7 @@ import { api, ApiError } from '../api';
 import { communication } from '../communication';
 import { ChatSync } from '../chat-sync';
 import { followChatBottom } from '../chat-scroll';
-import type { Pack } from '../../shared/communication';
+import type { Pack, TaskPhase } from '../../shared/communication';
 import type { ChatMessage, CodexStatus, Conversation } from '../types';
 
 interface Draft { text: string; version: number; sending: boolean; error: string; listeners: Set<() => void>; refresh?: () => void }
@@ -16,7 +16,7 @@ const draftFor = (key: string) => {
 };
 const stateLabel: Record<ChatMessage['status'], string> = { pending: '送信待ち', streaming: '応答中', completed: '完了', failed: '失敗', interrupted: '中断', unknown: '結果不明' };
 
-export default function ChatPanel(props: { projectId: string; taskId?: string }) {
+export default function ChatPanel(props: { projectId: string; taskId?: string; phase?: TaskPhase }) {
   const [conversationState,setConversationState]=createStore<{value?:Conversation}>({});
   const conversation=()=>conversationState.value;
   const setConversation=(value:Conversation|undefined)=>setConversationState('value',value===undefined?undefined:reconcile(value,{key:'id'}));
@@ -29,8 +29,8 @@ export default function ChatPanel(props: { projectId: string; taskId?: string })
   const [error, setError] = createSignal('');
   const [loadError, setLoadError] = createSignal('');
   const [interrupting, setInterrupting] = createSignal(false);
-  const key = () => `${props.projectId}:${props.taskId ?? 'general'}`;
-  const query = () => `/api/chat?projectId=${props.projectId}${props.taskId === undefined ? '' : `&taskId=${props.taskId}`}`;
+  const key = () => `${props.projectId}:${props.taskId ?? 'general'}:${props.phase ?? ''}`;
+  const query = () => `/api/chat?projectId=${props.projectId}${props.taskId === undefined ? '' : `&taskId=${props.taskId}&phase=${props.phase}`}`;
   let scrollport!: HTMLDivElement, scrollContent!: HTMLDivElement;
   let bottomFollow: ReturnType<typeof followChatBottom> | undefined;
   onMount(() => {
@@ -41,8 +41,9 @@ export default function ChatPanel(props: { projectId: string; taskId?: string })
   let refresh: () => void = () => {};
   createEffect(() => {
     const currentKey = key(), url = query(), draft = draftFor(currentKey);
+    const controller = new AbortController();
     let active = true, sequence = 0,fetching=false,reload=false;
-    const sync = new ChatSync({ projectId: props.projectId, taskId: props.taskId ?? null }, packs => { if (active) setPackState('value', reconcile(packs, {key: 'packId'})); }, message => { if (active) setSyncError(message); });
+    const sync = new ChatSync({ projectId: props.projectId, taskId: props.taskId ?? null, ...(props.taskId === undefined ? {} : { phase: props.phase }) }, packs => { if (active) setPackState('value', reconcile(packs, {key: 'packId'})); }, message => { if (active) setSyncError(message); });
     const updateDraft = () => { setText(draft.text); setSending(draft.sending); setError(draft.error); };
     draft.listeners.add(updateDraft);
     setConversation(undefined); updateDraft(); setLoadError(''); setSyncError(''); setInterrupting(false);
@@ -50,7 +51,7 @@ export default function ChatPanel(props: { projectId: string; taskId?: string })
       if(fetching){reload=true;return}fetching=true;
       do {reload=false;
       const request = ++sequence;
-      try { const value = await api<Conversation>(url); if (active && request === sequence) { setConversation(value); setLoadError(''); } }
+      try { const value = await api<Conversation>(url, undefined, controller.signal); if (active && request === sequence) { setConversation(value); setLoadError(''); } }
       catch { if (active && request === sequence) setLoadError('履歴を取得できませんでした'); }
       }while(reload&&active);fetching=false;
     };
@@ -58,12 +59,12 @@ export default function ChatPanel(props: { projectId: string; taskId?: string })
     refresh = refreshCurrent; draft.refresh = refreshCurrent;
     void load(); sync.refresh();
     void api<CodexStatus>('/api/codex/status').then(value => { if (active) { setStatus(value); setModel(previous => value.models?.some(item => item.id === previous) ? previous : value.models?.[0]?.id ?? ''); } }).catch(() => { if (active) setStatus(undefined); });
-    const unsubscribe = communication.subscribe('chat', { projectId: props.projectId, taskId: props.taskId ?? null }, {
+    const unsubscribe = communication.subscribe('chat', { projectId: props.projectId, taskId: props.taskId ?? null, ...(props.taskId === undefined ? {} : { phase: props.phase }) }, {
       subscribed: () => { if (active) { sync.subscribed(); void load(); } },
       event: event => { if (active) { sync.event(event); if (event.name === 'chat.changed') void load(); } },
       error: message => { if (active) setSyncError(message); },
     });
-    onCleanup(() => { active = false; sequence++; unsubscribe(); sync.dispose(); draft.listeners.delete(updateDraft); if (draft.refresh === refreshCurrent) draft.refresh = undefined; });
+    onCleanup(() => { active = false; sequence++; controller.abort(); unsubscribe(); sync.dispose(); draft.listeners.delete(updateDraft); if (draft.refresh === refreshCurrent) draft.refresh = undefined; });
   });
   const latestOutcome = () => {
     const message = conversation()?.messages.findLast(message => message.role === 'assistant');
@@ -76,7 +77,7 @@ export default function ChatPanel(props: { projectId: string; taskId?: string })
     if (draft.sending || busy() || !conversation() || loadError() || !content.trim() || status()?.auth !== 'chatgpt' || !model()) return;
     draft.sending = true; draft.error = ''; draft.listeners.forEach(listener => listener());
     try {
-      await api('/api/chat/send', { projectId: props.projectId, taskId: props.taskId ?? null, content, model: model() });
+      await api('/api/chat/send', { projectId: props.projectId, taskId: props.taskId ?? null, ...(props.taskId === undefined ? {} : { phase: props.phase }), content, model: model() });
       if (draft.version === version) draft.text = '';
       draft.listeners.forEach(listener => listener());
       draft.refresh?.();
@@ -91,7 +92,7 @@ export default function ChatPanel(props: { projectId: string; taskId?: string })
   }
   async function interrupt() {
     const currentKey = key(); setInterrupting(true); setError('');
-    try { await api('/api/chat/interrupt', { projectId: props.projectId, taskId: props.taskId ?? null }); }
+    try { await api('/api/chat/interrupt', { projectId: props.projectId, taskId: props.taskId ?? null, ...(props.taskId === undefined ? {} : { phase: props.phase }) }); }
     catch { if (key() === currentKey) setError('中断を確認できませんでした。状態を確認してください。'); }
     finally { if (key() === currentKey) { setInterrupting(false); refresh(); } }
   }

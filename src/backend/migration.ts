@@ -3,7 +3,8 @@ import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, realpathSy
 import { basename, dirname, join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import { generateId, validProjectId, validTaskId } from '../shared/ids';
-import { directory, metadata, newMetadata, projectRoot, pathExists, readJson, writeJson } from './data';
+import { directory, metadata, newMetadata, projectRoot, pathExists, readJson, writeJson, validateChatDirectory } from './data';
+import { isTaskPhase } from '../shared/task-phase';
 import { packHash, validId, validPack } from '../shared/communication';
 const digest = (path: string) => {
   const stat = lstatSync(path);
@@ -39,6 +40,7 @@ export async function rewriteConversation(value: any, projectId: string, taskId:
   value.taskId = taskId;
   if (clone) {
     value.id = crypto.randomUUID();
+    value.lastEventId = 0;
     value.threadId = null;
     value.sessionId = null;
     for (const message of value.messages) {
@@ -289,17 +291,31 @@ export async function cloneProject(sourceFolder: string, destinationFolder: stri
     }
     const chat = join(target, 'chat');
     if (existsSync(chat)) for (const filename of readdirSync(chat)) {
+      const sourcePath = join(chat, filename), stat = lstatSync(sourcePath);
+      if (stat.isDirectory() && !stat.isSymbolicLink()) {
+        const tid = map[filename];
+        if (!tid) throw Error('Unknown task chat');
+        validateChatDirectory(sourcePath);
+        for (const phaseFile of readdirSync(sourcePath)) {
+          const phase = phaseFile.slice(0, -5), file = join(sourcePath, phaseFile), original = readJson(file);
+          if (!isTaskPhase(phase) || original.projectId !== pm.id || original.taskId !== filename || original.phase !== phase) throw Error('Clone conversation scope mismatch');
+          writeJson(file, await rewriteConversation(original, pid, tid, true));
+        }
+        const output = join(chat, tid);
+        if (pathExists(output)) throw Error('Clone chat collision');
+        renameSync(sourcePath, output);
+        continue;
+      }
       if (!filename.endsWith('.json')) throw Error('Invalid chat file');
-      const old = filename.slice(0, -5),
-        tid = old === 'general' ? null : map[old];
+      const old = filename.slice(0, -5), tid = old === 'general' ? null : map[old];
       if (tid === undefined) throw Error('Unknown task chat');
-      const original = readJson(join(chat, filename));
+      const original = readJson(sourcePath);
       if (original.projectId !== pm.id || original.taskId !== (old === 'general' ? null : old)) throw Error('Clone conversation scope mismatch');
       const value = await rewriteConversation(original, pid, tid, true);
       const output = join(chat, tid === null ? 'general.json' : `${tid}.json`);
-      if (output !== join(chat, filename) && existsSync(output)) throw Error('Clone chat collision');
+      if (output !== sourcePath && existsSync(output)) throw Error('Clone chat collision');
       writeJson(output, value);
-      if (output !== join(chat, filename)) rmSync(join(chat, filename));
+      if (output !== sourcePath) rmSync(sourcePath);
     }
     if (pathExists(finalTarget)) throw Error('Clone destination already contains .beni');
     renameSync(target, finalTarget);

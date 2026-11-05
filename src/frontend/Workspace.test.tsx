@@ -46,7 +46,7 @@ describe('Workspace message submission across navigation', () => {
       const pack = packResponse(path, messages); if (pack) return Promise.resolve(pack);
       if (path === '/api/chat/send' && init?.method === 'POST') {
         postCount++;
-        expect(JSON.parse(String(init.body))).toEqual({ projectId:'019a0000-0000-7000-8000-000000000001', taskId, content: '最初の希望', model:'test' });
+        expect(JSON.parse(String(init.body))).toEqual({ projectId:'019a0000-0000-7000-8000-000000000001', taskId, phase: 'requirements', content: '最初の希望', model:'test' });
         return post.promise;
       }
       throw new Error(`Unexpected request: ${path}`);
@@ -93,10 +93,11 @@ describe('Workspace message submission across navigation', () => {
 it('refreshes real Markdown content without duplicating tabs and selects requirements from its phase',async()=>{
  FakeWebSocket.instances=[];vi.stubGlobal('WebSocket',FakeWebSocket);
  const task={id:'019a0000-0000-7100-8000-000000000385',projectId:'019a0000-0000-7000-8000-000000000001',name:'Documents',phase:'requirements',status:'idle'};
- let content='# Initial',version=1;
- vi.stubGlobal('fetch',vi.fn((path:string)=>{
+ let content='# Initial',version=1, currentPhase='requirements';
+ vi.stubGlobal('fetch',vi.fn((path:string, init?: RequestInit)=>{
+  if(path.endsWith('/phase')) { expect(JSON.parse(String(init?.body))).toEqual({projectId:task.projectId,phase:'requirements',direction:'next'}); currentPhase='documents'; return Promise.resolve(json({...task,phase:currentPhase})); }
   if(path==='/api/state')return Promise.resolve(json({projects:[],tasks:[task]}));
-  if(path==='/api/tasks/019a0000-0000-7100-8000-000000000385')return Promise.resolve(json({task,messages:[],documents:[{path:'requirements.md',name:'requirements.md',content,version},{path:'implementation-plan.md',name:'implementation-plan.md',content:'# Plan',version:1}]}));
+  if(path==='/api/tasks/019a0000-0000-7100-8000-000000000385')return Promise.resolve(json({task:{...task,phase:currentPhase},messages:[],documents:[{path:'requirements.md',name:'requirements.md',content,version},{path:'documents.md',name:'documents.md',content:'# Index\n\n## 仕様\n\n[API](api.md)',version:1},{path:'api.md',name:'api.md',content:'# API specification',version:1},{path:'implementation-plan.md',name:'implementation-plan.md',content:'# Plan',version:1}]}));
   if(path==='/api/codex/status')return Promise.resolve(json({installed:false,auth:'none',models:[],usage:'unknown'}));
   if(path.startsWith('/api/chat/packs'))return Promise.resolve(json({packs:[]}));
   if(path.startsWith('/api/chat?'))return Promise.resolve(json({id:'document-test',messages:[]}));
@@ -105,7 +106,7 @@ it('refreshes real Markdown content without duplicating tabs and selects require
  render(()=><Workspace projectId={'019a0000-0000-7000-8000-000000000001'} taskId={'019a0000-0000-7100-8000-000000000385'} onHome={()=>{}}/>);
  const heading=await screen.findByRole('heading',{name:'Initial',level:1});
  const preview=heading.closest('article')!;
- const tab=screen.getByRole('tab',{name:'requirements.md'});
+ const tab=screen.getByRole('tab',{name:'要件定義'});
  preview.scrollTop=12;
  const subscription=FakeWebSocket.instances.find(event=>!event.closed)!;
  await waitFor(()=>expect([...subscription.subscriptions.values()].some(sub=>sub.topic==='documents')).toBe(true));
@@ -114,12 +115,17 @@ it('refreshes real Markdown content without duplicating tabs and selects require
  expect(screen.getByRole('heading',{name:'Initial',level:1}).closest('article')).toBe(preview);
  content='# Updated from disk';version=2;subscription.change('documents');
  await waitFor(()=>expect(screen.getByRole('heading',{name:'Updated from disk',level:1})).toBeTruthy(),{timeout:3000});
- expect(screen.getAllByRole('tab',{name:'requirements.md'})).toHaveLength(1);
- expect(screen.getByRole('tab',{name:'requirements.md'})).toBe(tab);expect(screen.getByRole('heading',{name:'Updated from disk',level:1}).closest('article')).toBe(preview);expect(preview.scrollTop).toBe(12);
- fireEvent.click(screen.getByRole('tab',{name:'implementation-plan.md'}));
+ expect(screen.getAllByRole('tab',{name:'要件定義'})).toHaveLength(1);
+ expect(screen.getByRole('tab',{name:'要件定義'})).toBe(tab);expect(screen.getByRole('heading',{name:'Updated from disk',level:1}).closest('article')).toBe(preview);expect(preview.scrollTop).toBe(12);
+ fireEvent.click(screen.getByRole('tab',{name:'実装手順'}));
  expect(screen.getByRole('heading',{name:'Plan',level:1})).toBeTruthy();
- fireEvent.click(screen.getByRole('button',{name:'タスク内容'}));
+ fireEvent.click(screen.getByRole('button',{name:'要件定義'}));
  expect(screen.getByRole('heading',{name:'Updated from disk',level:1})).toBeTruthy();
+ fireEvent.click(screen.getByRole('button',{name:'確定'}));
+ await screen.findByRole('heading',{name:'Index'});
+ expect(screen.getByRole('button',{name:'仕様整理'}).getAttribute('aria-current')).toBe('step');
+ fireEvent.click(screen.getByRole('link',{name:'API'}));
+ expect(screen.getByRole('heading',{name:'API specification'})).toBeTruthy();
  fireEvent.click(screen.getByRole('tab',{name:'General'}));
  await waitFor(()=>expect([...subscription.subscriptions.values()].some(sub=>sub.topic==='documents')).toBe(false));
  cleanup();expect(FakeWebSocket.instances.every(event=>event.closed)).toBe(true);
@@ -159,4 +165,37 @@ it('deletes an inactive task without changing selection and removes active task 
   expect(screen.queryByRole('button',{name:'Delete B'})).toBeNull();
   expect(onTaskDeleted.mock.calls).toEqual([[first.id],[second.id]]);
   expect(deletes).toEqual([`/api/tasks/${first.id}/delete`,`/api/tasks/${second.id}/delete`]);
+});
+
+it('moves back, recovers a phase conflict and follows task event changes', async () => {
+  const task = {id:'019a0000-0000-7100-8000-000000000801',projectId:'019a0000-0000-7000-8000-000000000801',name:'Phase changes',phase:'documents',status:'idle'};
+  let phase = task.phase, conflict = false;
+  const onTaskChange = vi.fn();
+  vi.stubGlobal('fetch', vi.fn((path: string, init?: RequestInit) => {
+    if (path === '/api/state') return Promise.resolve(json({projects:[],tasks:[task]}));
+    if (path.endsWith('/phase')) {
+      expect(JSON.parse(String(init?.body))).toEqual({projectId:task.projectId,phase:'documents',direction:'back'});
+      phase = conflict ? 'implementation-plan' : 'requirements';
+      return Promise.resolve(conflict ? {ok:false,status:409,json:async()=>({error:'フェーズが変更されています'})} as Response : json({...task,phase}));
+    }
+    if (path === `/api/tasks/${task.id}`) return Promise.resolve(json({task:{...task,phase},documents:[{name:'requirements.md',content:'# Requirements',version:1},{name:'documents.md',content:'# Documents',version:1}]}));
+    if (path === '/api/codex/status') return Promise.resolve(json({installed:false,auth:'none',models:[]}));
+    if (path.startsWith('/api/chat/packs')) return Promise.resolve(json({packs:[]}));
+    if (path.startsWith('/api/chat?')) return Promise.resolve(json({id:'phase',messages:[]}));
+    throw Error(path);
+  }));
+  render(() => <Workspace taskId={task.id} onHome={() => {}} onTaskChange={onTaskChange} />);
+  fireEvent.click(await screen.findByRole('button',{name:'戻る'}));
+  await waitFor(() => expect(screen.getByRole('button',{name:'要件定義'}).getAttribute('aria-current')).toBe('step'));
+  expect(screen.queryByRole('button',{name:'戻る'})).toBeNull();
+  const socket = FakeWebSocket.instances.find(socket => !socket.closed)!;
+  phase = 'documents';
+  await waitFor(() => expect([...socket.subscriptions.values()].some(sub => sub.topic === 'task-events')).toBe(true));
+  socket.event('task-events',{name:'task.events.changed',data:{lastEventId:1}});
+  await waitFor(() => expect(screen.getByRole('button',{name:'仕様整理'}).getAttribute('aria-current')).toBe('step'));
+  conflict = true;
+  fireEvent.click(screen.getByRole('button',{name:'戻る'}));
+  await screen.findByText('フェーズが変更されています');
+  expect(screen.getByRole('button',{name:'実装手順'}).getAttribute('aria-current')).toBe('step');
+  expect(onTaskChange).toHaveBeenLastCalledWith(task.id, expect.objectContaining({phase:'implementation-plan'}));
 });

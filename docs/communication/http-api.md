@@ -32,6 +32,8 @@ HTTP による取得・操作と、チャットのパック同期の契約を定
 | `POST /api/chat/send` | `{projectId, taskId, phase, content, model}`。content は空白のみ不可、model は256文字以内の文字列か null | 202 `Conversation` | 409 送信中、400 Codex 利用不可・設定不適合、404 対象なし、500 保存・接続失敗 |
 | `POST /api/chat/interrupt` | `{projectId, taskId, phase}` | 200 `{ok: true}` | 409 停止対象なし、404 対象なし、500 保存・接続失敗 |
 
+タスクチャットの `phase` は `requirements`・`documents`・`implementation-plan`・`implementation` のいずれかとする。
+
 `chat/send` の 202 は受け付けであり、返答終了ではない。メッセージの送信は `/api/chat/send` を使う。
 
 フェーズは `requirements` → `documents` → `implementation-plan` → `implementation` の順に進む。変更時にエージェントを自動起動しない。

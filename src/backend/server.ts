@@ -1,8 +1,9 @@
-import { Store } from './store/index';
+import { Store, taskPhases } from './store/index';
 import { ChatService } from './chat';
 import { TerminalService, TerminalError } from './terminal';
 import { communicationSocket, type SocketData } from './events';
 import type { Server } from 'bun';
+import { isTaskPhase, type TaskPhase } from '../shared/task-phase';
 import { validId } from '../shared/communication';
 import { validProjectId, validTaskId } from '../shared/ids';
 import { readTaskDocuments, watchTaskDocuments } from './documents';
@@ -22,6 +23,8 @@ function requestAccess(publicOrigin?: string) {
  return {allowed:local || publicHost,sameOrigin:request.headers.get('origin') === (publicHost ? configured.origin : url.origin)};
  };
 }
+const validChatPhase=(taskId:unknown,phase:unknown)=>taskId===null?phase==null:isTaskPhase(phase);
+const chatPhase=(taskId:unknown,phase:unknown):TaskPhase|null=>taskId===null?null:phase as TaskPhase;
 const decodePackId=(value:string)=>{try{return decodeURIComponent(value)}catch{return null}};
 
 async function listFolders(path: string) {
@@ -55,8 +58,9 @@ const projectForScope = (store:Store,projectId:unknown,taskId:unknown) => {
   if (taskId!==null) {const task=store.task(taskId);if(!task || row(task).project_id!==projectId)return null}
   return project;
  };
-export function createHandler(store: Store, initialFolder = homedir(), chat = new ChatService(projectResolver(store)), publicOrigin?: string, terminals = new TerminalService()) {
+export function createHandler(store: Store, initialFolder = homedir(), chat = new ChatService(projectResolver(store)), publicOrigin?: string, terminals = new TerminalService(), taskEventsChanged:(p:string,t:string)=>void=()=>{}) {
  chat.setTaskActivity((p,t)=>store.touchTask(p,t));
+ chat.setTaskEvents({capture:(p,t)=>store.captureTaskHistory(p,t),events:(p,t,after,through,limit)=>store.taskEvents(p,t,after,through,limit)});
  const access=requestAccess(publicOrigin);
  const scope=(p:unknown,t:unknown)=>projectForScope(store,p,t);
  return async (request: Request): Promise<Response> => {
@@ -72,9 +76,19 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
    if (url.pathname === '/api/terminals') {const p=url.searchParams.get('projectId');if(!scope(p,null))return json({error:'プロジェクトが見つかりません'},404);return json(terminals.list(p as string))}
    if (url.pathname === '/api/codex/status') return json(await chat.status());
    const packMatch=url.pathname.match(/^\/api\/chat\/packs(?:\/([^/]+))?$/);
-   if(packMatch){const p=url.searchParams.get('projectId');const raw=url.searchParams.get('taskId');const t=raw;if(!scope(p,t))return json({error:'会話が見つかりません'},404);try{const id=packMatch[1]===undefined?undefined:decodePackId(packMatch[1]);if(id!==undefined&&!validId(id))return json({error:'入力を確認してください'},400);const after=url.searchParams.get('afterPackId');if(after!==null&&!validId(after))return json({error:'入力を確認してください'},400);return json(id?await chat.pack(p as string,t,id):await chat.packs(p as string,t,url.searchParams.get('afterPackId')??undefined))}catch(error){const m=error instanceof Error?error.message:'';return json({error:m==='not found'?'パックが見つかりません':m==='not closed'?'生成中のパックです':'パックを読み込めませんでした'},m==='not found'?404:m==='not closed'?409:500)}}
-   if (url.pathname === '/api/chat') {const p=url.searchParams.get('projectId');const raw=url.searchParams.get('taskId');const t=raw;if(!scope(p,t))return json({error:'会話が見つかりません'},404);try{const {packs,...conversation}=await chat.get(p as string,t);return json(conversation)}catch{return json({error:'履歴を読み込めませんでした'},500)}}
+   if(packMatch){const p=url.searchParams.get('projectId');const raw=url.searchParams.get('taskId');const t=raw;if(!scope(p,t))return json({error:'会話が見つかりません'},404);const phase=url.searchParams.get('phase');if(!validChatPhase(t,phase))return json({error:'フェーズを確認してください'},400);try{const id=packMatch[1]===undefined?undefined:decodePackId(packMatch[1]);if(id!==undefined&&!validId(id))return json({error:'入力を確認してください'},400);const after=url.searchParams.get('afterPackId');if(after!==null&&!validId(after))return json({error:'入力を確認してください'},400);return json(id?await chat.pack(p as string,t,id,chatPhase(t,phase)):await chat.packs(p as string,t,url.searchParams.get('afterPackId')??undefined,chatPhase(t,phase)))}catch(error){const m=error instanceof Error?error.message:'';return json({error:m==='not found'?'パックが見つかりません':m==='not closed'?'生成中のパックです':'パックを読み込めませんでした'},m==='not found'?404:m==='not closed'?409:500)}}
+   if (url.pathname === '/api/chat') {const p=url.searchParams.get('projectId');const raw=url.searchParams.get('taskId');const t=raw;if(!scope(p,t))return json({error:'会話が見つかりません'},404);const phase=url.searchParams.get('phase');if(!validChatPhase(t,phase))return json({error:'フェーズを確認してください'},400);try{const {packs,...conversation}=await chat.get(p as string,t,chatPhase(t,phase));return json(conversation)}catch{return json({error:'履歴を読み込めませんでした'},500)}}
    if (url.pathname === '/api/state') return json({projects:store.projects(),tasks:store.tasks().map(projectTask)});
+   const eventMatch=url.pathname.match(/^\/api\/tasks\/([^/]+)\/events(?:\/versions\/([^/]+))?$/);
+   if(eventMatch){
+    const p=url.searchParams.get('projectId'),t=eventMatch[1]!;if(!scope(p,t))return json({error:'タスクが見つかりません'},404);
+    try {
+     if(eventMatch[2]!==undefined){if(!/^[a-f0-9]{64}$/.test(eventMatch[2]))return json({error:'版を確認してください'},400);return json(store.taskEventVersion(p as string,t,eventMatch[2]))}
+     const integer=(name:string,fallback?:number)=>{const value=url.searchParams.get(name);if(value===null)return fallback;if(!/^(0|[1-9][0-9]*)$/.test(value)||!Number.isSafeInteger(Number(value)))throw Error('invalid cursor');return Number(value)};
+     const after=integer('after',0)!,through=integer('through'),limit=integer('limit',100)!;if(limit<1||limit>100||(through!==undefined&&after>through))return json({error:'取得範囲を確認してください'},400);
+     return json(store.taskEvents(p as string,t,after,through,limit));
+    }catch(error){const message=error instanceof Error?error.message:'';return json({error:'変更履歴を取得できませんでした'},message==='invalid cursor'?400:message.includes('not found')||message.includes('Unknown')?404:500)}
+   }
    const match = url.pathname.match(/^\/api\/tasks\/([^/]+)$/);
    if (match) { if(!validTaskId(match[1]))return json({error:'タスクが見つかりません'},404);const task=store.task(match[1]); if (!task) return json({error:'タスクが見つかりません'},404); const t=projectTask(task); try {const project=scope(t.projectId,t.id)!;const path=documentFolder(store,project,t);return json({task:projectTask(store.task(t.id)),documents:readTaskDocuments(path)});}catch{return json({error:'文書を読み込めませんでした'},500)} }
    return json({error:'見つかりません'},404);
@@ -94,12 +108,14 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
     }catch(error){return error instanceof TerminalError?json({error:error.message},error.status):json({error:'ターミナルを操作できませんでした'},500)}
    }
    const ackMatch=url.pathname.match(/^\/api\/chat\/packs\/([^/]+)\/ack$/);
-   if(ackMatch){const p=input.projectId,t=input.taskId;if(!scope(p,t))return json({error:'会話が見つかりません'},404);const id=decodePackId(ackMatch[1]);if(!validId(id)||typeof input.hash!=='string'||! /^[a-f0-9]{64}$/.test(input.hash))return json({error:'入力を確認してください'},400);try{return json(await chat.ack(p as string,t as string|null,id,input.hash))}catch(error){const m=error instanceof Error?error.message:'';return json({error:m==='not found'?'パックが見つかりません':m==='not closed'?'生成中のパックです':'パックを読み込めませんでした'},m==='not found'?404:m==='not closed'?409:500)}}
+   if(ackMatch){const p=input.projectId,t=input.taskId??null;if(!scope(p,t))return json({error:'会話が見つかりません'},404);if(!validChatPhase(t,input.phase))return json({error:'フェーズを確認してください'},400);const id=decodePackId(ackMatch[1]);if(!validId(id)||typeof input.hash!=='string'||! /^[a-f0-9]{64}$/.test(input.hash))return json({error:'入力を確認してください'},400);try{return json(await chat.ack(p as string,t as string|null,id,input.hash,chatPhase(t,input.phase)))}catch(error){const m=error instanceof Error?error.message:'';return json({error:m==='not found'?'パックが見つかりません':m==='not closed'?'生成中のパックです':'パックを読み込めませんでした'},m==='not found'?404:m==='not closed'?409:500)}}
    if (url.pathname === '/api/chat/send' || url.pathname === '/api/chat/interrupt') {
-    const p=input.projectId,t=input.taskId;const project=scope(p,t);if(!project)return json({error:'会話が見つかりません'},404);
-    try {if(url.pathname.endsWith('/interrupt')){await chat.interrupt(p as string,t as string|null);return json({ok:true})}
+    const p=input.projectId,t=input.taskId??null;const project=scope(p,t);if(!project)return json({error:'会話が見つかりません'},404);
+    if(!validChatPhase(t,input.phase))return json({error:'フェーズを確認してください'},400);
+    try {if(url.pathname.endsWith('/interrupt')){await chat.interrupt(p as string,t as string|null,chatPhase(t,input.phase));return json({ok:true})}
      if(typeof input.content!=='string'||!input.content.trim()||!(input.model===null||(typeof input.model==='string'&&input.model.length<=256)))return json({error:'入力を確認してください'},400);
-     const {packs,...conversation}=await chat.send(p as string,t as string|null,input.content,input.model as string|null,project.folder,t===null?undefined:documentFolder(store,project,projectTask(store.task(t as string))));return json(conversation,202);
+     if(t!==null&&store.task(t as string)!.phase!==input.phase)return json({error:'フェーズが変更されています'},409);
+     const {packs,...conversation}=await chat.send(p as string,t as string|null,input.content,input.model as string|null,project.folder,t===null?undefined:documentFolder(store,project,projectTask(store.task(t as string))),chatPhase(t,input.phase));return json(conversation,202);
     } catch(e) {const message=e instanceof Error?e.message:'';return json({error:message==='busy'?'送信中です':message==='unavailable'?'Codex の接続状態を確認してください':message==='unsafe configuration'?'Codex の外部ツールを無効にできませんでした':message==='not running'?'停止できる処理がありません':'保存または接続に失敗しました'},message==='busy'||message==='not running'?409:message==='unavailable'||message==='unsafe configuration'?400:500)}
    }
    if (url.pathname === '/api/folders/list') {
@@ -109,6 +125,19 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
     catch { return json({error:'フォルダを開けませんでした'},400); }
    }
    if (url.pathname === '/api/projects') {if(typeof input.name!=='string'||typeof input.folder!=='string'||!isAbsolute(input.folder)) return json({error:'名前と絶対パスを入力してください'},400);if(!input.name.trim())return json({error:'名前を入力してください'},400);return json(store.createProject(input.name,input.folder),201)}
+   const phaseMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/phase$/);
+   if (phaseMatch) {
+    if (typeof input.phase !== 'string' || !taskPhases.includes(input.phase as typeof taskPhases[number]) || !validProjectId(input.projectId) || (input.direction!==undefined&&input.direction!=='next'&&input.direction!=='back')) return json({error:'フェーズを確認してください'},400);
+    if (!validTaskId(phaseMatch[1]) || !scope(input.projectId, phaseMatch[1])) return json({error:'タスクが見つかりません'},404);
+    try {
+     const task = chat.withIdleTask(input.projectId, phaseMatch[1]!, () => store.advanceTaskPhase(input.projectId as string, phaseMatch[1]!, input.phase as string, input.direction as 'next'|'back'|undefined));
+     taskEventsChanged(input.projectId,phaseMatch[1]!);
+     return json(projectTask(task));
+    } catch (error) {
+     const message = error instanceof Error ? error.message : '';
+     return json({error:message === 'busy' ? 'チャットの処理中はフェーズを変更できません' : message === 'phase conflict' ? 'フェーズが変更されています' : 'フェーズを保存できませんでした'}, message === 'busy' || message === 'phase conflict' ? 409 : 500);
+    }
+   }
    const deleteMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/delete$/);
    if (deleteMatch) {
     if (!validTaskId(deleteMatch[1]) || !scope(input.projectId, deleteMatch[1])) return json({error:'タスクが見つかりません'},404);
@@ -128,14 +157,30 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
  };
 }
 export function createServerOptions(store:Store,initialFolder=homedir(),chat=new ChatService(projectResolver(store)),publicOrigin?:string, terminals=new TerminalService()) {
+ const eventListeners=new Map<string,Set<(event:any)=>void>>();
+ const notifyTaskEvents=(p:string,t:string)=>{const page=store.taskEvents(p,t);for(const listener of eventListeners.get(JSON.stringify([p,t]))??[])listener({name:'task.events.changed',data:{lastEventId:page.through}})};
  const access=requestAccess(publicOrigin);
  const scope=(p:string,t:string|null)=>projectForScope(store,p,t);
  const websocket=communicationSocket({
-  terminal:{validate:s=>s.taskId===null&&!!scope(s.projectId,null)&&(s.terminalId===undefined||terminals.has(s.projectId,s.terminalId)),subscribe:(s,event)=>terminals.subscribe(s,event)},
-  chat:{validate:s=>s.terminalId===undefined&&!!scope(s.projectId,s.taskId),subscribe:(s,event)=>chat.subscribe(s.projectId,s.taskId,event)},
-  documents:{validate:s=>s.terminalId===undefined&&s.taskId!==null&&!!scope(s.projectId,s.taskId),subscribe:(s,event,failed)=>{const project=scope(s.projectId,s.taskId)!;const path=documentFolder(store,project,projectTask(store.task(s.taskId!)));let timer:ReturnType<typeof setTimeout>|undefined;const stop=watchTaskDocuments(path,()=>{if(timer===undefined)timer=setTimeout(()=>{timer=undefined;try{store.reconcileTaskDocuments(s.projectId,s.taskId!);event({name:'documents.changed',data:{}})}catch{failed()}},80)},failed);return ()=>{clearTimeout(timer);stop()}}},
+  'task-events':{
+   validate:s=>s.phase===undefined&&s.terminalId===undefined&&s.taskId!==null&&!!scope(s.projectId,s.taskId),
+   subscribe:(s,event,failed)=>{
+    const t=s.taskId!,k=JSON.stringify([s.projectId,t]);
+    const path=store.taskDocumentFolder(s.projectId,t);
+    const stop=watchTaskDocuments(path,()=>{try{store.captureTaskHistory(s.projectId,t);notifyTaskEvents(s.projectId,t)}catch{failed()}},failed);
+    const listeners=eventListeners.get(k)??new Set();
+    eventListeners.set(k,listeners);listeners.add(event);
+    return {
+     start:()=>{try{store.captureTaskHistory(s.projectId,t);notifyTaskEvents(s.projectId,t)}catch{failed()}},
+     stop:()=>{stop();listeners.delete(event);if(!listeners.size)eventListeners.delete(k)}
+    };
+   }
+  },
+  terminal:{validate:s=>s.phase===undefined&&s.taskId===null&&!!scope(s.projectId,null)&&(s.terminalId===undefined||terminals.has(s.projectId,s.terminalId)),subscribe:(s,event)=>terminals.subscribe(s,event)},
+  chat:{validate:s=>s.terminalId===undefined&&validChatPhase(s.taskId,s.phase)&&!!scope(s.projectId,s.taskId),subscribe:(s,event)=>chat.subscribe(s.projectId,s.taskId,event,chatPhase(s.taskId,s.phase))},
+  documents:{validate:s=>s.phase===undefined&&s.terminalId===undefined&&s.taskId!==null&&!!scope(s.projectId,s.taskId),subscribe:(s,event,failed)=>{const project=scope(s.projectId,s.taskId)!;const path=documentFolder(store,project,projectTask(store.task(s.taskId!)));let timer:ReturnType<typeof setTimeout>|undefined;const stop=watchTaskDocuments(path,()=>{if(timer===undefined)timer=setTimeout(()=>{timer=undefined;try{store.reconcileTaskDocuments(s.projectId,s.taskId!);event({name:'documents.changed',data:{}})}catch{failed()}},80)},failed);return ()=>{clearTimeout(timer);stop()}}},
  });
- const handle=createHandler(store,initialFolder,chat,publicOrigin,terminals);
+ const handle=createHandler(store,initialFolder,chat,publicOrigin,terminals,notifyTaskEvents);
  return {websocket,fetch(request:Request,server:Server<SocketData>){const url=new URL(request.url);if(url.pathname!=='/api/ws')return handle(request);if(request.method!=='GET'||!access(request).allowed||!access(request).sameOrigin||request.headers.get('sec-fetch-site')==='cross-site')return new Response('Forbidden',{status:403});if(!server.upgrade(request,{data:{ready:false,used:new Set(),subscriptions:new Map()}}))return new Response('WebSocket upgrade required',{status:400});return undefined}};
 }
 export function dataPaths(environment: Record<string,string|undefined> = process.env, cwd = process.cwd()) {

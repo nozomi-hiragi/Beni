@@ -28,10 +28,10 @@ test('marks unfinished saved requests unknown after restart',async()=>{
 });
 test('HTTP chat scope validates project and task ownership',async()=>{
  const {Store}=await import('./store/index');const {createHandler}=await import('./server');const store=new Store(':memory:');const projectRoot=await mkdtemp(join(tmpdir(),'beni-project-'));const p=store.createProject('One',projectRoot) as {id:string};const other=store.createProject('Two',projectFolder(projectRoot,'other')) as {id:string};const task=store.createTask(p.id,'Task') as {id:string};const dir=await mkdtemp(join(tmpdir(),'beni-chat-'));const handler=createHandler(store,'/tmp',new ChatService(p=>projectFolder(dir,p),()=>fake));const post=(path:string,data:unknown)=>handler(new Request('http://127.0.0.1:3210'+path,{method:'POST',headers:{origin:'http://127.0.0.1:3210','content-type':'application/json'},body:JSON.stringify(data)}));try{
-  expect((await handler(new Request(`http://127.0.0.1:3210/api/chat?projectId=${other.id}&taskId=${task.id}`))).status).toBe(404);
-  expect((await post('/api/chat/send',{projectId:other.id,taskId:task.id,content:'hello',model:null})).status).toBe(404);
-  expect((await post('/api/chat/send',{projectId:p.id,taskId:task.id,content:'hello',model:null})).status).toBe(202);
-  await waitFor(async()=>{const res=await handler(new Request(`http://127.0.0.1:3210/api/chat?projectId=${p.id}&taskId=${task.id}`));return (await res.json()).messages[1].status==='completed'});
+  expect((await handler(new Request(`http://127.0.0.1:3210/api/chat?projectId=${other.id}&taskId=${task.id}&phase=requirements`))).status).toBe(404);
+  expect((await post('/api/chat/send',{projectId:other.id,taskId:task.id,phase:'requirements',content:'hello',model:null})).status).toBe(404);
+  expect((await post('/api/chat/send',{projectId:p.id,taskId:task.id,phase:'requirements',content:'hello',model:null})).status).toBe(202);
+  await waitFor(async()=>{const res=await handler(new Request(`http://127.0.0.1:3210/api/chat?projectId=${p.id}&taskId=${task.id}&phase=requirements`));return (await res.json()).messages[1].status==='completed'});
  }finally{store.close();await rm(dir,{recursive:true,force:true});await rm(projectRoot,{recursive:true,force:true})}
 });
 
@@ -54,6 +54,8 @@ test('task conversations write and resume in their document sandbox; general sta
   const restarted=new ChatService(p=>projectFolder(root,p),()=>fake);
   await restarted.send('019a0000-0000-7000-8000-000000000001','019a0000-0000-7100-8000-000000000001','hello','model-a',root,documentDirectory);await waitFor(async()=>(await restarted.get('019a0000-0000-7000-8000-000000000001','019a0000-0000-7100-8000-000000000001')).messages[3].status==='completed');
   await restarted.send('019a0000-0000-7000-8000-000000000001',null,'hello','model-a',root);await waitFor(async()=>(await restarted.get('019a0000-0000-7000-8000-000000000001',null)).messages[1].status==='completed');
+  await restarted.send('019a0000-0000-7000-8000-000000000001','019a0000-0000-7100-8000-000000000001','hello','model-a',root,documentDirectory,'implementation');await waitFor(async()=>(await restarted.get('019a0000-0000-7000-8000-000000000001','019a0000-0000-7100-8000-000000000001','implementation')).messages[1].status==='completed');
+  await restarted.send('019a0000-0000-7000-8000-000000000001','019a0000-0000-7100-8000-000000000001','hello','model-a',root,documentDirectory);await waitFor(async()=>(await restarted.get('019a0000-0000-7000-8000-000000000001','019a0000-0000-7100-8000-000000000001')).messages[5].status==='completed');
   const events=(await readFile(log,'utf8')).trim().split('\n').map(line=>JSON.parse(line));
   const start=events.find(event=>event.method==='thread/start');const resume=events.find(event=>event.method==='thread/resume');
   for(const event of [start,resume]){
@@ -62,6 +64,10 @@ test('task conversations write and resume in their document sandbox; general sta
   const turns=events.filter(event=>event.method==='turn/start');
   for(const turn of turns.slice(0,2))expect(turn.params).toMatchObject({cwd:documentDirectory,approvalPolicy:'never',sandboxPolicy:{type:'workspaceWrite',writableRoots:[documentDirectory],networkAccess:false,excludeTmpdirEnvVar:true,excludeSlashTmp:true}});
   expect(turns[2].params).toMatchObject({cwd:root,sandboxPolicy:{type:'readOnly',networkAccess:false}});
+  const implementationResume=events.find(event=>event.method==='thread/start'&&event.params.cwd===root&&event.params.sandbox==='workspace-write');expect(implementationResume.params.cwd).toBe(root);expect(implementationResume.params.developerInstructions).toContain('Implement source code');expect(implementationResume.params.developerInstructions).toContain('## 仕様');
+  expect(turns[3].params).toMatchObject({cwd:root,sandboxPolicy:{type:'workspaceWrite',writableRoots:[root],networkAccess:false,excludeTmpdirEnvVar:true,excludeSlashTmp:true}});
+  expect(turns[4].params).toMatchObject({cwd:documentDirectory,sandboxPolicy:{type:'workspaceWrite',writableRoots:[documentDirectory]}});
+  expect(events.filter(event=>event.method==='thread/resume').at(-1).params.developerInstructions).toContain('Never modify these files directly');
  }finally{delete process.env.FAKE_CODEX_LOG;await rm(root,{recursive:true,force:true})}
 });
 
@@ -129,7 +135,7 @@ test('project-local histories survive a folder move with unchanged packs and sco
  const root=await mkdtemp(join(tmpdir(),'beni-chat-move-'));const p='019a0000-0000-7000-8000-000000000001',t='019a0000-0000-7100-8000-000000000001';let folder=projectFolder(root,'source');
  try {
   const chat=new ChatService(()=>folder,()=>fake);await chat.send(p,t,'hello',null,folder);await waitFor(async()=>(await chat.get(p,t)).messages[1].status==='completed');const saved=await chat.get(p,t);
-  expect(JSON.parse(await readFile(join(folder,'.beni','chat',`${t}.json`),'utf8'))).toEqual(saved);
+  expect(JSON.parse(await readFile(join(folder,'.beni','chat',t,'requirements.json'),'utf8'))).toEqual(saved);
   const {rename}=await import('node:fs/promises');const moved=join(root,'moved');await rename(folder,moved);folder=moved;
   expect(await new ChatService(()=>folder,()=>fake).get(p,t)).toEqual(saved);
   expect((await new ChatService(()=>folder,()=>fake).get(p,null)).messages).toEqual([]);
@@ -157,5 +163,56 @@ test('an unavailable project folder fails without creating a blank chat or files
  try {
   await expect(chat.get('019a0000-0000-7000-8000-000000000001',null)).rejects.toThrow();
   const {readdir}=await import('node:fs/promises');expect(await readdir(root)).toEqual([]);
+ }finally{await rm(root,{recursive:true,force:true})}
+});
+
+test('フェーズ別の会話・パック・通知を分離し、タスク全体の同時送信を防ぐ',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'beni-phase-chat-'));const p='019a0000-0000-7000-8000-000000000001',t='019a0000-0000-7100-8000-000000000001';
+ const chat=new ChatService(()=>root,()=>fake);let requirements=0,documents=0;
+ const stop=chat.subscribe(p,t,()=>requirements++);const stopDocuments=chat.subscribe(p,t,()=>documents++,'documents');
+ try{
+  const sending=chat.send(p,t,'wait',null,root,undefined,'documents');
+  await expect(chat.send(p,t,'hello',null,root)).rejects.toThrow('busy');expect(()=>chat.withIdleTask(p,t,()=>{})).toThrow('busy');await sending;
+  await waitFor(async()=>(await chat.get(p,t,'documents')).messages[1].status==='streaming');
+  expect((await chat.get(p,t)).messages).toEqual([]);expect(requirements).toBe(0);expect(documents).toBeGreaterThan(0);
+  await expect(chat.interrupt(p,t)).rejects.toThrow('not running');await chat.interrupt(p,t,'documents');
+  await waitFor(async()=>(await chat.get(p,t,'documents')).messages[1].status==='interrupted');
+  const pack=(await chat.get(p,t,'documents')).packs[0];await expect(chat.pack(p,t,pack.packId)).rejects.toThrow('not found');
+  await chat.send(p,t,'hello',null,root);await waitFor(async()=>(await chat.get(p,t)).messages[1].status==='completed');
+  expect((await chat.get(p,t,'documents')).messages).toHaveLength(2);expect((await chat.get(p,t)).packs[0].sequence).toBe(1);
+ }finally{stop();stopDocuments();await rm(root,{recursive:true,force:true})}
+});
+
+test('旧タスク会話を検証して要件定義へ移行し、競合やリンクは破壊しない',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'beni-phase-migration-'));const p='019a0000-0000-7000-8000-000000000001',t='019a0000-0000-7100-8000-000000000001';
+ const {mkdir,writeFile,lstat,symlink}=await import('node:fs/promises');const folder=join(root,'.beni','chat');
+ try{
+  await mkdir(folder,{recursive:true});const old=join(folder,`${t}.json`);const legacy={version:1,id:'legacy',projectId:p,taskId:t,threadId:'old-thread',sessionId:'old-session',messages:[],packs:[]};await writeFile(old,JSON.stringify(legacy));
+  const chat=new ChatService(()=>root,()=>fake);expect((await chat.get(p,t,'documents')).messages).toEqual([]);const migrated=await chat.get(p,t);expect(migrated).toMatchObject({...legacy,phase:'requirements',lastEventId:0});await expect(lstat(old)).rejects.toThrow();
+  await writeFile(old,JSON.stringify(legacy));expect(await chat.get(p,t)).toEqual(migrated);await expect(lstat(old)).rejects.toThrow();
+  await writeFile(old,JSON.stringify({...legacy,id:'conflict'}));await expect(chat.get(p,t,'implementation')).rejects.toThrow('Chat migration conflict');expect(JSON.parse(await readFile(old,'utf8')).id).toBe('conflict');expect(JSON.parse(await readFile(join(folder,t,'requirements.json'),'utf8')).id).toBe('legacy');
+  await rm(old);await symlink(join(folder,t,'requirements.json'),old);await expect(chat.get(p,t)).rejects.toThrow('Invalid metadata file');
+ }finally{await rm(root,{recursive:true,force:true})}
+});
+
+test('引継ぎは固定上限で全ページを渡し、受理後だけカーソルを進めて失敗時は再送する',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'beni-phase-cursor-'));const p='019a0000-0000-7000-8000-000000000001',t='019a0000-0000-7100-8000-000000000001';
+ const log=join(root,'rpc.jsonl');process.env.FAKE_CODEX_LOG=log;let tail=3;const ranges:number[][]=[];
+ const chat=new ChatService(()=>root,()=>fake);chat.setTaskEvents({capture:()=>{},events:(_p,_t,after,through=tail)=>{ranges.push([after,through]);const next=Math.min(after+1,through);return {events:next>after?[{id:next,type:'document.updated',version:'a'.repeat(64),path:'requirements.md'}]:[],lastEventId:next,through,hasMore:next<through}}});
+ try{
+  await chat.send(p,t,'reject',null,root,root);await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='failed');expect((await chat.get(p,t)).lastEventId).toBe(0);
+  await chat.send(p,t,'wait',null,root,root);await waitFor(async()=>(await chat.get(p,t)).lastEventId===3);tail=4;expect((await chat.get(p,t)).messages.at(-2)?.content).toBe('wait');
+  await chat.interrupt(p,t);await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='interrupted');await chat.send(p,t,'hello',null,root,root);await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='completed');expect((await chat.get(p,t)).lastEventId).toBe(4);
+  const turns=(await readFile(log,'utf8')).trim().split('\n').map(line=>JSON.parse(line)).filter(event=>event.method==='turn/start');expect(turns[0].params.input).toEqual(turns[1].params.input.map((input:any,i:number)=>i===0?{...input,text:'reject'}:input));expect(turns[1].params.input[1].text).toContain('versions/<version>.md');expect(turns[2].params.input[1].text).toContain('"id":4');expect(turns[2].params.input[1].text).not.toContain('"id":3');expect(ranges).toEqual([[0,3],[1,3],[2,3],[0,3],[1,3],[2,3],[3,4]]);
+ }finally{delete process.env.FAKE_CODEX_LOG;await rm(root,{recursive:true,force:true})}
+});
+
+test('受理不明の切断では引継ぎカーソルを進めず、読込中の削除を防ぐ',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'beni-cursor-unknown-'));const p='019a0000-0000-7000-8000-000000000001',t='019a0000-0000-7100-8000-000000000001';const chat=new ChatService(()=>root,()=>fake);let delivered=0;
+ chat.setTaskEvents({capture:()=>{},events:(_p,_t,after)=>{if(after===0)delivered++;return {events:after===0?[{id:1}]:[],through:1,lastEventId:1,hasMore:false}}});
+ try{
+  const reading=chat.get(p,t,'documents');expect(()=>chat.deleteTask(p,t,()=>{})).toThrow('busy');await reading;
+  await chat.send(p,t,'disconnect',null,root,root);await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='unknown');expect((await chat.get(p,t)).lastEventId).toBe(0);
+  await chat.send(p,t,'hello',null,root,root);await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='completed');expect((await chat.get(p,t)).lastEventId).toBe(1);expect(delivered).toBe(2);
  }finally{await rm(root,{recursive:true,force:true})}
 });

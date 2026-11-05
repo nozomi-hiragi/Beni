@@ -16,6 +16,7 @@ Beni/
 │   │   ├── migration.ts              旧データの移行・照合・バックアップと.beniの複製
 │   │   ├── data-cli.ts               データ移行・複製コマンドの入口
 │   │   ├── documents.ts              タスク用 Markdown の作成・読み取り・変更監視
+│   │   ├── task-history.ts           タスクの変更イベント・文書の版・履歴取得
 │   │   ├── terminal.ts               PTY・端末画面・操作権・終了処理
 │   │   ├── terminal.test.ts          シェルの存続・排他・画面復元・HTTP/WSのテスト
 │   │   ├── events.ts                 共通 WS の接続・購読・送信上限と解放処理
@@ -26,6 +27,7 @@ Beni/
 │   │       └── fake-codex.ts          実サービスを使わず Codex 通信を模擬する実行ファイル
 │   ├── shared/                       FE・BE 共通の通信定義
 │   │   ├── ids.ts                    プロジェクト・タスクIDの生成と種別検証
+│   │   ├── task-phase.ts             共通のフェーズ識別子と検証
 │   │   └── communication.ts          パック・WS メッセージの型、受信検証、ハッシュ
 │   └── frontend/                     ブラウザーで動く SolidJS の画面
 │       ├── index.html                アプリの表示先と JavaScript・CSS の読み込み

@@ -132,6 +132,13 @@ test('creates task Markdown and previews real file updates as the authoritative 
   const base=join(folder,'.beni','tasks',String(task.id));
   expect(await readFile(join(base,'requirements.md'),'utf8')).toBe('# New task\n');
   expect(await readFile(join(base,'implementation-plan.md'),'utf8')).toContain('# Implementation plan');
+  expect(await readFile(join(base,'documents.md'),'utf8')).toBe('# 仕様整理\n\n## 資料\n\n## 仕様\n');
+  await writeFile(join(base,'implementation-plan.md'),'# Existing plan\r\n');
+  await rm(join(base,'documents.md'));
+  await detail(task.id);
+  expect(await readFile(join(base,'requirements.md'),'utf8')).toBe('# New task\n');
+  expect(await readFile(join(base,'implementation-plan.md'),'utf8')).toBe('# Existing plan\r\n');
+  expect(await readFile(join(base,'documents.md'),'utf8')).toContain('## 仕様');
   await writeFile(join(base,'requirements.md'),'# Actual file\n');
   expect((await detail(task.id)).documents.find((d:any)=>d.name==='requirements.md').content).toBe('# Actual file\n');
   const second=store.createTask(project.id,'Second');
@@ -287,7 +294,7 @@ test('HTTP scopes accept kind-correct IDs and reject numeric or swapped identifi
   const handle=createHandler(store,folder,new ChatService(()=>folder,()=>null));
   const get=(path:string)=>handle(new Request('http://127.0.0.1:3210'+path));
   const post=(path:string,input:unknown)=>handle(new Request('http://127.0.0.1:3210'+path,{method:'POST',headers:{origin:'http://127.0.0.1:3210','content-type':'application/json'},body:JSON.stringify(input)}));
-  for(const suffix of [`projectId=${project.id}`,`projectId=${project.id}&taskId=${task.id}`]){
+  for(const suffix of [`projectId=${project.id}`,`projectId=${project.id}&taskId=${task.id}&phase=requirements`]){
    const result=await get('/api/chat?'+suffix);expect(result.status).toBe(200);
    expect((await result.json()).projectId).toBe(project.id);
   }
@@ -304,7 +311,7 @@ test('HTTP task chat records activity while GET recovery and general chat preser
  const project=store.createProject('Example',folder),task=store.createTask(project.id,'Task');
  const chat=new ChatService(()=>folder,()=>join(import.meta.dir,'test/fake-codex.ts'));
  const handle=createHandler(store,'/tmp',chat);
- const post=(taskId:string|null,content:string)=>handle(new Request('http://127.0.0.1:3210/api/chat/send',{method:'POST',headers:{origin:'http://127.0.0.1:3210','content-type':'application/json'},body:JSON.stringify({projectId:project.id,taskId,content,model:null})}));
+ const post=(taskId:string|null,content:string)=>handle(new Request('http://127.0.0.1:3210/api/chat/send',{method:'POST',headers:{origin:'http://127.0.0.1:3210','content-type':'application/json'},body:JSON.stringify({projectId:project.id,taskId,phase:taskId===null?null:'requirements',content,model:null})}));
  try{
   const path=join(folder,'.beni','tasks',task.id,'task.json');const value=JSON.parse(await readFile(path,'utf8'));value.createdAt=null;value.updatedAt=null;await writeFile(path,JSON.stringify(value));
   expect((await post(null,'hello')).status).toBe(202);
@@ -313,7 +320,7 @@ test('HTTP task chat records activity while GET recovery and general chat preser
   expect((await post(task.id,'hello')).status).toBe(202);
   for(let i=0;i<100&&(await chat.get(project.id,task.id)).messages[1]?.status!=='completed';i++)await Bun.sleep(20);
   const completed=store.task(task.id)!;expect(completed.createdAt).toBeNull();expect(completed.updatedAt).not.toBeNull();
-  await handle(new Request(`http://127.0.0.1:3210/api/chat?projectId=${project.id}&taskId=${task.id}`));
+  await handle(new Request(`http://127.0.0.1:3210/api/chat?projectId=${project.id}&taskId=${task.id}&phase=requirements`));
   await handle(new Request(`http://127.0.0.1:3210/api/tasks/${task.id}`));
   expect(store.task(task.id)!.updatedAt).toBe(completed.updatedAt);
  }finally{store.close();await rm(folder,{recursive:true,force:true})}
@@ -355,4 +362,65 @@ test('task deletion API enforces origin and project scope and blocks send initia
   release();await sending;expect((await post(p.id)).status).toBe(200);expect((await post(p.id)).status).toBe(404);
   expect((await (await handle(new Request('http://127.0.0.1:3210/api/state'))).json()).tasks).toEqual([]);
  }finally{store.close();await rm(folder,{recursive:true,force:true})}
+});
+
+test('phase advances once per expected phase and rejects busy preparations and active turns', async () => {
+ const folder=await mkdtemp(join(tmpdir(),'beni-phase-'));const store=new Store(':memory:');
+ const project=store.createProject('Example',folder);const task=store.createTask(project.id,'Task');
+ const chat=new ChatService(()=>folder,()=>join(import.meta.dir,'test/fake-codex.ts'));const handle=createHandler(store,folder,chat);
+ const post=(path:string,data:unknown)=>handle(new Request(`http://127.0.0.1:3210${path}`,{method:'POST',headers:{origin:'http://127.0.0.1:3210','content-type':'application/json'},body:JSON.stringify(data)}));
+ const advance=(phase:unknown,projectId=project.id)=>post(`/api/tasks/${task.id}/phase`,{projectId,phase});
+ try {
+  expect((await advance('unknown')).status).toBe(400);
+  expect((await advance('requirements',generateId('project'))).status).toBe(404);
+  const preparing=post('/api/chat/send',{projectId:project.id,taskId:task.id,phase:'requirements',content:'wait',model:null});
+  // Let the request reserve its conversation before the provider status probe completes.
+  await Bun.sleep(5);
+  expect((await advance('requirements')).status).toBe(409);expect((await preparing).status).toBe(202);
+  expect((await advance('requirements')).status).toBe(409);
+  for(let i=0;i<100;i++){try{await chat.interrupt(project.id,task.id);break}catch{await Bun.sleep(20)}}
+  let response:Response|undefined;
+  for(let i=0;i<100;i++){response=await advance('requirements');if(response.status!==409)break;await Bun.sleep(20)}
+  expect(response!.status).toBe(200);const updated=await response!.json();expect(updated.phase).toBe('documents');expect(Date.parse(updated.updatedAt)).toBeGreaterThan(Date.parse(task.updatedAt!));
+  expect((await advance('requirements')).status).toBe(409);
+  expect((await (await advance('documents')).json()).phase).toBe('implementation-plan');
+  expect((await (await advance('implementation-plan')).json()).phase).toBe('implementation');
+  expect((await advance('implementation')).status).toBe(409);
+ } finally {store.close();await rm(folder,{recursive:true,force:true})}
+});
+
+test('HTTPはタスク会話phaseを必須とし、イベントのページ・版・カーソルを検証する',async()=>{
+ const folder=await mkdtemp(join(tmpdir(),'beni-events-http-'));const store=new Store(':memory:');const project=store.createProject('Example',folder),task=store.createTask(project.id,'Task');const handle=createHandler(store,folder,new ChatService(()=>folder,()=>null));
+ const get=(path:string)=>handle(new Request('http://127.0.0.1:3210'+path));const query=`projectId=${project.id}&taskId=${task.id}`;
+ const post=(path:string,input:unknown)=>handle(new Request('http://127.0.0.1:3210'+path,{method:'POST',headers:{origin:'http://127.0.0.1:3210','content-type':'application/json'},body:JSON.stringify(input)}));
+ try{
+  for(const suffix of ['', '&phase=unknown'])for(const path of ['/api/chat','/api/chat/packs'])expect((await get(`${path}?${query}${suffix}`)).status).toBe(400);
+  expect((await get(`/api/chat?projectId=${project.id}&phase=requirements`)).status).toBe(400);
+  expect((await post('/api/chat/send',{projectId:project.id,taskId:task.id,content:'hello',model:null})).status).toBe(400);
+  expect((await post('/api/chat/send',{projectId:project.id,taskId:task.id,phase:'documents',content:'hello',model:null})).status).toBe(409);
+  expect((await post('/api/chat/interrupt',{projectId:project.id,taskId:task.id})).status).toBe(400);
+  expect((await post('/api/chat/packs/missing/ack',{projectId:project.id,taskId:task.id,hash:'0'.repeat(64)})).status).toBe(400);
+  const path=`/api/tasks/${task.id}/events?projectId=${project.id}`;const first=await (await get(path+'&limit=1')).json();expect(first.events).toHaveLength(1);expect(first.hasMore).toBe(true);expect(first.lastEventId).toBe(1);
+  const rest=await (await get(path+`&after=1&through=${first.through}`)).json();expect(rest.events.length).toBeGreaterThan(0);expect(rest.through).toBe(first.through);expect(rest.hasMore).toBe(false);
+  const event=first.events[0];const version=await (await get(`/api/tasks/${task.id}/events/versions/${event.version}?projectId=${project.id}`)).json();expect(version.version).toBe(event.version);expect(typeof version.content).toBe('string');
+  for(const suffix of ['&after=-1','&after=1.5','&after=NaN','&limit=0','&limit=101','&through=0&after=1'])expect((await get(path+suffix)).status).toBe(400);
+  expect((await get(path+'&after=999999')).status).toBe(404);expect((await get(`/api/tasks/${task.id}/events/versions/${'0'.repeat(64)}?projectId=${project.id}`)).status).toBe(404);
+  expect((await post(`/api/tasks/${task.id}/phase`,{projectId:project.id,phase:'requirements',direction:'back'})).status).toBe(409);
+  expect((await post(`/api/tasks/${task.id}/phase`,{projectId:project.id,phase:'requirements'})).status).toBe(200);
+  expect((await post(`/api/tasks/${task.id}/phase`,{projectId:project.id,phase:'documents',direction:'back'})).status).toBe(200);
+ }finally{store.close();await rm(folder,{recursive:true,force:true})}
+});
+
+test('WSのphaseスコープを検証し、タスク全体の文書・フェーズイベントを通知する',async()=>{
+ const folder=await mkdtemp(join(tmpdir(),'beni-events-wire-'));const store=new Store(':memory:');const project=store.createProject('Example',folder),task=store.createTask(project.id,'Task');const server=Bun.serve({hostname:'127.0.0.1',port:0,...createServerOptions(store)});const origin=`http://127.0.0.1:${server.port}`;const ws=new Socket(origin.replace('http:','ws:')+'/api/ws',{headers:{origin}});const inbox=socketMessages(ws);
+ try{
+  await opened(ws);ws.send(JSON.stringify({type:'hello',version:1}));await inbox.next();
+  const subscribe=(id:string,topic:string,phase?:unknown)=>ws.send(JSON.stringify({type:'subscribe',subscriptionId:id,topic,scope:{projectId:project.id,taskId:task.id,...(phase===undefined?{}:{phase})}}));
+  subscribe('missing','chat');expect(await inbox.next()).toMatchObject({code:'INVALID_MESSAGE'});subscribe('bad-documents','documents','requirements');expect(await inbox.next()).toMatchObject({code:'INVALID_MESSAGE'});subscribe('bad-events','task-events',null);expect(await inbox.next()).toMatchObject({code:'INVALID_MESSAGE'});
+  subscribe('requirements','chat','requirements');expect(await inbox.next()).toMatchObject({type:'subscribed'});subscribe('documents','chat','documents');expect(await inbox.next()).toMatchObject({type:'subscribed'});
+  subscribe('events','task-events');expect(await inbox.next()).toEqual({type:'subscribed',subscriptionId:'events'});const initial=await inbox.next();expect(initial).toMatchObject({name:'task.events.changed'});
+  await writeFile(join(folder,'.beni','tasks',task.id,'requirements.md'),'# External change');const changed=await inbox.next();expect(changed.name).toBe('task.events.changed');expect(changed.data.lastEventId).toBeGreaterThan(initial.data.lastEventId);
+  const phase=await fetch(origin+`/api/tasks/${task.id}/phase`,{method:'POST',headers:{origin,'content-type':'application/json'},body:JSON.stringify({projectId:project.id,phase:'requirements'})});expect(phase.status).toBe(200);expect(await inbox.next()).toMatchObject({subscriptionId:'events',name:'task.events.changed'});
+  ws.send(JSON.stringify({type:'unsubscribe',subscriptionId:'events'}));expect(await inbox.next()).toMatchObject({type:'unsubscribed'});
+ }finally{ws.close();server.stop(true);store.close();await rm(folder,{recursive:true,force:true})}
 });

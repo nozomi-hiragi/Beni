@@ -50,14 +50,15 @@ WS の接続、購読、イベント、エラーの契約を定義します。
 
 | topic | scope | イベント |
 | --- | --- | --- |
-| `chat` | `{projectId: string, taskId: string \| null}` | `chat.pack.delta`, `chat.pack.closed`, `chat.changed` |
+| `chat` | `{projectId: string, taskId: string \| null, phase?: string \| null}` | `chat.pack.delta`, `chat.pack.closed`, `chat.changed` |
+| `task-events` | `{projectId: string, taskId: string}` | `task.events.changed` |
 | `documents` | `{projectId: string, taskId: string}` | `documents.changed` |
 | `terminal` | `{projectId: string, taskId: null, terminalId?: string}` | `terminal.changed`, `terminal.state`, 画面同期・入出力イベント |
 
 チャットの一般会話は taskId を null にします。文書は具体的なタスクが必須です。ターミナルは terminalId を省略すると一覧、指定すると個別シェルを購読します。操作メッセージとイベントの詳細は [ターミナル通信](terminal.md) を参照してください。
 
 ```json
-{"type":"subscribe","subscriptionId":"s1","topic":"chat","scope":{"projectId":"019a5000-0000-7000-8000-000000000001","taskId":"019a5000-0000-7100-8000-000000000002"}}
+{"type":"subscribe","subscriptionId":"s1","topic":"chat","scope":{"projectId":"019a5000-0000-7000-8000-000000000001","taskId":"019a5000-0000-7100-8000-000000000002","phase":"requirements"}}
 ```
 
 ```json

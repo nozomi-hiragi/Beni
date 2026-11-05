@@ -1,10 +1,11 @@
 import { batch, createEffect, createMemo, createSignal, onCleanup, onMount, Show } from 'solid-js';
 import { createStore, reconcile } from 'solid-js/store';
-import { api } from './api';
+import { api, ApiError } from './api';
+import { isTaskPhase, type TaskPhase } from '../shared/task-phase';
 import { communication } from './communication';
 import ChatPanel from './components/ChatPanel';
 import MarkdownPreview from './components/MarkdownPreview';
-import PhaseIndicator from './components/PhaseIndicator';
+import PhaseIndicator, { phaseDocuments } from './components/PhaseIndicator';
 import TabBar from './components/TabBar';
 import TreeView from './components/TreeView';
 import TerminalPanel from './components/TerminalPanel';
@@ -70,8 +71,12 @@ export default function Workspace(props: WorkspaceProps) {
     const task = taskOptions().find(item => item.id === id);
     return task ? taskLabel(task) : 'タスク';
   };
+  const [advancing, setAdvancing] = createSignal(false);
+  const [phaseError, setPhaseError] = createSignal('');
+  createEffect(() => { activeTask(); setPhaseError(''); });
   const documents = createMemo(() => detail()?.documents ?? []);
-  const documentLabel = (document: Document) => documents().filter(item => item.name === document.name).length > 1 ? `${document.name} · v${document.version}` : document.name;
+  const documentName = (name: string) => phaseDocuments.find(item => item.name === name)?.label ?? name;
+  const documentLabel = (document: Document) => documents().filter(item => item.name === document.name).length > 1 ? `${documentName(document.name)} · v${document.version}` : documentName(document.name);
   const currentDocument = createMemo(() => documents().find(document => documentId(document) === activeDocument()));
 
   // URL changes select tabs without remounting this workspace or creating history.
@@ -129,6 +134,7 @@ export default function Workspace(props: WorkspaceProps) {
     let active = true;
     let sequence = 0,fetching=false,reload=false;
     let unsubscribe: (() => void) | undefined;
+    let unsubscribeEvents: (() => void) | undefined;
     if (documentOwner !== taskId) {
       batch(() => { setDetail(undefined); restoreDocumentTabs(taskId); });
     }
@@ -142,11 +148,21 @@ export default function Workspace(props: WorkspaceProps) {
         const data = await api<TaskDetail>(`/api/tasks/${taskId}`);
         if (!active || request !== sequence || deletedTasks.has(taskId)) return;
         batch(() => {
+          const previousPhase = detail()?.task.phase;
           setDetail(data);
+          if (previousPhase !== undefined && previousPhase !== data.task.phase) props.onTaskChange?.(data.task.id, data.task);
+          setTasks(previous => previous.map(item => item.id === data.task.id ? data.task : item));
           setProjectId(data.task.projectId);
           adoptDocuments(taskId, data.documents);
           setLoadError('');
         });
+        if (!unsubscribeEvents) {
+          unsubscribeEvents = communication.subscribe('task-events', { projectId: data.task.projectId, taskId }, {
+            subscribed: () => { if (active) void load(); },
+            event: () => { if (active) void load(); },
+            error: message => { if (active) setLoadError(message); },
+          });
+        }
         if (!unsubscribe) {
           unsubscribe = communication.subscribe('documents', { projectId: data.task.projectId, taskId }, {
             subscribed: () => { if (active) void load(); },
@@ -162,7 +178,7 @@ export default function Workspace(props: WorkspaceProps) {
       }while(reload&&active);fetching=false;
     };
     void load();
-    onCleanup(() => { active = false; sequence++; unsubscribe?.(); });
+    onCleanup(() => { active = false; sequence++; unsubscribe?.(); unsubscribeEvents?.(); });
   });
 
   async function renameTask(id: string, name: string) {
@@ -233,11 +249,33 @@ export default function Workspace(props: WorkspaceProps) {
             <Show when={loadError()}><div role="alert" class="alert alert-error text-sm">{loadError()}</div></Show>
             <Show when={loading() && !detail()}><p class="p-4 text-sm text-base-content/60">読み込み中...</p></Show>
             <Show when={detail() && detail()?.task.id === activeTask()}>
-              <PhaseIndicator phase={detail()!.task.phase} onRequirements={() => {
-                const document = documents().filter(item => (item.name === 'requirements.md' || item.name === '指示書.md')).reduce<Document | undefined>((latest, item) => !latest || item.version > latest.version ? item : latest, undefined);
+              <PhaseIndicator phase={detail()!.task.phase} advancing={advancing()} onChange={async direction => {
+                const current = detail();
+                if (!current || advancing()) return;
+                setAdvancing(true); setPhaseError('');
+                try {
+                  const result = await api<Task>(`/api/tasks/${current.task.id}/phase`, {projectId: current.task.projectId, phase: current.task.phase, direction});
+                  if (detail()?.task.id === current.task.id) {
+                    setDetail({...detail()!, task: result});
+                    setTasks(previous => previous.map(item => item.id === result.id ? result : item));
+                    props.onTaskChange?.(result.id, result);
+                    const next = phaseDocuments.find(item => item.phase === result.phase);
+                    const target = documents().filter(item => item.name === next?.name).reduce<Document | undefined>((latest, item) => !latest || item.version > latest.version ? item : latest, undefined);
+                    if (target) openDocument(documentId(target));
+                  }
+                } catch (error) {
+                  if (error instanceof ApiError && error.status === 409) {
+                    try { const refreshed = await api<TaskDetail>(`/api/tasks/${current.task.id}`); if (alive && detail()?.task.id === current.task.id) { batch(() => { setDetail(refreshed); adoptDocuments(current.task.id, refreshed.documents); setTasks(previous => previous.map(item => item.id === refreshed.task.id ? refreshed.task : item)); }); props.onTaskChange?.(refreshed.task.id, refreshed.task); } } catch { /* 元のエラーを表示する。 */ }
+                  }
+                  if (alive && detail()?.task.id === current.task.id) setPhaseError(error instanceof Error ? error.message : 'フェーズを更新できませんでした');
+                }
+                finally { setAdvancing(false); }
+              }} onDocument={name => {
+                const document = documents().filter(item => (item.name === name || name === 'requirements.md' && item.name === '指示書.md')).reduce<Document | undefined>((latest, item) => !latest || item.version > latest.version ? item : latest, undefined);
                 if (document) openDocument(documentId(document));
               }} />
-              <ChatPanel projectId={detail()!.task.projectId} taskId={activeTask()} />
+              <Show when={phaseError()}><p role="alert" class="p-2 text-sm text-error">{phaseError()}</p></Show>
+              <Show when={isTaskPhase(detail()?.task.phase)}><ChatPanel projectId={detail()!.task.projectId} taskId={activeTask()} phase={isTaskPhase(detail()?.task.phase) ? detail()?.task.phase as TaskPhase : undefined} /></Show>
             </Show>
           </Show>
         </div>
@@ -252,7 +290,10 @@ export default function Workspace(props: WorkspaceProps) {
       <TabBar label="文書" tabs={openDocuments().map(id => { const document = documents().find(item => documentId(item) === id); return {id, label:document ? documentLabel(document) : id}; })} activeId={activeDocument()} onSelect={openDocument} onClose={closeDocument} left={toggle('文書ツリーを開閉', documentTreeOpen(), 'document-tree', () => setDocumentTreeOpen(value => !value), element => { documentTreeToggle = element; })} />
       <div class="relative flex min-h-0 flex-1 flex-col">
         <Show when={documentTreeOpen()}><TreeView id="document-tree" label="文書" nodes={documents().map(document => ({id:documentId(document),label:documentLabel(document)}))} onSelect={id => { openDocument(id); setDocumentTreeOpen(false); }} /></Show>
-        <Show when={currentDocument()}>{document => <MarkdownPreview content={document().content} />}</Show>
+        <Show when={currentDocument()}>{document => <MarkdownPreview content={document().content} documents={documents().map(item => item.name)} onDocument={name => {
+          const target = documents().find(item => item.name === name);
+          if (target) openDocument(documentId(target));
+        }} />}</Show>
       </div>
     </section>
   </section>;
