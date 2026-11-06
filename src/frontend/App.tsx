@@ -61,7 +61,6 @@ function ProjectScreen(props: { id: string; task?: string; invalidTask: boolean;
 
 export default function App() {
   const [route, setRoute] = createSignal<Route>(parseRoute(new URL(window.location.href)));
-  const [query, setQuery] = createSignal('');
   const [projectTitle, setProjectTitle] = createSignal<{ id: string; name: string }>();
   const projectId = createMemo(() => { const current = route(); return current.kind === 'project' ? current.id : undefined; });
   const projectRoute = () => { const current = route(); return current.kind === 'project' ? current : undefined; };
@@ -77,9 +76,9 @@ export default function App() {
     onCleanup(() => window.removeEventListener('popstate', pop));
   });
   return <div class="flow-root" classList={{ 'instructions-shell': route().kind === 'instructions', 'project-shell': route().kind === 'project' }}>
-    <Menu title={route().kind === 'project' ? (projectTitle()?.id === projectId() ? projectTitle()!.name : 'プロジェクト') : route().kind === 'settings' ? '設定' : route().kind === 'instructions' ? 'インストラクション管理' : 'Beni'} showHome={route().kind !== 'home'} query={query()} onHome={home} onQueryChange={setQuery} onInstructions={() => navigate('/instructions')} onSettings={() => navigate('/settings')} />
+    <Menu title={route().kind === 'project' ? (projectTitle()?.id === projectId() ? projectTitle()!.name : 'プロジェクト') : route().kind === 'settings' ? '設定' : route().kind === 'instructions' ? 'インストラクション管理' : 'Beni'} showHome={route().kind !== 'home'} onHome={home} onInstructions={() => navigate('/instructions')} onSettings={() => navigate('/settings')} />
     <main class="mx-auto w-full px-2 py-2">
-      <Show when={route().kind === 'home'}><Home query={query()} onOpenProject={project => { setProjectTitle({ id: project.id, name: project.name }); navigate(`/project/${project.id}`); }} onOpenTask={(task, project) => { setProjectTitle({ id: project.id, name: project.name }); navigate(`/project/${project.id}?task=${task.id}`); }} /></Show>
+      <Show when={route().kind === 'home'}><Home onOpenProject={project => { setProjectTitle({ id: project.id, name: project.name }); navigate(`/project/${project.id}`); }} onOpenTask={(task, project) => { setProjectTitle({ id: project.id, name: project.name }); navigate(`/project/${project.id}?task=${task.id}`); }} /></Show>
       <Show when={projectId()} keyed>{id => <ProjectScreen id={id} task={projectRoute()?.task} invalidTask={projectRoute()?.invalidTask ?? false} onHome={home} onTitle={name => setProjectTitle({ id, name })} onTaskChange={task => navigate(`/project/${id}${task === undefined ? '' : `?task=${task}`}`)} />}</Show>
       <Show when={route().kind === 'settings'}><CodexSettings /></Show>
       <Show when={route().kind === 'instructions'}><Instructions /></Show>

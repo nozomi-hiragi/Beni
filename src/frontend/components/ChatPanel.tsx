@@ -118,7 +118,27 @@ export default function ChatPanel(props: { projectId: string; taskId?: string; p
       if(fetching){reload=true;return}fetching=true;
       do {reload=false;
       const request = ++sequence;
-      try { const value = await api<Conversation>(url, undefined, controller.signal); if (active && request === sequence) { if (!untrack(() => selectedModel(currentKey)) && value.selectedModel) { chooseModel(currentKey, value.selectedModel); if (hadModels && !untrack(() => modelIsAvailable(currentKey)) && modelRefreshRequested) {modelRefreshRequested = false; void loadModels(true, value.selectedModel.provider ?? 'codex').catch(() => {});} } sync.conversation(value.id); setConversation(value); setLoadError(''); } }
+      try {
+        const value = await api<Conversation>(url, undefined, controller.signal);
+        if (active && request === sequence) {
+          if (!untrack(() => selectedModel(currentKey)) && value.selectedModel) {
+            chooseModel(currentKey, value.selectedModel);
+            if (hadModels && !untrack(() => modelIsAvailable(currentKey)) && modelRefreshRequested) {
+              modelRefreshRequested = false;
+              void loadModels(true, value.selectedModel.provider ?? 'codex').catch(() => {});
+            }
+          }
+          const previous = conversation();
+          const latest = value.messages.findLast(message => message.role === 'assistant');
+          if (previous && latest && latest.status !== 'pending' && latest.status !== 'streaming') {
+            const last = previous.messages.findLast(message => message.role === 'assistant');
+            if (last?.id !== latest.id || last?.status !== latest.status) void loadModels(true, latest.provider).catch(() => {});
+          }
+          sync.conversation(value.id);
+          setConversation(value);
+          setLoadError('');
+        }
+      }
       catch { if (active && request === sequence) setLoadError('履歴を取得できませんでした'); }
       }while(reload&&active);fetching=false;
     };

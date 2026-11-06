@@ -1,27 +1,28 @@
 import { createSignal } from 'solid-js';
 import { cleanup, fireEvent, render, screen } from '@solidjs/testing-library';
 import { afterEach, expect, it, vi } from 'vitest';
+import { loadModels, resetModelCache } from '../model-cache';
 import Menu from './Menu';
 
-afterEach(cleanup);
+afterEach(() => { cleanup(); resetModelCache(); vi.unstubAllGlobals(); });
 
-it('displays the current title and only shows the home button outside home', () => {
+it('displays the current title and only shows the home button outside home', async () => {
+  vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ installed: false, usage: 'unknown' }))));
   const onHome = vi.fn();
   const onSettings = vi.fn();
   const onInstructions = vi.fn();
   const [title, setTitle] = createSignal('Beni');
   const [showHome, setShowHome] = createSignal(false);
-  const [query, setQuery] = createSignal('');
-  render(() => <Menu title={title()} showHome={showHome()} query={query()} onHome={onHome} onSettings={onSettings} onInstructions={onInstructions} onQueryChange={setQuery} />);
+  render(() => <Menu title={title()} showHome={showHome()} onHome={onHome} onSettings={onSettings} onInstructions={onInstructions} />);
 
   expect(screen.getByText('Beni')).toBeTruthy();
   expect(screen.queryByRole('button', { name: 'ホームへ戻る' })).toBeNull();
-  const search = screen.getByRole('searchbox', { name: 'タスクを検索' }) as HTMLInputElement;
-  fireEvent.input(search, { target: { value: '画面' } });
-  expect(query()).toBe('画面');
+  expect(screen.queryByRole('searchbox')).toBeNull();
   const settingsButton = screen.getByRole('button', { name: '設定' });
   const instructionsButton = screen.getByRole('button', { name: 'インストラクション管理' });
-  expect(instructionsButton.nextElementSibling).toBe(settingsButton);
+  expect(instructionsButton.closest('li')?.nextElementSibling).toBe(settingsButton.closest('li'));
+  expect(instructionsButton.getAttribute('data-tip')).toBe('インストラクション管理');
+  expect(settingsButton.getAttribute('data-tip')).toBe('設定');
   expect(instructionsButton.querySelector('svg')?.getAttribute('aria-hidden')).toBe('true');
   fireEvent.click(instructionsButton);
   expect(onInstructions).toHaveBeenCalledOnce();
@@ -42,5 +43,5 @@ it('displays the current title and only shows the home button outside home', () 
   expect(onHome).toHaveBeenCalledOnce();
   setTitle('設定');
   expect(screen.getByText('設定', { selector: 'strong' })).toBeTruthy();
-  expect(search.value).toBe('画面');
+  await loadModels();
 });

@@ -4,6 +4,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-li
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import ChatPanel from './ChatPanel';
 import CodexSettings from './CodexSettings';
+import UsageIndicators from './UsageIndicators';
 import { FakeWebSocket, packResponse, testPack } from '../test-events';
 
 const json = (data: unknown) => ({ ok: true, json: async () => data }) as Response;
@@ -57,6 +58,34 @@ it('keeps task histories separate and displays streamed status and interruption'
   fireEvent.click(screen.getByRole('button', {name:'中断'}));
   await waitFor(() => expect(requests).toContain('/api/chat/interrupt'));
   expect(requests).toContain('/api/chat?projectId=019a0000-0000-7000-8000-00000000007b&taskId=019a0000-0000-7100-8000-000000000005&phase=requirements');
+});
+
+it('reads the updated usage balance after a chat completes', async () => {
+  let status = 'streaming';
+  const fetchChat = vi.fn(async (url: string, init?: RequestInit) => {
+    if (url === '/api/codex/status') {
+      expect(init?.method).toBeUndefined();
+      return json({ installed: true, usage: { windows: [{ label: '5時間枠', usedPercent: status === 'completed' ? 25 : 20 }] } });
+    }
+    if (url === '/api/claude/status') return json({ installed: false, usage: 'unknown' });
+    if (url.startsWith('/api/chat?')) return json({
+      id: 'usage-chat',
+      messages: [{ id: 'response', role: 'assistant', provider: 'codex', status }],
+    });
+    const pack = packResponse(url, []);
+    if (pack) return pack;
+    throw new Error(url);
+  });
+  vi.stubGlobal('fetch', fetchChat);
+  render(() => <><UsageIndicators /><ChatPanel projectId="019a0000-0000-7000-8000-00000000007b" /></>);
+
+  expect(await screen.findByText('作業中…')).toBeTruthy();
+  const gauge = await screen.findByRole('progressbar', { name: 'Codex の利用枠' });
+  expect(gauge.getAttribute('aria-valuenow')).toBe('80');
+  status = 'completed';
+  FakeWebSocket.instances[0].event('chat', { name: 'chat.changed', data: {} });
+  await waitFor(() => expect(gauge.getAttribute('aria-valuenow')).toBe('75'));
+  expect(fetchChat.mock.calls.filter(([url]) => url === '/api/claude/status')).toHaveLength(1);
 });
 
 it('shows previous task history from the saved pack API', async () => {
