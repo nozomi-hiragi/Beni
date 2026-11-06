@@ -340,3 +340,62 @@ it('updates the task tab and tree from the rename response without selecting a d
  fireEvent.click(screen.getByRole('button',{name:'タスクツリーを開閉'}));
  expect(screen.getByRole('button',{name:'After'})).toBeTruthy();expect(changed).not.toHaveBeenCalled();
 });
+
+it('タスクを選ばずにフォルダーを展開し、プロジェクトファイルのタブを開いて切り替えられる', async () => {
+  const projectId = '019a0000-0000-7000-8000-000000000018';
+  const slow = deferred<Response>();
+  const fetchMock = vi.fn((url: string) => {
+    const { pathname, searchParams } = new URL(url, 'http://127.0.0.1:3210');
+    if (pathname === '/api/state') return Promise.resolve(json({ projects: [], tasks: [] }));
+    const path = searchParams.get('path');
+    if (pathname === '/api/project-files' && path === '') return Promise.resolve(json({
+      entries: [{ name: 'docs', kind: 'directory' }, { name: 'README.md', kind: 'file' }], truncated: false,
+    }));
+    if (pathname === '/api/project-files' && path === 'docs') return Promise.resolve(json({
+      entries: [{ name: 'example.html', kind: 'file' }, { name: 'slow.txt', kind: 'file' }], truncated: false,
+    }));
+    if (pathname === '/api/project-file' && path === 'README.md') return Promise.resolve(json({ kind: 'text', content: '# 使い方' }));
+    if (pathname === '/api/project-file' && path === 'docs/example.html') return Promise.resolve(json({ kind: 'text', content: '<p>HTML の例</p>' }));
+    if (pathname === '/api/project-file' && path === 'docs/slow.txt') return slow.promise;
+    throw Error('Unexpected request');
+  });
+  vi.stubGlobal('fetch', fetchMock);
+  render(() => <Workspace projectId={projectId} onHome={() => {}} />);
+
+  const toggle = () => screen.getByRole('button', { name: '文書ツリーを開閉' });
+  fireEvent.click(toggle());
+  const readme = await screen.findByRole('button', { name: 'README.md' });
+  const folder = screen.getByText('docs').closest('details')!;
+  expect(folder.open).toBe(false);
+  expect(fetchMock.mock.calls.some(([url]) => url.includes('path=docs'))).toBe(false);
+  folder.open = true;
+  fireEvent(folder, new Event('toggle'));
+  const example = await screen.findByRole('button', { name: 'example.html' });
+  expect(toggle().getAttribute('aria-expanded')).toBe('true');
+
+  fireEvent.click(readme);
+  await screen.findByRole('heading', { name: '使い方' });
+  expect(toggle().getAttribute('aria-expanded')).toBe('false');
+  fireEvent.click(toggle());
+  const reopened = (await screen.findByText('docs')).closest('details')!;
+  reopened.open = true;
+  fireEvent(reopened, new Event('toggle'));
+  expect(example.isConnected).toBe(false);
+  fireEvent.click(await screen.findByRole('button', { name: 'example.html' }));
+  await waitFor(() => expect(screen.getByLabelText('文書プレビュー').querySelector('pre code')?.textContent).toBe('<p>HTML の例</p>'));
+  expect(screen.getByLabelText('文書プレビュー').querySelector('pre p')).toBeNull();
+
+  fireEvent.click(toggle());
+  const next = (await screen.findByText('docs')).closest('details')!;
+  next.open = true;
+  fireEvent(next, new Event('toggle'));
+  fireEvent.click(await screen.findByRole('button', { name: 'slow.txt' }));
+  const readmeTab = screen.getByRole('tab', { name: 'README.md' });
+  fireEvent.click(readmeTab);
+  await screen.findByRole('heading', { name: '使い方' });
+  slow.resolve(json({ kind: 'text', content: '古い要求の結果' }));
+  expect(screen.queryByText('古い要求の結果')).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: 'README.md を閉じる' }));
+  await screen.findByText('古い要求の結果');
+  expect(screen.getByRole('tab', { name: 'slow.txt' }).getAttribute('aria-selected')).toBe('true');
+});

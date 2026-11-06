@@ -5,17 +5,18 @@ import {createInterface} from 'node:readline';
 if(process.argv.includes('--version')){console.log('codex-cli 1.2.3');process.exit(0)}
 const send=(x:unknown)=>process.stdout.write(JSON.stringify(x)+'\n');
 let turn='turn-1';
+let threadId='thread-1';
 type Call={tool:string;arguments:Record<string,unknown>};
 type ToolReply={success:boolean;contentItems?:{text:string}[]};
 let developerInstructions='';
 let embedded:{script:Generator<Call,void,ToolReply>;call?:Call;results:unknown[];index:number;workflow:boolean}|null=null;
-const embeddedEvent=(method:string,item:unknown)=>send({method,params:{threadId:'thread-1',turnId:turn,item}});
+const embeddedEvent=(method:string,item:unknown)=>send({method,params:{threadId,turnId:turn,item}});
 const nextEmbedded=(reply?:ToolReply)=>{
  if(!embedded)return;
  const step=embedded.script.next(reply!);
- if(step.done){send({method:'item/agentMessage/delta',params:{threadId:'thread-1',turnId:turn,itemId:'message-1',delta:embedded.workflow?'文書の確認が完了しました。':JSON.stringify(embedded.results)}});send({method:'turn/completed',params:{threadId:'thread-1',turn:{id:turn,status:'completed'}}});embedded=null;return}
+ if(step.done){send({method:'item/agentMessage/delta',params:{threadId,turnId:turn,itemId:'message-1',delta:embedded.workflow?'文書の確認が完了しました。':JSON.stringify(embedded.results)}});send({method:'turn/completed',params:{threadId,turn:{id:turn,status:'completed'}}});embedded=null;return}
  const call=embedded.call=step.value;
- const id=`embedded:${embedded.index}`;embeddedEvent('item/started',{type:'dynamicToolCall',id,tool:call.tool,arguments:call.arguments,status:'inProgress'});send({id,method:'item/tool/call',params:{threadId:'thread-1',turnId:turn,callId:id,...call}});
+ const id=`embedded:${embedded.index}`;embeddedEvent('item/started',{type:'dynamicToolCall',id,tool:call.tool,arguments:call.arguments,status:'inProgress'});send({id,method:'item/tool/call',params:{threadId,turnId:turn,callId:id,...call}});
 };
 function* invoke(tool:string,args:Record<string,unknown>={},expectSuccess=true):Generator<Call,any,ToolReply>{
  const reply=yield {tool,arguments:args};
@@ -88,13 +89,24 @@ function* workflow(text:string):Generator<Call,void,ToolReply>{
 }
 for await (const line of createInterface({input:process.stdin})) {
  if(embedded){const response=JSON.parse(line);if(typeof response.id==='string'&&response.id.startsWith('embedded:')){if(process.env.FAKE_CODEX_LOG)appendFileSync(process.env.FAKE_CODEX_LOG,JSON.stringify(response)+'\n');const call=embedded.call!;if(!embedded.workflow)embedded.results.push(response.result);embeddedEvent('item/completed',{type:'dynamicToolCall',id:response.id,tool:call.tool,arguments:call.arguments,contentItems:response.result?.contentItems,status:response.result?.success?'completed':'failed'});embedded.index++;nextEmbedded(response.result);continue}}
- const msg=JSON.parse(line);if(process.env.FAKE_CODEX_LOG)appendFileSync(process.env.FAKE_CODEX_LOG,JSON.stringify(msg)+'\n');if(msg.id==='approval-test'){if(msg.error?.code===-32601)send({method:'item/agentMessage/delta',params:{threadId:'thread-1',turnId:turn,itemId:'message-1',delta:' denied'}});continue}if(!msg.id)continue;
+ const msg=JSON.parse(line);if(process.env.FAKE_CODEX_LOG)appendFileSync(process.env.FAKE_CODEX_LOG,JSON.stringify(msg)+'\n');if(msg.id==='approval-test'){if(msg.error?.code===-32601)send({method:'item/agentMessage/delta',params:{threadId,turnId:turn,itemId:'message-1',delta:' denied'}});continue}if(!msg.id)continue;
  if(msg.method==='initialize')send({id:msg.id,result:{}});
  else if(msg.method==='account/read')send({id:msg.id,result:{account:{type:process.env.FAKE_AUTH??'chatgpt',email:process.env.FAKE_CODEX_EMAIL??'example@example.test'}}});
  else if(msg.method==='account/rateLimits/read')send({id:msg.id,result:{rateLimits:process.env.FAKE_CODEX_RATE_LIMIT ? {primary:{usedPercent:Number(process.env.FAKE_CODEX_RATE_LIMIT),windowDurationMins:300}} : null}});
  else if(msg.method==='config/read')send({id:msg.id,result:{config:{web_search:'disabled',mcp_servers:{},features:{shell_tool:process.argv.some((arg,index)=>arg==='--enable'&&process.argv[index+1]==='shell_tool'),apps:false,plugins:false,multi_agent:false,browser_use:false,computer_use:false,code_mode_host:process.argv.some((arg,index)=>arg==='--enable'&&process.argv[index+1]==='code_mode_host'),hooks:false,skill_mcp_dependency_install:false}}}});
  else if(msg.method==='model/list')send({id:msg.id,result:{data:[{model:'model-a',displayName:'Model A'}],nextCursor:null}});
- else if(msg.method==='thread/start'||msg.method==='thread/resume'){developerInstructions=msg.params.developerInstructions??'';send({id:msg.id,result:{thread:{id:msg.params.threadId??'thread-1',sessionId:'session-1'}}})}
+ else if(msg.method==='thread/start'||msg.method==='thread/resume'){
+  const mode=process.env.FAKE_CODEX_RESUME;
+  if(msg.method==='thread/resume'&&mode==='missing'&&msg.params.threadId==='thread-1'){
+   send({id:msg.id,error:{code:-32600,message:`no rollout found for thread id ${msg.params.threadId}`}});continue;
+  }
+  if(msg.method==='thread/resume'&&mode==='reject'){
+   send({id:msg.id,error:{code:-32600,message:'Invalid model configuration'}});continue;
+  }
+  threadId=msg.params.threadId??(mode==='missing'?'thread-replacement':'thread-1');
+  developerInstructions=msg.params.developerInstructions??'';
+  send({id:msg.id,result:{thread:{id:threadId,sessionId:threadId==='thread-1'?'session-1':'session-replacement'}}});
+ }
  else if(msg.method==='thread/compact/start'){
   const action=process.env.FAKE_CODEX_COMPACT_ACTION??'complete';
   if(action==='reject'){send({id:msg.id,error:{code:-32600,message:'rejected'}});continue}
@@ -127,26 +139,26 @@ for await (const line of createInterface({input:process.stdin})) {
    const calls:Call[]=process.env.FAKE_EMBEDDED_CALLS?JSON.parse(process.env.FAKE_EMBEDDED_CALLS):[{tool:'list_events',arguments:{after:Number(range?.[1]??0),through:Number(range?.[2]??0),limit:1}},{tool:'acknowledge_events',arguments:{through:Number(range?.[2]??0)}}];
    const workflowMode=!!process.env.FAKE_CODEX_WORKFLOW;
    embedded={script:workflowMode?workflow(text):(function*(){yield* calls})(),results:[],index:0,workflow:workflowMode};
-   send({method:'turn/started',params:{threadId:'thread-1',turn:{id:turn}}});send({id:msg.id,result:{turn:{id:turn}}});nextEmbedded();continue;
+   send({method:'turn/started',params:{threadId,turn:{id:turn}}});send({id:msg.id,result:{turn:{id:turn}}});nextEmbedded();continue;
   }
   if(['tools','unfinished tools','duplicate tools','failed tools','large tools'].includes(text)){
    if(process.env.FAKE_CODEX_WRITE_KNOWLEDGE==='1')writeFileSync(join(msg.params.cwd,'knowledge.md'),'# プロジェクトの学び\n\n- テストは専用の入力を使う。\n');
-   send({method:'turn/started',params:{threadId:'thread-1',turn:{id:turn}}});
-   const event=(method:string,extra:Record<string,unknown>)=>send({method,params:{threadId:'thread-1',turnId:turn,...extra}});
+   send({method:'turn/started',params:{threadId,turn:{id:turn}}});
+   const event=(method:string,extra:Record<string,unknown>)=>send({method,params:{threadId,turnId:turn,...extra}});
    event('item/started',{item:{type:'agentMessage',id:'before',text:''}});event('item/agentMessage/delta',{itemId:'before',delta:'Before tool'});
    event('item/started',{item:{type:'commandExecution',id:'command-1',command:'echo example',aggregatedOutput:null,status:'inProgress'}});
    send({id:msg.id,result:{turn:{id:turn}}});
-   if(text==='unfinished tools'){setTimeout(()=>send({method:'turn/completed',params:{threadId:'thread-1',turn:{id:turn,status:'failed'}}}),30);continue}
+   if(text==='unfinished tools'){setTimeout(()=>send({method:'turn/completed',params:{threadId,turn:{id:turn,status:'failed'}}}),30);continue}
    if(text==='duplicate tools')event('item/started',{item:{type:'commandExecution',id:'command-1',command:'echo example',status:'inProgress'}});
    const large=text==='large tools';
    const command=large?'🛠"\\'.repeat(220_000):'echo example';
    const output=large?'TOOL_OUTPUT_PRIVATE\u0001🧪"\\'.repeat(100_000)+'OUTPUT_TAIL':'example\n';
-   setTimeout(()=>{event('item/completed',{item:{type:'commandExecution',id:'command-1',command,aggregatedOutput:output,exitCode:text==='failed tools'?7:0,status:text==='failed tools'?'failed':'completed'}});if(text==='duplicate tools')event('item/completed',{item:{type:'commandExecution',id:'command-1',command:'echo example',aggregatedOutput:'example\n',status:'completed'}});event('item/agentMessage/delta',{itemId:'after',delta:'After tool'});event('item/completed',{item:{type:'agentMessage',id:'after',text:'After tool'}});send({method:'turn/completed',params:{threadId:'thread-1',turn:{id:turn,status:'completed'}}})},150);continue
+   setTimeout(()=>{event('item/completed',{item:{type:'commandExecution',id:'command-1',command,aggregatedOutput:output,exitCode:text==='failed tools'?7:0,status:text==='failed tools'?'failed':'completed'}});if(text==='duplicate tools')event('item/completed',{item:{type:'commandExecution',id:'command-1',command:'echo example',aggregatedOutput:'example\n',status:'completed'}});event('item/agentMessage/delta',{itemId:'after',delta:'After tool'});event('item/completed',{item:{type:'agentMessage',id:'after',text:'After tool'}});send({method:'turn/completed',params:{threadId,turn:{id:turn,status:'completed'}}})},150);continue
   }
   if(text==='approval')send({id:'approval-test',method:'item/commandExecution/requestApproval',params:{}});
-  send({method:'turn/started',params:{threadId:'thread-1',turn:{id:turn}}});
-  send({method:'item/agentMessage/delta',params:{threadId:'thread-1',turnId:turn,itemId:'message-1',delta:'Hello'}});
+  send({method:'turn/started',params:{threadId,turn:{id:turn}}});
+  send({method:'item/agentMessage/delta',params:{threadId,turnId:turn,itemId:'message-1',delta:'Hello'}});
   send({id:msg.id,result:{turn:{id:turn}}});
-  if(text!=='wait')setTimeout(()=>send({method:'turn/completed',params:{threadId:'thread-1',turn:{id:turn,status:text==='fail'?'failed':'completed'}}}),30);
- } else if(msg.method==='turn/interrupt') {send({id:msg.id,result:{}});send({method:'turn/completed',params:{threadId:'thread-1',turn:{id:turn,status:'interrupted'}}})}
+  if(text!=='wait')setTimeout(()=>send({method:'turn/completed',params:{threadId,turn:{id:turn,status:text==='fail'?'failed':'completed'}}}),30);
+ } else if(msg.method==='turn/interrupt') {send({id:msg.id,result:{}});send({method:'turn/completed',params:{threadId,turn:{id:turn,status:'interrupted'}}})}
 }

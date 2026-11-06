@@ -9,6 +9,8 @@ import { isTaskPhase } from '../../shared/task-phase';
 import { commandsForProvider, findChatCommand, parseChatCommand, type ChatCommand, type ChatCommandDefinition } from '../../shared/chat-commands';
 import { availableModels, chooseModel, loadModels, modelIsAvailable, modelLabel, modelScope, modelStatus, modelValue, providerName, providerReady, rejectModel, selectedModel } from '../model-cache';
 import type { ChatMessage, Conversation, Model, Task } from '../types';
+import ChatGPTPopIcon from './icons/ChatGPTPopIcon';
+import ClaudePopIcon from './icons/ClaudePopIcon';
 
 interface Draft { text: string; version: number; sending: boolean; commandSending?: boolean; commandName?: ChatCommand['name']; error: string; listeners: Set<() => void>; refresh?: () => void; pending?: {content: string; version: number; sendId?: string}; restored: Set<string> }
 const drafts = new Map<string, Draft>();
@@ -23,6 +25,26 @@ const restoreDraft = (draft: Draft, content: string) => {
 const commandLabels: Partial<Record<ChatCommand['name'], string>> = {compact:'圧縮',clear:'会話リセット',context:'コンテキスト',usage:'使用量'};
 const commandLabel = (name: ChatCommand['name']) => commandLabels[name] ?? `/${name}`;
 const stateLabel: Record<ChatMessage['status'], string> = { pending: '送信待ち', streaming: '応答中', completed: '完了', failed: '失敗', interrupted: '中断', unknown: '結果不明' };
+
+const chatDateFormatter = new Intl.DateTimeFormat('ja-JP', {
+  year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+});
+
+function chatDate(value: string) {
+  const date = new Date(value);
+  return value && Number.isFinite(date.getTime()) ? chatDateFormatter.format(date) : undefined;
+}
+
+function packFooter(pack: Pack) {
+  if (pack.role !== 'assistant' || pack.status !== 'completed' || !pack.closedAt) return stateLabel[pack.status];
+  const milliseconds = Date.parse(pack.closedAt) - Date.parse(pack.createdAt);
+  if (!Number.isFinite(milliseconds) || milliseconds < 0) return stateLabel[pack.status];
+  const tenths = Math.round(milliseconds / 100);
+  if (tenths < 600) return `${tenths / 10}秒`;
+  const seconds = Math.round(milliseconds / 1000);
+  const remainder = seconds % 60;
+  return `${Math.floor(seconds / 60)}分${remainder ? `${remainder}秒` : ''}`;
+}
 
 export default function ChatPanel(props: { projectId: string; taskId?: string; phase?: TaskPhase; readOnly?: boolean; instructionFocus?: string | null; instructionFocusLabel?: string; onModelUnavailable?: (model: string, provider?: Model['provider']) => void; onBusyChange?: (busy: boolean) => void; onModelChange?: (model: Model | null) => void; onTaskRename?: (task: Task) => void }) {
   const [conversationState,setConversationState]=createStore<{value?:Conversation}>({});
@@ -59,14 +81,21 @@ export default function ChatPanel(props: { projectId: string; taskId?: string; p
     if (!item) return;
     updateText(item.command); textarea?.focus(); setSuggestionsDismissed(true);
   }
-  function commandKeyDown(event: KeyboardEvent) {
-    if (!suggestions().length || event.isComposing) return;
-    if (event.key === 'Escape') { event.preventDefault(); setSuggestionsDismissed(true); setActiveSuggestion(-1); }
-    else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-      event.preventDefault(); setActiveSuggestion(index => event.key === 'ArrowDown' ? (index + 1) % suggestions().length : (index <= 0 ? suggestions().length - 1 : index - 1));
-    } else if (event.key === 'Tab' && !event.shiftKey || event.key === 'Enter' && !event.shiftKey && activeSuggestion() >= 0) {
-      event.preventDefault(); acceptSuggestion(Math.max(0, activeSuggestion()));
+  function composerKeyDown(event: KeyboardEvent) {
+    if (event.isComposing || event.keyCode === 229) return;
+    if (suggestions().length) {
+      if (event.key === 'Escape') { event.preventDefault(); setSuggestionsDismissed(true); setActiveSuggestion(-1); return; }
+      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+        event.preventDefault(); setActiveSuggestion(index => event.key === 'ArrowDown' ? (index + 1) % suggestions().length : (index <= 0 ? suggestions().length - 1 : index - 1));
+        return;
+      }
+      if (!event.shiftKey && (event.key === 'Tab' || event.key === 'Enter' && activeSuggestion() >= 0)) {
+        event.preventDefault(); acceptSuggestion(Math.max(0, activeSuggestion())); return;
+      }
     }
+    if (event.key !== 'Enter' || event.shiftKey || event.ctrlKey || event.altKey || event.metaKey) return;
+    event.preventDefault();
+    if (!event.repeat && !submitDisabled()) void send();
   }
   const key = () => modelScope(props.projectId, props.taskId, props.phase);
   const selection = () => selectedModel(key());
@@ -248,8 +277,8 @@ export default function ChatPanel(props: { projectId: string; taskId?: string; p
     const definition = findChatCommand(parsed.name,selectedProvider()) ?? (!selection() ? findChatCommand(parsed.name,'codex') ?? findChatCommand(parsed.name,'claude') : undefined);
     return definition?.kind === 'operation' ? !modelAvailable() : definition?.kind === 'message' ? props.projectId === 'instructions' || !validInstructionFocus() || !modelAvailable() : false;
   };
-  async function send(event: SubmitEvent) {
-    event.preventDefault();
+  const submitDisabled = () => submitBlocked() || busy() || !text().trim() || !conversation() || !!loadError();
+  async function send() {
     const currentKey = key(), draft = draftFor(currentKey), content = draft.text, version = draft.version, sentModel = selection(), sentInstructionFocus = props.instructionFocus;
     if (props.readOnly || draft.sending || busy() || !conversation() || loadError() || !content.trim()) return;
     const command = parseChatCommand(content);
@@ -324,7 +353,20 @@ export default function ChatPanel(props: { projectId: string; taskId?: string; p
     <Show when={syncError()}><p role="alert" class="px-4 pt-3 text-sm text-error">{syncError()} <button class="btn btn-xs" onClick={() => refresh()}>更新</button></p></Show>
     <div ref={scrollport} class="min-h-0 flex-1 overflow-y-auto p-5" role="log" aria-label="チャット履歴" aria-live="polite">
       <div ref={scrollContent} class="space-y-3">
-        <Show when={packState.value.length} fallback={<p class="text-sm text-base-content/50">希望や回答を入力してください。</p>}><For each={packState.value}>{pack => <article class={`chat ${pack.role === 'user' ? 'chat-end' : 'chat-start'}`}><div class="chat-header text-xs text-base-content/60">{pack.role === 'user' ? 'あなた' : 'アシスタント'} · {pack.model ? modelLabel(pack.model, pack.provider) : providerName(pack.provider)}</div><div class={`chat-bubble min-w-0 ${pack.role === 'user' ? 'chat-bubble-primary' : 'bg-base-200 text-base-content'}`}><Show when={pack.kind === 'tool'} fallback={<p class="whitespace-pre-wrap break-words text-sm leading-relaxed">{pack.content}</p>}><details><summary>{pack.tool?.name ?? 'ツール'}</summary><pre class="whitespace-pre-wrap break-words text-xs">{pack.tool?.input}</pre><pre class="whitespace-pre-wrap break-words text-xs">{pack.tool?.output}</pre></details></Show></div><div class="chat-footer text-xs text-base-content/60">{stateLabel[pack.status]}</div></article>}</For></Show>
+        <Show when={packState.value.length} fallback={<p class="text-sm text-base-content/50">希望や回答を入力してください。</p>}><For each={packState.value}>{pack => <article class={`chat ${pack.role === 'user' ? 'chat-end' : 'chat-start'}`}>
+        <Show when={pack.role === 'assistant'}>
+          <div class="chat-image avatar">
+            <div class="grid size-8 place-items-center rounded-full bg-base-200">
+              {pack.provider === 'claude' ? <ClaudePopIcon /> : <ChatGPTPopIcon />}
+            </div>
+          </div>
+        </Show>
+        <div class="chat-header items-center text-xs text-base-content/60">
+          <span>
+            {pack.model ? modelLabel(pack.model, pack.provider) : providerName(pack.provider)}
+            <Show when={chatDate(pack.createdAt)}>{date => <>{' '}<time dateTime={pack.createdAt}>{date()}</time></>}</Show>
+          </span>
+        </div><div class={`chat-bubble min-w-0 ${pack.role === 'user' ? 'chat-bubble-primary' : 'bg-base-200 text-base-content'}`}><Show when={pack.kind === 'tool'} fallback={<p class="whitespace-pre-wrap break-words text-sm leading-relaxed">{pack.content}</p>}><details><summary>{pack.tool?.name ?? 'ツール'}</summary><pre class="whitespace-pre-wrap break-words text-xs">{pack.tool?.input}</pre><pre class="whitespace-pre-wrap break-words text-xs">{pack.tool?.output}</pre></details></Show></div><div class="chat-footer text-xs text-base-content/60">{packFooter(pack)}</div></article>}</For></Show>
         <Show when={visibleCommandId()} keyed>{id => <div class="flex min-w-0 items-start gap-2 rounded-box border border-base-300 px-3 py-2 text-sm">
           <Show when={conversation()?.command?.output} fallback={<p role="status" class="min-w-0 flex-1">{commandOutcome()}</p>}>
             <details class="min-w-0 flex-1"><summary class="cursor-pointer truncate">{commandOutcome()}</summary><pre class="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words">{conversation()?.command?.output}</pre></details>
@@ -340,12 +382,12 @@ export default function ChatPanel(props: { projectId: string; taskId?: string; p
     <Show when={busy()}><div role="status" class="mx-4 mb-3 self-start"><div class="aura text-primary motion-reduce:animate-none"><div class="card bg-base-100 px-4 py-2 text-sm text-base-content">{compacting() ? `${commandProgress()}…` : '作業中…'}</div></div></div></Show>
     <Show when={latestOutcome()}><p role="status" class="mx-4 mb-2 text-sm">直近の応答: {latestOutcome()}</p></Show>
     <Show when={error()}><p role="alert" class="mx-4 mb-2 text-sm text-error">{error()}</p></Show>
-    <Show when={!props.readOnly}><form class="border-t border-base-300 p-4" onSubmit={send}>
+    <Show when={!props.readOnly}><form class="border-t border-base-300 p-4" onSubmit={event => { event.preventDefault(); void send(); }}>
       <div class="relative">
-        <textarea ref={textarea} class="textarea textarea-bordered block min-h-24 w-full resize-y" aria-label="希望や回答を入力" placeholder="希望や回答を入力" aria-autocomplete="list" aria-controls={suggestions().length ? commandListId : undefined} aria-expanded={!!suggestions().length} aria-activedescendant={suggestions().length && activeSuggestion() >= 0 ? `${commandListId}-${activeSuggestion()}` : undefined} required value={text()} onInput={event => { setCommandInputFocused(true); updateText(event.currentTarget.value); }} onKeyDown={commandKeyDown} onFocus={() => { setCommandInputFocused(true); setSuggestionsDismissed(false); }} onBlur={() => setCommandInputFocused(false)} />
+        <textarea ref={textarea} class="textarea textarea-bordered block min-h-24 w-full resize-y" aria-label="希望や回答を入力" placeholder="希望や回答を入力" aria-autocomplete="list" aria-controls={suggestions().length ? commandListId : undefined} aria-expanded={!!suggestions().length} aria-activedescendant={suggestions().length && activeSuggestion() >= 0 ? `${commandListId}-${activeSuggestion()}` : undefined} required value={text()} onInput={event => { setCommandInputFocused(true); updateText(event.currentTarget.value); }} onKeyDown={composerKeyDown} onFocus={() => { setCommandInputFocused(true); setSuggestionsDismissed(false); }} onBlur={() => setCommandInputFocused(false)} />
         <Show when={suggestions().length}><ul id={commandListId} role="listbox" aria-label="スラッシュコマンド" style={{'max-height':`${suggestionHeight()}px`}} class="absolute bottom-full left-0 z-50 mb-2 w-72 max-w-full overflow-y-auto overscroll-contain rounded-box border border-base-300 bg-base-100 p-1 shadow-lg"><For each={suggestions()}>{(item, index) => <li role="none"><button id={`${commandListId}-${index()}`} role="option" aria-selected={activeSuggestion() === index()} type="button" class={`w-full rounded px-3 py-2 text-left text-sm hover:bg-base-200 ${activeSuggestion() === index() ? 'bg-base-200' : ''}`} onMouseDown={event => event.preventDefault()} onClick={() => acceptSuggestion(index())}>{item.command} · {item.description}</button></li>}</For></ul></Show>
       </div>
-      <div class="mt-2 flex flex-wrap items-center justify-end gap-2"><Show when={props.projectId==='instructions'}><span class="mr-auto text-xs text-base-content/70">フォーカス: {props.instructionFocusLabel ?? '未選択'}</span></Show><select ref={modelSelect} class="select select-bordered select-sm w-auto" style={{ 'field-sizing': 'content' }} aria-label="モデル" value={model()} disabled={busy() || !models().length} onChange={event => selectModel(event.currentTarget.value)}><Show when={model() && !modelAvailable()}><option value={model()} selected disabled>⚠️ {modelLabel(selection()?.name ?? model(), selection()?.provider)}</option></Show><Show when={models().length} fallback={<Show when={!model()}><option value="">未確認</option></Show>}><For each={models().filter(item => modelAvailable() || modelValue(item) !== model())}>{item => <option value={modelValue(item)} selected={modelValue(item) === model()} disabled={!providerReady(item.provider)}>{modelLabel(item.name, item.provider)}</option>}</For></Show></select><Show when={busy()}><button type="button" class="btn btn-sm" disabled={interrupting()} onClick={interrupt}>中断</button></Show><button class="btn btn-primary btn-sm" type="submit" disabled={submitBlocked() || busy() || !text().trim() || !conversation() || !!loadError()}>{busy() ? (compacting() ? `${commandProgress()}...` : '応答中...') : '送信'}</button></div>
+      <div class="mt-2 flex flex-wrap items-center justify-end gap-2"><Show when={props.projectId==='instructions'}><span class="mr-auto text-xs text-base-content/70">フォーカス: {props.instructionFocusLabel ?? '未選択'}</span></Show><select ref={modelSelect} class="select select-bordered select-sm w-auto" style={{ 'field-sizing': 'content' }} aria-label="モデル" value={model()} disabled={busy() || !models().length} onChange={event => selectModel(event.currentTarget.value)}><Show when={model() && !modelAvailable()}><option value={model()} selected disabled>⚠️ {modelLabel(selection()?.name ?? model(), selection()?.provider)}</option></Show><Show when={models().length} fallback={<Show when={!model()}><option value="">未確認</option></Show>}><For each={models().filter(item => modelAvailable() || modelValue(item) !== model())}>{item => <option value={modelValue(item)} selected={modelValue(item) === model()} disabled={!providerReady(item.provider)}>{modelLabel(item.name, item.provider)}</option>}</For></Show></select><Show when={busy()}><button type="button" class="btn btn-sm" disabled={interrupting()} onClick={interrupt}>中断</button></Show><button class="btn btn-primary btn-sm" type="submit" disabled={submitDisabled()}>{busy() ? (compacting() ? `${commandProgress()}...` : '応答中...') : '送信'}</button></div>
     </form></Show>
   </>;
 }

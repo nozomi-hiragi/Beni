@@ -1,102 +1,338 @@
 @import "tailwindcss" source(none);
 @source "./**/*.tsx";
 @source "./index.html";
+
 @plugin "daisyui" {
   themes: light --default;
 }
 
 @plugin "daisyui/theme" {
-  name: "dark";
+  name: "lemonade";
   default: false;
   prefersdark: false;
-  color-scheme: "dark";
-  --color-base-100: oklch(25.33% 0.016 252.42);
-  --color-base-200: oklch(23.26% 0.014 253.1);
-  --color-base-300: oklch(21.15% 0.012 254.09);
-  --color-base-content: oklch(97.807% 0.029 256.847);
-  --color-primary: oklch(58% 0.233 277.117);
-  --color-primary-content: oklch(96% 0.018 272.314);
-  --color-secondary: oklch(65% 0.241 354.308);
-  --color-secondary-content: oklch(94% 0.028 342.258);
-  --color-accent: oklch(77% 0.152 181.912);
-  --color-accent-content: oklch(38% 0.063 188.416);
-  --color-neutral: oklch(14% 0.005 285.823);
-  --color-neutral-content: oklch(92% 0.004 286.32);
-  --color-info: oklch(74% 0.16 232.661);
-  --color-info-content: oklch(29% 0.066 243.157);
-  --color-success: oklch(76% 0.177 163.223);
-  --color-success-content: oklch(37% 0.077 168.94);
-  --color-warning: oklch(82% 0.189 84.429);
-  --color-warning-content: oklch(41% 0.112 45.904);
-  --color-error: oklch(71% 0.194 13.428);
-  --color-error-content: oklch(27% 0.105 12.094);
-  --radius-selector: 0.5rem;
-  --radius-field: 0.25rem;
-  --radius-box: 0.5rem;
+  color-scheme: "light";
+  --color-base-100: oklch(98.71% 0.02 123.72);
+  --color-base-200: oklch(91.8% 0.018 123.72);
+  --color-base-300: oklch(84.89% 0.017 123.72);
+  --color-base-content: oklch(19.742% 0.004 123.72);
+  --color-primary: oklch(58.92% 0.199 134.6);
+  --color-primary-content: oklch(11.784% 0.039 134.6);
+  --color-secondary: oklch(77.75% 0.196 111.09);
+  --color-secondary-content: oklch(15.55% 0.039 111.09);
+  --color-accent: oklch(85.39% 0.201 100.73);
+  --color-accent-content: oklch(17.078% 0.04 100.73);
+  --color-neutral: oklch(30.98% 0.075 108.6);
+  --color-neutral-content: oklch(86.196% 0.015 108.6);
+  --color-info: oklch(86.19% 0.047 224.14);
+  --color-info-content: oklch(17.238% 0.009 224.14);
+  --color-success: oklch(86.19% 0.047 157.85);
+  --color-success-content: oklch(17.238% 0.009 157.85);
+  --color-warning: oklch(86.19% 0.047 102.15);
+  --color-warning-content: oklch(17.238% 0.009 102.15);
+  --color-error: oklch(86.19% 0.047 25.85);
+  --color-error-content: oklch(17.238% 0.009 25.85);
+  --radius-selector: 1rem;
+  --radius-field: 0.5rem;
+  --radius-box: 1rem;
   --size-selector: 0.25rem;
   --size-field: 0.25rem;
   --border: 1px;
-  --depth: 1;
+  --depth: 0;
   --noise: 0;
 }
 
-:root { --fx-noise: none; }
+:root {
+  --fx-noise: none;
+}
 
-.workspace-resize { display: none; }
-.instructions-shell { display: flex; flex-direction: column; height: 100dvh; overflow: hidden; }
-.instructions-shell > :first-child { flex-shrink: 0; }
-.instructions-shell > main { flex: 1; min-height: 0; overflow: hidden; }
-.instructions-page { height: 100%; min-height: 0; overflow: auto; }
-.instructions-content { max-height: 80vh; }
-@media (min-width: 1024px) {
-  .project-shell { display: flex; flex-direction: column; height: 100dvh; overflow: hidden; }
-  .project-shell > :first-child { flex-shrink: 0; }
-  .project-shell > main { flex: 1; min-height: 0; overflow: hidden; padding: 0; }
-  .project-shell .workspace { height: 100%; min-height: 0; }
-  .workspace { grid-template-columns: minmax(0, var(--left-ratio)) 12px minmax(0, var(--right-ratio)); column-gap: 0; }
-  .workspace-left { grid-template-rows: minmax(0, 1fr); gap: 0; }
-  .workspace-left-terminal { grid-template-rows: minmax(0, var(--chat-ratio)) 12px minmax(0, var(--terminal-ratio)); }
-  .workspace-resize { display: flex; align-items: center; justify-content: center; min-width: 0; min-height: 0; touch-action: none; user-select: none; border-radius: 4px; }
-  .workspace-resize::after { content: ''; border-radius: 2px; background: var(--color-base-300); }
-  .workspace-resize-vertical { cursor: col-resize; }
-  .workspace-resize-vertical::after { width: 4px; height: 32px; }
-  .workspace-resize-horizontal { cursor: row-resize; }
-  .workspace-resize-horizontal::after { height: 4px; width: 32px; }
-  .workspace-resize:hover::after, .workspace-resize-active::after, .workspace-resize:focus-visible::after { background: var(--color-primary); }
-  .workspace-resize:focus-visible { outline: 2px solid var(--color-primary); outline-offset: -2px; }
+.workspace-resize {
+  display: none;
+}
+
+.instructions-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;
+  overflow: hidden;
+}
+
+.instructions-shell> :first-child {
+  flex-shrink: 0;
+}
+
+.instructions-shell>main {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.instructions-content {
+  max-height: 80vh;
 }
 
 @media (min-width: 1024px) {
-  .instructions-page { overflow: hidden; }
-  .instructions-layout { height: 100%; min-height: 0; grid-template-columns: minmax(0, var(--instructions-left-ratio)) 12px minmax(0, var(--instructions-right-ratio)); column-gap: 0; }
-  .instructions-layout > .workspace-resize { align-self: stretch; }
-  .instructions-left { display: grid; height: 100%; min-height: 0; grid-template-rows: minmax(0, var(--instructions-chat-ratio)) 12px minmax(0, var(--instructions-references-ratio)); }
-  .instructions-content { height: 100%; min-height: 0; max-height: none; }
-  .instructions-left > * { margin-block: 0; }
-  .instructions-chat-content { height: auto; flex: 1; }
+  .project-shell {
+    display: flex;
+    flex-direction: column;
+    height: 100dvh;
+    overflow: hidden;
+  }
+
+  .project-shell> :first-child {
+    flex-shrink: 0;
+  }
+
+  .project-shell>main {
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+    padding: 0;
+  }
+
+  .project-shell .workspace {
+    height: 100%;
+    min-height: 0;
+  }
+
+  .workspace {
+    grid-template-columns: minmax(0, var(--left-ratio)) 12px minmax(0, var(--right-ratio));
+    column-gap: 0;
+  }
+
+  .workspace-left {
+    grid-template-rows: minmax(0, 1fr);
+    gap: 0;
+  }
+
+  .workspace-left-terminal {
+    grid-template-rows: minmax(0, var(--chat-ratio)) 12px minmax(0, var(--terminal-ratio));
+  }
+
+  .workspace-resize {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 0;
+    min-height: 0;
+    touch-action: none;
+    user-select: none;
+    border-radius: 4px;
+  }
+
+  .workspace-resize::after {
+    content: '';
+    border-radius: 2px;
+    background: var(--color-base-300);
+  }
+
+  .workspace-resize-vertical {
+    cursor: col-resize;
+  }
+
+  .workspace-resize-vertical::after {
+    width: 4px;
+    height: 32px;
+  }
+
+  .workspace-resize-horizontal {
+    cursor: row-resize;
+  }
+
+  .workspace-resize-horizontal::after {
+    height: 4px;
+    width: 32px;
+  }
+
+  .workspace-resize:hover::after,
+  .workspace-resize-active::after,
+  .workspace-resize:focus-visible::after {
+    background: var(--color-primary);
+  }
+
+  .workspace-resize:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: -2px;
+  }
 }
 
-.markdown-preview { overflow-wrap: anywhere; }
-.markdown-preview > :first-child { margin-top: 0; }
-.markdown-preview > :last-child { margin-bottom: 0; }
-.markdown-preview :is(h1, h2, h3, h4, h5, h6) { margin: 1.5em 0 0.65em; font-weight: 700; line-height: 1.3; }
-.markdown-preview h1 { font-size: 1.75em; }
-.markdown-preview h2 { font-size: 1.5em; }
-.markdown-preview h3 { font-size: 1.25em; }
-.markdown-preview h4 { font-size: 1.1em; }
-.markdown-preview :is(p, ul, ol, blockquote, pre, table) { margin: 1em 0; }
-.markdown-preview :is(ul, ol) { padding-left: 1.6em; }
-.markdown-preview ul { list-style: disc; }
-.markdown-preview ol { list-style: decimal; }
-.markdown-preview li + li { margin-top: 0.3em; }
-.markdown-preview li > :is(ul, ol) { margin: 0.4em 0; }
-.markdown-preview input[type="checkbox"] { margin-right: 0.4em; vertical-align: middle; }
-.markdown-preview a[href] { color: var(--color-primary); text-decoration: underline; text-underline-offset: 0.15em; }
-.markdown-preview blockquote { border-left: 3px solid var(--color-base-300); padding-left: 1em; color: color-mix(in oklab, var(--color-base-content) 75%, transparent); }
-.markdown-preview code { border-radius: 0.25rem; background: var(--color-base-200); padding: 0.1em 0.3em; font-family: var(--font-mono); font-size: 0.9em; }
-.markdown-preview pre { max-width: 100%; overflow-x: auto; border-radius: 0.5rem; background: var(--color-base-200); padding: 1em; white-space: pre; overflow-wrap: normal; }
-.markdown-preview pre code { padding: 0; font-size: inherit; }
-.markdown-preview table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; }
-.markdown-preview :is(th, td) { border: 1px solid var(--color-base-300); padding: 0.5em 0.75em; text-align: left; }
-.markdown-preview th { background: var(--color-base-200); font-weight: 600; }
-.markdown-preview hr { margin: 1.5em 0; border: 0; border-top: 1px solid var(--color-base-300); }
+@media (min-width: 1024px) {
+  .instructions-layout {
+    height: 100%;
+    min-height: 0;
+    grid-template-columns: minmax(0, var(--instructions-left-ratio)) 12px minmax(0, var(--instructions-right-ratio));
+    grid-template-rows: minmax(0, 1fr);
+    column-gap: 0;
+  }
+
+  .instructions-layout>.workspace-resize {
+    align-self: stretch;
+  }
+
+  .instructions-left {
+    display: grid;
+    height: 100%;
+    min-height: 0;
+    grid-template-rows: minmax(0, var(--instructions-chat-ratio)) 12px minmax(0, var(--instructions-references-ratio));
+  }
+
+  .instructions-content {
+    height: 100%;
+    min-height: 0;
+    max-height: none;
+  }
+
+  .instructions-left>* {
+    margin-block: 0;
+  }
+
+  .instructions-chat-content {
+    height: auto;
+    flex: 1;
+  }
+}
+
+.markdown-preview {
+  overflow-wrap: anywhere;
+}
+
+.markdown-preview> :first-child {
+  margin-top: 0;
+}
+
+.markdown-preview> :last-child {
+  margin-bottom: 0;
+}
+
+.markdown-preview :is(h1, h2, h3, h4, h5, h6) {
+  margin: 1.5em 0 0.65em;
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+.markdown-preview h1 {
+  font-size: 1.75em;
+}
+
+.markdown-preview h2 {
+  font-size: 1.5em;
+}
+
+.markdown-preview h3 {
+  font-size: 1.25em;
+}
+
+.markdown-preview h4 {
+  font-size: 1.1em;
+}
+
+.markdown-preview :is(p, ul, ol, blockquote, pre, table) {
+  margin: 1em 0;
+}
+
+.markdown-preview :is(ul, ol) {
+  padding-left: 1.6em;
+}
+
+.markdown-preview ul {
+  list-style: disc;
+}
+
+.markdown-preview ol {
+  list-style: decimal;
+}
+
+.markdown-preview li+li {
+  margin-top: 0.3em;
+}
+
+.markdown-preview li> :is(ul, ol) {
+  margin: 0.4em 0;
+}
+
+.markdown-preview input[type="checkbox"] {
+  margin-right: 0.4em;
+  vertical-align: middle;
+}
+
+.markdown-preview a[href] {
+  color: var(--color-primary);
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+
+.markdown-preview blockquote {
+  border-left: 3px solid var(--color-base-300);
+  padding-left: 1em;
+  color: color-mix(in oklab, var(--color-base-content) 75%, transparent);
+}
+
+.markdown-preview code {
+  border-radius: 0.25rem;
+  background: var(--color-base-200);
+  padding: 0.1em 0.3em;
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+}
+
+.markdown-preview pre {
+  max-width: 100%;
+  overflow-x: auto;
+  border-radius: 0.5rem;
+  background: var(--color-base-200);
+  padding: 1em;
+  white-space: pre;
+  overflow-wrap: normal;
+}
+
+.markdown-preview pre code {
+  padding: 0;
+  font-size: inherit;
+}
+
+.markdown-preview table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+}
+
+.markdown-preview :is(th, td) {
+  border: 1px solid var(--color-base-300);
+  padding: 0.5em 0.75em;
+  text-align: left;
+}
+
+.markdown-preview th {
+  background: var(--color-base-200);
+  font-weight: 600;
+}
+
+.markdown-preview hr {
+  margin: 1.5em 0;
+  border: 0;
+  border-top: 1px solid var(--color-base-300);
+}
+
+.hljs :is(.hljs-keyword, .hljs-selector-tag, .hljs-meta, .hljs-tag, .hljs-name) {
+  color: color-mix(in oklab, var(--color-primary) 62%, var(--color-base-content));
+}
+
+.hljs :is(.hljs-string, .hljs-regexp, .hljs-addition) {
+  color: color-mix(in oklab, var(--color-success) 56%, var(--color-base-content));
+}
+
+.hljs :is(.hljs-number, .hljs-literal, .hljs-built_in, .hljs-type) {
+  color: color-mix(in oklab, var(--color-secondary) 60%, var(--color-base-content));
+}
+
+.hljs :is(.hljs-title, .hljs-attr, .hljs-attribute, .hljs-variable, .hljs-property) {
+  color: color-mix(in oklab, var(--color-info) 55%, var(--color-base-content));
+}
+
+.hljs :is(.hljs-comment, .hljs-quote) {
+  color: color-mix(in oklab, var(--color-base-content) 66%, var(--color-base-100));
+}
+
+.hljs .hljs-deletion {
+  color: color-mix(in oklab, var(--color-error) 62%, var(--color-base-content));
+}

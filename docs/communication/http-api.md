@@ -21,6 +21,8 @@ HTTP による取得・操作と、チャットのパック同期の契約を定
 | --- | --- | --- | --- |
 | `GET /api/state` | なし | 200 `{projects: Project[], tasks: Task[]}` | — |
 | `POST /api/projects` | `{name: string, folder: string}`。名前は空白のみ不可、folder は絶対パス | 201 `Project` | 400 入力・保存先不正 |
+| `GET /api/project-files` | query: `projectId`, 任意の相対 `path`。省略時はプロジェクト直下 | 200 `ProjectFileList` | 400 パス不正、404 プロジェクト・フォルダーを開けない |
+| `GET /api/project-file` | query: `projectId`, ファイルの相対 `path` | 200 `ProjectFilePreview` | 400 パス不正、404 プロジェクト・ファイルを開けない |
 | `POST /api/tasks` | `{projectId: string, name: string}`。空白のみの名前は保存時に拒否 | 201 `Task` | 400 入力不正、404 プロジェクトなし |
 | `POST /api/tasks/:id/delete` | `{projectId: string}` | 200 `{ok: true}`。タスク・文書・タスク会話を削除 | 404 タスクなし・所属不一致、409 チャット実行中、500 削除失敗 |
 | `POST /api/tasks/:id/phase` | `{projectId: string, phase: string, target: string}`。現在と移動先の準備フェーズを指定 | 200 移動後の `Task` | 400 入力不正、404 タスクなし・所属不一致、409 実行中・フェーズ不一致 |
@@ -58,6 +60,8 @@ type FolderList = {
   path: string; parent: string | null;
   directories: { name: string; path: string }[]; truncated: boolean;
 };
+type ProjectFileList = { entries: { name: string; kind: 'directory' | 'file' }[]; truncated: boolean };
+type ProjectFilePreview = { kind: 'text'; content: string } | { kind: 'binary' | 'too-large' };
 type CodexStatus = {
   installed: boolean; path: string | null; version: string | null; checkedAt: string;
   auth: 'chatgpt' | 'apiKey' | 'other' | 'none' | 'unknown';
@@ -88,6 +92,7 @@ type Conversation = {
 - 一覧のプロジェクト・タスクは ID 降順。会話内のパックは保存された順序に従う。
 - Document の path はファイル名。version はファイルの更新時刻 `mtimeMs` であり、DB 文書の版番号とは別。
 - フォルダー一覧は直下の実ディレクトリのみ、最大 500 件。シンボリックリンクは一覧対象外。省略時はサーバー起動時の初期フォルダー（通常はホーム）。
+- プロジェクトファイル一覧は指定フォルダーの直下のみ、最大500件。相対パスの区切りは `/`。プロジェクト内部データや依存パッケージ（`.beni`、`.git`、`node_modules` など）、代表的な認証情報ファイル（`.env`、秘密鍵など）、シンボリックリンクは一覧・本文取得の対象外。本文取得は1 MiB以下のUTF-8テキストに限る。
 
 ## チャットのコマンド
 
@@ -96,6 +101,8 @@ type Conversation = {
 FEは選択中モデルの `provider` と `model` を送る。`compact`・`context`・`usage` は保存済みの `threadId` と `sessionProvider` に対して実行し、指定した `provider` が一致しなければ409で拒否する。これらの操作で接続先を切り替えたり、新規セッションを作ったりしない。`provider` 省略時は保存済みの接続先を使う。操作中に会話のメッセージとパック列を変更しない。未知の名前や入力不正は400、セッションなし・同じタスクの処理中・タスクの状態不一致は409とする。
 
 `clear` はセッションのない会話でも実行できる。元の会話JSONを `history/<会話ID>.json` に保存してから、新しい会話ID・空のメッセージとパック列へ置き換える。CLIのセッションIDとフォーカス通知の状態も初期化する。保存失敗時は元の会話を維持し、成功後の `GET /api/chat` で新しいIDを取得する。FEは会話IDの変更に合わせてパックのキャッシュを切り替える。
+
+通常の送信は、会話ごとに Codex と Claude のセッションを保存する。モデル変更や Beni の再起動後も同じ接続先のセッションを再開し、接続先を往復したときは別の接続先で進んだ会話の抜粋を追加する。再開先が消失したと CLI がターン受理前に明示した場合は、セッションを新規に作成し、保存済み会話の抜粋を添えて同じ送信を一度だけ開始する。認証・モデルの拒否や結果不明の切断では保存済みセッションを維持する。Codex の埋め込みツールは開始時に登録するため、保存済みスレッドのツール構成では現在必要なツールを使えない場合は新しいスレッドに切り替える。
 
 生成を伴う対応コマンドは `/api/chat/send` を使い、選択モデルと元の入力を送る。BEはコマンド名と接続先を照合し、対応するAPIまたは固定の依頼へ変換する。未対応の名前、操作用コマンド、フロントエンド内のコマンドを通常のLLMメッセージへフォールバックしない。
 
@@ -128,7 +135,7 @@ type Pack = {
   packId: string; sequence: number; messageId: string; sendId: string;
   role: 'user' | 'assistant'; kind: 'text' | 'tool'; content: string;
   tool: {name: string; input: string; output: string} | null;
-  provider?: 'codex' | 'claude'; model: string | null; createdAt: string;
+  provider?: 'codex' | 'claude'; model: string | null; createdAt: string; closedAt?: string;
   status: 'pending' | 'streaming' | 'completed' | 'failed' | 'interrupted' | 'unknown';
   state: 'streaming' | 'closed';
 };
@@ -150,7 +157,7 @@ sequence は会話内の生成順です。ユーザー発言も一つの終了�
 
 Claudeのパックでは上記配列の末尾へ文字列 `"claude"` を追加する。providerの省略と `"codex"` は既存の配列を使い、過去のパックのハッシュを変えない。
 
-status/state は生成状態を表し、本文のハッシュには含めません。FE は終了通知の header から終了状態を受け取り、復元したパックを照合します。本文が一致すれば全文の再取得は不要です。
+status/state は生成状態を表します。正常終了したアシスタントのパックは、終了時刻の `closedAt` を持つ場合があります。吹き出しの所要時間は、そのパックの `createdAt` との差です。旧データでは終了時刻がないため、従来どおり「完了」と表示します。生成状態と終了時刻は本文のハッシュには含めません。FE は終了通知の header からこれらを受け取り、復元したパックを照合します。本文が一致すれば全文の再取得は不要です。
 
 パック一覧は指定 ID より後を全件返します。ページングは行いません。HTTP の応答全体へ POST 本文の64 KiB制限は適用しません。
 

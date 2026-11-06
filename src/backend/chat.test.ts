@@ -172,15 +172,22 @@ test('conversation notifications are scope-specific and removable',async()=>{
 
 test('tool item boundary saves immutable text before turn completion; pack hashes and ordered suffix synchronize',async()=>{
  const root=await mkdtemp(join(tmpdir(),'beni-packs-'));try{
-  const {packHash}=await import('../shared/communication');const chat=new ChatService(p=>projectFolder(root,p),()=>fake);const events:any[]=[];chat.subscribe('019a0000-0000-7000-8000-000000000001',null,event=>events.push(event));
+  const {packHash,validPack}=await import('../shared/communication');const chat=new ChatService(p=>projectFolder(root,p),()=>fake);const events:any[]=[];chat.subscribe('019a0000-0000-7000-8000-000000000001',null,event=>events.push(event));
   await chat.send('019a0000-0000-7000-8000-000000000001',null,'tools','model-a','/tmp');
   await waitFor(async()=>events.some(e=>e.name==='chat.pack.closed'&&e.data.header.role==='assistant'&&e.data.header.kind==='text'));
   const during=await chat.get('019a0000-0000-7000-8000-000000000001',null);expect(during.messages[1].status).toBe('streaming');const before=during.packs.find(p=>p.content==='Before tool')!;expect(before.state).toBe('closed');
+  expect(Date.parse(before.closedAt!)).toBeGreaterThanOrEqual(Date.parse(before.createdAt));
+  expect(events.find(e=>e.name==='chat.pack.closed'&&e.data.packId===before.packId).data.header.closedAt).toBe(before.closedAt);
+  const {closedAt,...legacy}=before;
+  expect(validPack(legacy)).toBe(true);
+  expect(validPack({...before,closedAt:'invalid'})).toBe(false);
+  expect(validPack({...before,closedAt:'2000-01-01T00:00:00.000Z'})).toBe(false);
+  expect(await packHash(before)).toBe(await packHash(legacy));
   const stored=JSON.parse(await readFile(join(root,'019a0000-0000-7000-8000-000000000001','.beni','chat','general.json'),'utf8'));expect(stored.packs.find((p:any)=>p.packId===before.packId)).toEqual(before);
   expect(await chat.ack('019a0000-0000-7000-8000-000000000001',null,before.packId,await packHash(before))).toEqual({matched:true});expect(await chat.ack('019a0000-0000-7000-8000-000000000001',null,before.packId,'0'.repeat(64))).toEqual({matched:false,pack:before});
   const generating=during.packs.find(p=>p.kind==='tool')!;expect(generating.state).toBe('streaming');await expect(chat.pack('019a0000-0000-7000-8000-000000000001',null,generating.packId)).rejects.toThrow('not closed');
   await waitFor(async()=>(await chat.get('019a0000-0000-7000-8000-000000000001',null)).messages[1].status==='completed');const after=await chat.get('019a0000-0000-7000-8000-000000000001',null);expect(after.packs.map(p=>[p.role,p.kind,p.state])).toEqual([['user','text','closed'],['assistant','text','closed'],['assistant','tool','closed'],['assistant','text','closed']]);
-  expect(after.packs[2].tool).toEqual({name:'command',input:'echo example',output:'example\n'});expect(after.packs.find(p=>p.packId===before.packId)).toEqual(before);
+  expect(after.packs[2].tool).toEqual({name:'command',input:'echo example',output:'example\n'});expect(Date.parse(after.packs[2].closedAt!)).toBeGreaterThan(Date.parse(after.packs[2].createdAt));expect(after.packs[0].closedAt).toBeUndefined();expect(after.packs.find(p=>p.packId===before.packId)).toEqual(before);
   expect((await chat.packs('019a0000-0000-7000-8000-000000000001',null,before.packId)).packs.map(p=>p.packId)).toEqual(after.packs.slice(2).map(p=>p.packId));await expect(chat.packs('019a0000-0000-7000-8000-000000000001',null,'missing')).rejects.toThrow('not found');await expect(chat.pack('019a0000-0000-7000-8000-000000000001','019a0000-0000-7100-8000-000000000002',before.packId)).rejects.toThrow('not found');
   const closed=events.findIndex(e=>e.name==='chat.pack.closed'&&e.data.packId===before.packId);expect(events.slice(closed+1).some(e=>e.name==='chat.pack.delta'&&e.data.packId===before.packId)).toBe(false);
  }finally{await rm(root,{recursive:true,force:true})}
@@ -479,7 +486,7 @@ test('Claude の送信・ツール・中断と同じ接続先の再開を保存�
  }finally{delete process.env.FAKE_CLAUDE_LOG;await rm(root,{recursive:true,force:true})}
 });
 
-test('接続先を往復しても他 CLI のセッションを再開せず、本文の履歴だけ引き継ぐ',async()=>{
+test('接続先を往復するとそれぞれのセッションを再開し、未添付の会話だけを引き継ぐ',async()=>{
  const root=await mkdtemp(join(tmpdir(),'beni-provider-switch-')),p='019a0000-0000-7000-8000-000000000001',claudeLog=join(root,'claude.jsonl'),codexLog=join(root,'codex.jsonl');
  process.env.FAKE_CLAUDE_LOG=claudeLog;process.env.FAKE_CODEX_LOG=codexLog;
  try{
@@ -488,11 +495,22 @@ test('接続先を往復しても他 CLI のセッションを再開せず、本
   await chat.send(p,null,'Claude question',null,root,undefined,null,false,'claude','editor');await waitFor(async()=>(await chat.get(p,null)).messages.at(-1)?.status==='completed');
   const claude=await chat.get(p,null);expect(claude.threadId).not.toBe('thread-1');expect(claude.selectedModel?.id).toBe('sonnet');
   const invocation=JSON.parse((await readFile(claudeLog,'utf8')).trim());expect(invocation.args).toContain('--session-id');expect(invocation.args).not.toContain('--resume');expect(invocation.prompt).toContain('Codex context');expect(invocation.prompt).toContain('Hello');
-  await chat.send(p,null,'Codex returns',null,root);await waitFor(async()=>(await chat.get(p,null)).messages.at(-1)?.status==='completed');
-  const result=await chat.get(p,null);expect(result.messages.map(m=>m.provider)).toEqual(['codex','codex','claude','claude','codex','codex']);expect(result.messages[0]?.model).toBe('model-a');expect(result.messages[2]?.model).toBe('sonnet');
+  const restarted=new ChatService(()=>root,()=>fake,()=>fakeClaude);
+  await restarted.send(p,null,'Codex returns',null,root);await waitFor(async()=>(await restarted.get(p,null)).messages.at(-1)?.status==='completed');
+  const result=await restarted.get(p,null);expect(result.messages.map(m=>m.provider)).toEqual(['codex','codex','claude','claude','codex','codex']);expect(result.messages[0]?.model).toBe('model-a');expect(result.messages[2]?.model).toBe('sonnet');
+  expect(result.threadId).toBe('thread-1');
   const records=(await readFile(codexLog,'utf8')).trim().split('\n').map(line=>JSON.parse(line));
-  expect(records.filter(record=>record.method==='thread/resume')).toHaveLength(0);expect(records.filter(record=>record.method==='thread/start')).toHaveLength(2);
-  const turn=records.filter(record=>record.method==='turn/start').at(-1);expect(turn.params.input[1].text).toContain('Claude question');expect(turn.params.input[1].text).not.toContain('sessionId');
+  expect(records.filter(record=>record.method==='thread/resume')).toHaveLength(1);expect(records.filter(record=>record.method==='thread/start')).toHaveLength(1);
+  const turn=records.filter(record=>record.method==='turn/start').at(-1);expect(turn.params.input[1].text).toContain('Claude question');expect(turn.params.input[1].text).not.toContain('Codex context');
+  await restarted.send(p,null,'Claude returns','haiku',root,undefined,null,false,'claude');
+  await waitFor(async()=>(await restarted.get(p,null)).messages.at(-1)?.status==='completed');
+  const resumed=(await readFile(claudeLog,'utf8')).trim().split('\n').map(line=>JSON.parse(line)).at(-1);
+  expect(resumed.args).toContain('--resume');expect(resumed.session).toBe(claude.sessionId);
+  expect(resumed.prompt).toContain('Codex returns');expect(resumed.prompt).not.toContain('Codex context');expect(resumed.prompt).not.toContain('Claude question');
+  await restarted.send(p,null,'Claude continues','haiku',root,undefined,null,false,'claude');
+  await waitFor(async()=>(await restarted.get(p,null)).messages.at(-1)?.status==='completed');
+  const continued=(await readFile(claudeLog,'utf8')).trim().split('\n').map(line=>JSON.parse(line)).at(-1);
+  expect(continued.prompt).toBe('Claude continues');expect(continued.session).toBe(claude.sessionId);
  }finally{delete process.env.FAKE_CLAUDE_LOG;delete process.env.FAKE_CODEX_LOG;await rm(root,{recursive:true,force:true})}
 });
 
@@ -548,20 +566,71 @@ test('Claude の受理前終了・モデル拒否では新規セッションや�
  }finally{await rm(root,{recursive:true,force:true})}
 });
 
-test('Claude の存在しない再開セッションは明示失敗として残し、カーソルを進めない',async()=>{
+test('Claude の明示的な再開先欠落だけを一回再送し、受理済みのセッションを保存する',async()=>{
  const root=await mkdtemp(join(tmpdir(),'beni-claude-missing-resume-')),p='019a0000-0000-7000-8000-000000000001',t='019a0000-0000-7100-8000-000000000001',log=join(root,'claude.jsonl');
  process.env.FAKE_CLAUDE_LOG=log;
  try{
   const chat=new ChatService(()=>root,()=>null,()=>fakeClaude);let through=1;
   chat.setTaskEvents({capture:()=>{},events:(_p,_t,after)=>({events:after<through?[{id:through,type:'document.updated'}]:[],lastEventId:through,through,hasMore:false})});
-  await chat.send(p,t,'event tools','sonnet',root,undefined,'requirements',false,'claude');await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='completed');
-  const accepted=await chat.get(p,t);through=2;process.env.FAKE_CLAUDE_RESUME_MISSING='1';
-  await chat.send(p,t,'Next question','sonnet',root,undefined,'requirements',false,'claude');await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='failed');
-  expect(await chat.get(p,t)).toMatchObject({threadId:null,sessionId:null,lastEventId:1});expect((await chat.get(p,t)).messages).toHaveLength(4);
-  await Bun.sleep(30);const records=(await readFile(log,'utf8')).trim().split('\n').map(line=>JSON.parse(line));expect(records).toHaveLength(2);expect(records[1].args).toContain('--resume');expect(records[1].session).toBe(accepted.sessionId);expect(records[1].prompt).toContain('after 1, through 2');
-  delete process.env.FAKE_CLAUDE_RESUME_MISSING;await chat.send(p,t,'event tools','sonnet',root,undefined,'requirements',false,'claude');await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='completed');
-  const retried=(await readFile(log,'utf8')).trim().split('\n').map(line=>JSON.parse(line)).at(-1);expect(retried.args).toContain('--session-id');expect(retried.args).not.toContain('--resume');expect(retried.session).not.toBe(accepted.sessionId);expect(retried.prompt).toContain('Next question');expect(retried.prompt).toContain('after 1, through 2');expect((await chat.get(p,t)).lastEventId).toBe(2);
+  const send=async(content:string,status='completed')=>{
+   await chat.send(p,t,content,'sonnet',root,undefined,'requirements',false,'claude');
+   await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status===status);
+   return chat.get(p,t);
+  };
+  const accepted=await send('event tools');through=2;
+  process.env.FAKE_CLAUDE_RESUME_MISSING='after-init';
+  expect((await send('Already initialized','failed')).sessionId).toBe(accepted.sessionId);
+  delete process.env.FAKE_CLAUDE_RESUME_MISSING;
+  expect((await send('reject','failed')).sessionId).toBe(accepted.sessionId);
+  expect((await send('disconnect','unknown')).sessionId).toBe(accepted.sessionId);
+  process.env.FAKE_CLAUDE_RESUME_MISSING='1';
+  const replaced=await send('event tools');
+  expect(replaced.sessionId).not.toBe(accepted.sessionId);
+  expect(replaced.lastEventId).toBe(2);
+  expect(replaced.messages).toHaveLength(10);
+  expect(replaced.messages.slice(0,2)).toEqual(accepted.messages);
+  const records=(await readFile(log,'utf8')).trim().split('\n').map(line=>JSON.parse(line));
+  expect(records).toHaveLength(6);
+  expect(records.slice(1,5).every(record=>record.args.includes('--resume')&&record.session===accepted.sessionId)).toBe(true);
+  expect(records[4].prompt).toContain('after 1, through 2');
+  expect(records[5].args).toContain('--session-id');expect(records[5].session).toBe(replaced.sessionId);
+  expect(records[5].prompt).toContain('after 0, through 2');
+  expect(records[5].prompt).toContain('reference conversation history');
+  process.env.FAKE_CLAUDE_RESUME_MISSING='stderr';
+  expect((await send('wait','streaming')).sessionId).not.toBe(replaced.sessionId);
+  await chat.interrupt(p,t);
+  await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='interrupted');
  }finally{delete process.env.FAKE_CLAUDE_LOG;delete process.env.FAKE_CLAUDE_RESUME_MISSING;await rm(root,{recursive:true,force:true})}
+});
+
+test('Codex は明示的なスレッド欠落だけを復旧し、保存済み会話を一度送信する',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'beni-codex-missing-resume-')),p='019a0000-0000-7000-8000-000000000001',log=join(root,'codex.jsonl');
+ process.env.FAKE_CODEX_LOG=log;
+ try{
+  const chat=new ChatService(()=>root,()=>fake);
+  const send=async(content:string,status='completed')=>{
+   await chat.send(p,null,content,null,root);
+   await waitFor(async()=>(await chat.get(p,null)).messages.at(-1)?.status===status);
+   return chat.get(p,null);
+  };
+  const first=await send('Original question');
+  process.env.FAKE_CODEX_RESUME='reject';
+  expect((await send('Rejected before turn','failed')).threadId).toBe(first.threadId);
+  process.env.FAKE_CODEX_RESUME='missing';
+  const next=await send('Replacement question');
+  expect(next.threadId).toBe('thread-replacement');expect(next.sessionId).toBe('session-replacement');
+  expect(next.messages).toHaveLength(6);
+  expect(next.messages.slice(0,2)).toEqual(first.messages);
+  const last=await send('Resume replacement');
+  expect(last.threadId).toBe(next.threadId);
+  const records=(await readFile(log,'utf8')).trim().split('\n').map(line=>JSON.parse(line));
+  expect(records.filter(record=>record.method==='thread/start')).toHaveLength(2);
+  expect(records.filter(record=>record.method==='thread/resume').map(record=>record.params.threadId)).toEqual(['thread-1','thread-1','thread-replacement']);
+  const turns=records.filter(record=>record.method==='turn/start');
+  expect(turns.map(record=>record.params.input[0].text)).toEqual(['Original question','Replacement question','Resume replacement']);
+  expect(turns[1].params.input[1].text).toContain('Original question');
+  expect(turns[2].params.input).toHaveLength(1);
+ }finally{delete process.env.FAKE_CODEX_LOG;delete process.env.FAKE_CODEX_RESUME;await rm(root,{recursive:true,force:true})}
 });
 
 test('両接続先の埋め込みツールは同一プロジェクトだけを参照し、確認範囲と入力を検証する',async()=>{

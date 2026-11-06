@@ -10,6 +10,8 @@ export const claudeModels = [{id:'sonnet',name:'Sonnet'},{id:'opus',name:'Opus'}
 export type ClaudeStatus = {installed:boolean;path:string|null;version:string|null;checkedAt:string;auth:'claude'|'apiKey'|'other'|'none'|'unknown';models:{id:string;name:string}[]|null;usage:RateLimitUsage};
 export class ClaudeRejected extends Error { constructor(public modelUnavailable=false,public interrupted=false,public code?:string) { super('Request rejected'); } }
 
+export class ClaudeSessionMissing extends ClaudeRejected {}
+
 const versionSupported=(version:string)=>{const actual=version.split('.').map(Number),minimum=CLAUDE_MIN_VERSION.split('.').map(Number);for(let i=0;i<3;i++){if(actual[i]!==minimum[i])return actual[i]>minimum[i]}return true};
 const foreignAuth=():ClaudeStatus['auth']|null=>{
  if(process.env.ANTHROPIC_API_KEY||process.env.ANTHROPIC_AUTH_TOKEN)return 'apiKey';
@@ -61,6 +63,7 @@ export class ClaudeRpc {
  private partials=new Map<number,Block>();
  private sawText=false;
  private initialized=false;
+ private sawWork=false;
  private compacting=false;
  private compactBoundary=false;
  private localCommand:'context'|'usage'|null=null;
@@ -121,9 +124,17 @@ export class ClaudeRpc {
    const acceptance=new Promise<void>((resolve,reject)=>{const timer=setTimeout(()=>{this.rejectPending(Error('Claude acceptance timed out'));this.close()},60000);timer.unref();this.pending={resolve,reject,timer}});
    // spawn 失敗時にも acceptance の rejection を未処理にしない。
    void acceptance.catch(()=>{});
-   const child=spawn(this.executable,args,{cwd:this.options.cwd,env:{...process.env,...(writable?{CLAUDE_CODE_SUBPROCESS_ENV_SCRUB:'1'}:{})},stdio:['pipe','pipe','pipe']});this.child=child;child.stderr.resume();
-   const lines=createInterface({input:child.stdout});lines.on('line',line=>{if(this.closed||this.completed)return;try{this.receive(JSON.parse(line))}catch{this.close()}});
-   child.once('close',()=>{if(this.termination)clearTimeout(this.termination);this.termination=null;this.rejectPending(this.interrupted?new ClaudeRejected(false,true):Error('Claude closed before acceptance'));if(this.interrupted&&!this.completed)this.finish('interrupted');this.signalClose()});
+   const child=spawn(this.executable,args,{cwd:this.options.cwd,env:{...process.env,...(writable?{CLAUDE_CODE_SUBPROCESS_ENV_SCRUB:'1'}:{})},stdio:['pipe','pipe','pipe']});this.child=child;
+   // stderr を公開せず、再開対象を明示した既知の診断だけを照合する。
+   let stderr='';
+   child.stderr.setEncoding('utf8');
+   child.stderr.on('data',chunk=>{if(stderr.length<=4096)stderr+=String(chunk).slice(0,4097-stderr.length)});
+   const lines=createInterface({input:child.stdout});lines.on('line',line=>{
+    if(this.closed||this.completed)return;
+    if(this.canRetryMissingSession()&&this.missingSessionDiagnostic(line)){this.rejectPending(new ClaudeSessionMissing());this.close();return}
+    try{this.receive(JSON.parse(line))}catch{this.close()}
+   });
+   child.once('close',()=>{if(this.termination)clearTimeout(this.termination);this.termination=null;this.rejectPending(this.interrupted?new ClaudeRejected(false,true):this.canRetryMissingSession()&&this.missingSessionDiagnostic(stderr.trim())?new ClaudeSessionMissing():Error('Claude closed before acceptance'));if(this.interrupted&&!this.completed)this.finish('interrupted');this.signalClose()});
    child.once('error',()=>{this.rejectPending(Error('Claude unavailable'));this.signalClose()});
    child.stdin.on('error',()=>{});
    await new Promise<void>((resolve,reject)=>{child.once('spawn',resolve);child.once('error',()=>reject(Error('Claude unavailable')))});
@@ -151,7 +162,20 @@ export class ClaudeRpc {
  private item(block:Block){let input=block.input??{};if(block.partial){try{input=JSON.parse(block.partial)}catch{input=block.partial}}return {id:block.id,type:'dynamicToolCall',name:block.name,arguments:input,status:'inProgress'}}
  private completeText(block:Block){if(block.complete)return;block.complete=true;this.emit('item/completed',{item:{id:block.id,type:'agentMessage',text:block.text}})}
  private finish(status:'completed'|'failed'|'interrupted',modelUnavailable=false,errorCode?:string){if(this.completed)return;this.completed=true;this.child?.stdin.end();for(const block of this.blocks.values())if(block.type==='text')this.completeText(block);this.emit('turn/completed',{turn:{id:this.turn,status,...(modelUnavailable||errorCode?{error:{code:modelUnavailable?'model_not_found':errorCode}}:{})}})}
+ private canRetryMissingSession(){
+  return this.resumed&&!this.compacting&&!this.localCommand&&!this.initialized&&!this.sawWork&&!this.interrupted;
+ }
+ private missingSessionDiagnostic(text:unknown){return text===`No conversation found with session ID: ${this.session}`}
  private receive(message:any){
+  if(message.type==='assistant'||message.type==='stream_event'||message.type==='user'||message.type==='control_request'&&message.request?.message?.method==='tools/call')this.sawWork=true;
+  if(message.type==='result'&&message.is_error===true&&this.canRetryMissingSession()&&
+   (message.session_id===undefined||message.session_id===this.session)&&
+   [message.error,message.result,...(Array.isArray(message.errors)?message.errors:[])].some(error=>
+    error?.code==='session_not_found'||this.missingSessionDiagnostic(error))){
+   this.rejectPending(new ClaudeSessionMissing());
+   this.close();
+   return;
+  }
   if(message.type==='rate_limit_event'){
    if(message.session_id===this.session&&message.parent_tool_use_id==null)this.onEvent('account/rateLimits/updated',message.rate_limit_info);
    return;
@@ -236,7 +260,10 @@ export class ClaudeRpc {
     const content=event.content_block;if(content?.type!=='text'&&content?.type!=='tool_use')return;
     const block:Block={id:content.type==='tool_use'?content.id:`${this.currentMessage}:${event.index}`,type:content.type,text:'',name:content.name,input:content.input,complete:false};
     this.blocks.set(block.id,block);this.partials.set(event.index,block);
-    if(block.type==='text')this.text(block,content.text??'');else this.emit('item/started',{item:this.item(block)});
+    if(block.type==='text'){
+     this.emit('item/started',{item:{id:block.id,type:'agentMessage'}});
+     this.text(block,content.text??'');
+    }else this.emit('item/started',{item:this.item(block)});
    }
    if(event?.type==='content_block_delta'){
     const block=this.partials.get(event.index);if(!block)return;

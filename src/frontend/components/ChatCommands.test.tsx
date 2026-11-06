@@ -43,12 +43,10 @@ const textarea = () => screen.getByRole('textbox', {name:'希望や回答を入�
 const input = (value: string) => fireEvent.input(textarea(), {target:{value}});
 const submit = () => fireEvent.submit(textarea().closest('form')!);
 
-it('offers prefix matches and accepts click, Tab and an explicitly selected Enter without taking ordinary Enter', async () => {
-  await setup();
+it('offers prefix matches and accepts click, Tab and an explicitly selected Enter without sending', async () => {
+  const { fetchMock } = await setup();
   input('/');
   expect(screen.getByRole('listbox', {name:'スラッシュコマンド'})).toBeTruthy();
-  const enter = new KeyboardEvent('keydown', {key:'Enter',bubbles:true,cancelable:true});
-  fireEvent(textarea(), enter); expect(enter.defaultPrevented).toBe(false);
   fireEvent.click(screen.getByRole('option', {name:'/compact · 会話を圧縮'}));
   expect(textarea().value).toBe('/compact'); expect(screen.queryByRole('listbox')).toBeNull();
   input('/co'); fireEvent.keyDown(textarea(), {key:'Tab'});
@@ -57,8 +55,42 @@ it('offers prefix matches and accepts click, Tab and an explicitly selected Ente
   expect(screen.getByRole('option', {name:'/compact · 会話を圧縮'}).getAttribute('aria-selected')).toBe('true');
   expect(textarea().getAttribute('aria-activedescendant')).toBe(screen.getByRole('option', {name:'/compact · 会話を圧縮'}).id);
   fireEvent.keyDown(textarea(), {key:'Enter'}); expect(textarea().value).toBe('/compact');
+  expect(commandCalls(fetchMock)).toHaveLength(0);
   input('/co'); fireEvent.keyDown(textarea(), {key:'Escape'}); expect(screen.queryByRole('listbox')).toBeNull();
   input('/other'); expect(screen.queryByRole('listbox')).toBeNull();
+});
+
+it('Enter sends once, while Shift+Enter and IME confirmation keep their native behavior', async () => {
+  const { fetchMock } = await setup();
+  input('変換した本文');
+  const keyDown = (options: KeyboardEventInit) => {
+    const event = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true, ...options });
+    fireEvent(textarea(), event);
+    return event.defaultPrevented;
+  };
+  expect(keyDown({ shiftKey: true })).toBe(false);
+  expect(keyDown({ isComposing: true })).toBe(false);
+  expect(keyDown({ keyCode: 229 })).toBe(false);
+  expect(commandCalls(fetchMock)).toHaveLength(0);
+  expect(textarea().value).toBe('変換した本文');
+  expect(keyDown({})).toBe(true);
+  await waitFor(() => expect(commandCalls(fetchMock)).toHaveLength(1));
+  expect(JSON.parse(String(commandCalls(fetchMock)[0]?.[1]?.body)).content).toBe('変換した本文');
+});
+
+it('Enter submits a complete slash command without a selected suggestion', async () => {
+  await setup();
+  input('/help');
+  fireEvent.keyDown(textarea(), { key: 'Enter' });
+  expect(await screen.findByText('/help · 結果')).toBeTruthy();
+});
+
+it('Enter respects the send restriction in instruction conversations', async () => {
+  const { fetchMock } = await setup({ instructions: true });
+  input('編集の相談');
+  fireEvent.keyDown(textarea(), { key: 'Enter' });
+  expect(commandCalls(fetchMock)).toHaveLength(0);
+  expect(textarea().value).toBe('編集の相談');
 });
 
 it('sends compact through its own API with the selected model without instruction focus and awaits a changed snapshot', async () => {
@@ -153,6 +185,51 @@ it('retains the command itself after server rejection', async () => {
 const commandCalls = (fetchMock: Awaited<ReturnType<typeof setup>>['fetchMock']) => fetchMock.mock.calls.filter(([url]) => url === '/api/chat/commands' || url === '/api/chat/send');
 const choose = (value: string) => fireEvent.change(screen.getByRole('combobox',{name:'モデル'}),{target:{value}});
 const message = (content: string, status: ChatMessage['status'] = 'completed'): ChatMessage => ({id:`fixture-${++serial}`,sendId:`send-${serial}`,role:'assistant',content,provider:'codex',model:'test',createdAt:'',updatedAt:'',status});
+
+it('uses the saved provider icon for each assistant reply when the selected model changes', async () => {
+  await setup({ claude: true, messages: [
+    { ...message('Codex からの返答'), provider: 'codex' },
+    { ...message('Claude からの返答'), provider: 'claude' },
+    { ...message('ユーザーの入力'), role: 'user', provider: 'claude' },
+  ] });
+  const codex = (await screen.findByText('Codex からの返答')).closest('article')!;
+  const claude = (await screen.findByText('Claude からの返答')).closest('article')!;
+  const user = (await screen.findByText('ユーザーの入力')).closest('article')!;
+  const codexIcon = codex.querySelector(':scope > .chat-image.avatar svg');
+  const claudeIcon = claude.querySelector(':scope > .chat-image.avatar svg');
+  expect(codexIcon?.querySelector('path[stroke]')).not.toBeNull();
+  expect(claudeIcon?.querySelector('path[fill="#EB764B"]')).not.toBeNull();
+  expect(codexIcon?.getAttribute('aria-hidden')).toBe('true');
+  expect(claudeIcon?.getAttribute('aria-hidden')).toBe('true');
+  expect(user.querySelector('.chat-image')).toBeNull();
+  expect(codex.querySelector('.chat-header svg')).toBeNull();
+  expect(claude.querySelector('.chat-header svg')).toBeNull();
+  choose('claude:sonnet');
+  expect((screen.getByRole('combobox', { name: 'モデル' }) as HTMLSelectElement).value).toBe('claude:sonnet');
+  expect(codex.querySelector('svg')).toBe(codexIcon);
+  expect(claude.querySelector('svg')).toBe(claudeIcon);
+});
+
+it('shows the saved model and local creation time on both sides of the chat', async () => {
+  const createdAt = '2026-11-07T10:10:00+09:00';
+  const updatedAt = '2026-11-07T10:20:00+09:00';
+  const date = new Intl.DateTimeFormat('ja-JP', {
+    year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+  }).format(new Date(createdAt));
+  await setup({ messages: [
+    { ...message('質問本文'), role: 'user', model: 'gpt-6-luna', createdAt, updatedAt },
+    { ...message('返答本文'), model: 'gpt-6-luna', createdAt, updatedAt },
+    { ...message('日時不明の返答'), model: null, createdAt: 'invalid' },
+  ] });
+  for (const content of ['質問本文', '返答本文']) {
+    const header = (await screen.findByText(content)).closest('article')!.querySelector('.chat-header')!;
+    expect(header.textContent).toBe(`Codex/gpt-6-luna ${date}`);
+    expect(header.querySelector('time')?.getAttribute('datetime')).toBe(createdAt);
+  }
+  const missing = (await screen.findByText('日時不明の返答')).closest('article')!.querySelector('.chat-header')!;
+  expect(missing.textContent).toBe('Codex');
+  expect(missing.querySelector('time')).toBeNull();
+});
 
 it('limits candidates to the selected provider and resets keyboard selection when it changes', async () => {
   const {fetchMock} = await setup({claude:true});

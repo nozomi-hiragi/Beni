@@ -9,7 +9,8 @@ import MarkdownPreview from './components/MarkdownPreview';
 import PromptTableMarkdownPreview from './components/PromptTableMarkdownPreview';
 import PhaseIndicator, { phaseDocuments } from './components/PhaseIndicator';
 import TabBar from './components/TabBar';
-import TreeView from './components/TreeView';
+import TreeView, { type TreeNode } from './components/TreeView';
+import ProjectFileContent, { projectFileName, projectFilePath, projectFileTree } from './components/ProjectFiles';
 import TerminalPanel from './components/TerminalPanel';
 import ResizeHandle from './components/ResizeHandle';
 import type { AppState, Document, Task, TaskDetail } from './types';
@@ -74,6 +75,10 @@ export default function Workspace(props: WorkspaceProps) {
   const [loadError, setLoadError] = createSignal('');
   const [openDocuments, setOpenDocuments] = createSignal<string[]>([]);
   const [activeDocument, setActiveDocument] = createSignal<string>();
+  const [openFiles, setOpenFiles] = createSignal<string[]>([]);
+  const [activeFile, setActiveFile] = createSignal<string>();
+  createEffect(() => { activeTask(); setActiveFile(undefined); });
+  createEffect(() => { projectId(); setOpenFiles([]); setActiveFile(undefined); });
   const [leftRatio, setLeftRatio] = createSignal(50);
   const [chatRatio, setChatRatio] = createSignal(60);
   let workspace: HTMLElement | undefined;
@@ -114,6 +119,19 @@ export default function Workspace(props: WorkspaceProps) {
   const documents = createMemo(() => detail()?.documents ?? []);
   const documentName = (name: string) => phaseDocuments.find(item => item.name === name)?.label ?? name;
   const documentLabel = (document: Document) => documents().filter(item => item.name === document.name).length > 1 ? `${documentName(document.name)} · v${document.version}` : documentName(document.name);
+  const projectFiles = createMemo(() => {
+    const project = projectId();
+    return project === undefined ? undefined : projectFileTree(project);
+  });
+  const previewNodes = createMemo<TreeNode[]>(() => {
+    const nodes: TreeNode[] = [];
+    if (activeTask() !== undefined && documents().length) {
+      nodes.push({ label: 'タスク文書', children: documents().map(document => ({ id: documentId(document), label: documentLabel(document) })) });
+    }
+    const files = projectFiles();
+    if (files) nodes.push(files);
+    return nodes;
+  });
   const currentDocument = createMemo(() => documents().find(document => documentId(document) === activeDocument()));
   const currentDocumentSource = createMemo(() => {
     const document = currentDocument();
@@ -309,6 +327,26 @@ export default function Workspace(props: WorkspaceProps) {
     saveDocumentTabs(documentOwner, remaining, selected);
   }
 
+  function openPreview(id: string) {
+    if (projectFilePath(id) !== undefined) {
+      setOpenFiles(previous => previous.includes(id) ? previous : [...previous, id]);
+      setActiveFile(id);
+    } else {
+      setActiveFile(undefined);
+      openDocument(id);
+    }
+  }
+  function closePreview(id: string) {
+    if (projectFilePath(id) === undefined) {
+      closeDocument(id);
+      if (!activeDocument() && !activeFile()) setActiveFile(openFiles().at(-1));
+      return;
+    }
+    const remaining = openFiles().filter(file => file !== id);
+    setOpenFiles(remaining);
+    if (activeFile() === id) setActiveFile(remaining.at(-1));
+  }
+
   const toggle = (label: string, expanded: boolean, controls: string, onClick: () => void, setRef: (element: HTMLButtonElement) => void) =>
     <button ref={setRef} type="button" class="btn btn-ghost btn-square btn-sm m-1" aria-label={label} aria-expanded={expanded} aria-controls={controls} onClick={onClick}><span aria-hidden="true">☰</span></button>;
 
@@ -340,7 +378,7 @@ export default function Workspace(props: WorkspaceProps) {
                     props.onTaskChange?.(result.id, result);
                     const next = phaseDocuments.find(item => item.phase === result.phase);
                     const target = documents().filter(item => item.name === next?.name).reduce<Document | undefined>((latest, item) => !latest || item.version > latest.version ? item : latest, undefined);
-                    if (target) openDocument(documentId(target));
+                    if (target) openPreview(documentId(target));
                     const refreshed = await api<TaskDetail>(`/api/tasks/${current.task.id}`);
                     if (alive && detail()?.task.id === current.task.id) {
                       setDetail(refreshed);
@@ -387,10 +425,20 @@ export default function Workspace(props: WorkspaceProps) {
     </div>
     <ResizeHandle orientation="vertical" label="チャットと文書プレビューの幅を調整" container={() => workspace} value={leftRatio()} onChange={setLeftRatio} />
     <section class="card card-border border-base-300 bg-base-100 shadow-sm min-h-[20rem] min-w-0 lg:min-h-0 overflow-hidden" aria-label="文書プレビュー">
-      <TabBar label="文書" tabs={openDocuments().map(id => { const document = documents().find(item => documentId(item) === id); return { id, label: document ? documentLabel(document) : id }; })} activeId={activeDocument()} onSelect={openDocument} onClose={closeDocument} left={toggle('文書ツリーを開閉', documentTreeOpen(), 'document-tree', () => setDocumentTreeOpen(value => !value), element => { documentTreeToggle = element; })} />
+      <TabBar label="文書" tabs={[
+        ...openDocuments().map(id => { const document = documents().find(item => documentId(item) === id); return { id, label: document ? documentLabel(document) : 'タスク文書' }; }),
+        ...openFiles().map(id => {
+          const path = projectFilePath(id)!;
+          const name = projectFileName(path);
+          const duplicate = openFiles().some(other => other !== id && projectFileName(projectFilePath(other)!) === name)
+            || documents().some(document => documentLabel(document) === name);
+          return { id, label: duplicate ? `プロジェクトファイル / ${path}` : name };
+        }),
+      ]} activeId={activeFile() ?? activeDocument()} onSelect={openPreview} onClose={closePreview} left={toggle('文書ツリーを開閉', documentTreeOpen(), 'document-tree', () => setDocumentTreeOpen(value => !value), element => { documentTreeToggle = element; })} />
       <div class="relative flex min-h-0 flex-1 flex-col">
-        <Show when={documentTreeOpen()}><TreeView id="document-tree" label="文書" nodes={documents().map(document => ({ id: documentId(document), label: documentLabel(document) }))} onSelect={id => { openDocument(id); setDocumentTreeOpen(false); }} /></Show>
-        <Show when={currentDocument()}>{document => {
+        <Show when={documentTreeOpen()}><TreeView id="document-tree" label="文書" nodes={previewNodes()} activeId={activeFile() ?? activeDocument()} onSelect={id => { openPreview(id); setDocumentTreeOpen(false); }} /></Show>
+        <Show when={activeFile()} keyed>{id => <ProjectFileContent projectId={projectId()!} path={projectFilePath(id)!} />}</Show>
+        <Show when={!activeFile() && currentDocument()}>{document => {
           const preview = {
             get content() { return document().content; },
             get documents() { return documents().map(item => item.name); },

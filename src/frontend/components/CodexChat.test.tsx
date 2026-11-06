@@ -127,10 +127,11 @@ it('streams pack deltas without fetching conversation snapshots, then confirms w
   socket.event('chat', {name:'chat.pack.delta', data:{packId:pack.packId, delta:'response', header}});
   expect(screen.getByText('First response').closest('article')).toBe(article);
   expect(conversationCalls).toBe(before);
-  packs = [packs[0], {...pack, state:'closed', status:'completed'}];
-  socket.event('chat', {name:'chat.pack.closed', data:{packId:pack.packId, header:{...header,state:'closed',status:'completed'}}});
+  const closedAt = new Date(Date.parse(pack.createdAt) + 1_200).toISOString();
+  packs = [packs[0], {...pack, state:'closed', status:'completed', closedAt}];
+  socket.event('chat', {name:'chat.pack.closed', data:{packId:pack.packId, header:{...header,state:'closed',status:'completed',closedAt}}});
   await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => url.endsWith('/ack'))).toBe(true));
-  await waitFor(() => expect(screen.getByText('First response').closest('article')?.textContent).toContain('完了'));
+  await waitFor(() => expect(screen.getByText('First response').closest('article')?.querySelector('.chat-footer')?.textContent).toBe('1.2秒'));
   expect(fetchMock.mock.calls.some(([url]) => url.includes('/packs/streamed?'))).toBe(false);
   socket.event('chat', {name:'chat.pack.delta',data:{packId:pack.packId,delta:'Late',header}});
   expect(screen.getByText('First response').closest('article')).toBe(article);
@@ -212,6 +213,7 @@ it('follows streamed content only at the bottom and resets following when the sc
 it.each(['completed', 'interrupted', 'failed'] as const)('keeps Aura visible during tool work until the turn is %s', async outcome => {
   let working = true;
   const pack = testPack('', {packId:`tool-${outcome}`,sequence:3,kind:'tool',tool:{name:'read_file',input:'notes.md',output:'Task notes'}});
+  pack.closedAt = new Date(Date.parse(pack.createdAt) + 83_000).toISOString();
   const earlier=testPack('Earlier request',{packId:`earlier-${outcome}`,role:'user'});
   const user = testPack('New request', {packId:`user-${outcome}`,sequence:2,role:'user'});
   vi.stubGlobal('fetch', vi.fn((url: string) => {
@@ -228,10 +230,12 @@ it.each(['completed', 'interrupted', 'failed'] as const)('keeps Aura visible dur
   details.open = true;
   expect(article.classList.contains('chat-start')).toBe(true);
   expect(tool.closest('.chat-bubble')?.classList.contains('bg-base-200')).toBe(true);
-  expect(article.querySelector('.chat-header')?.textContent).toContain('アシスタント');
-  expect(article.querySelector('.chat-footer')?.textContent).toBe('完了');
+  expect(article.querySelector('.chat-header')?.textContent).toContain('Codex/test ');
+  expect(article.querySelector('time')?.dateTime).toBe(pack.createdAt);
+  expect(article.querySelector('.chat-footer')?.textContent).toBe('1分23秒');
   const legacy = screen.getByText('Earlier request');
   expect(legacy.closest('article')?.classList.contains('chat-end')).toBe(true);
+  expect(legacy.closest('article')?.querySelector('.chat-footer')?.textContent).toBe('完了');
   expect(legacy.closest('.chat-bubble')?.classList.contains('chat-bubble-primary')).toBe(true);
   const request = await screen.findByText('New request');
   expect(request.closest('article')?.classList.contains('chat-end')).toBe(true);

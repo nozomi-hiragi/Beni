@@ -8,7 +8,7 @@ export interface DocumentProvenance {
 }
 export interface DocumentProvenanceDetail {
   reason: string;
-  sources: { kind: 'document' | 'instruction' | 'message' | 'result' | 'template' | 'legacy'; id: string; revision?: string; start?: number; text: string }[];
+  sources: { kind: 'document' | 'instruction' | 'message' | 'result' | 'template' | 'legacy'; id: string; revision?: string; start?: number; text: string; taskName?: string; projectName?: string }[];
 }
 export interface Document { path?: string; name: string; content: string; version: number; provenance?: DocumentProvenance }
 export interface TaskDetail {
