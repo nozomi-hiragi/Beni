@@ -6,9 +6,10 @@
 - [通信仕様・API](communication/README.md)
 - [データ設計](data/README.md)
 
-## 次期版の仕様
+## 仕様
 
-- [全体仕様](next-agent-plan.md)
+- [全体仕様](specification.md)
+- [今後の検討事項（未決定）](future-considerations.md)
 - [オブジェクト別の仕様と操作](objects/README.md)
 - 画面
   - [ホーム画面](screens/home.md)

@@ -90,7 +90,8 @@ Beni/
 │   │   ├── websocket.md              WS の接続・購読・メッセージ仕様
 │   │   ├── terminal.md               ターミナルの操作権・画面復元・入出力
 │   │   └── chat-sync.md              チャットのパック確定・再接続時の同期
-│   ├── next-agent-plan.md            アプリ全体の目的、利用の流れ、構想
+│   ├── specification.md             アプリ全体の確定仕様
+│   ├── future-considerations.md     未決定の構想と検討事項
 │   ├── screens/                      画面ごとの仕様
 │   │   ├── home.md                   ホーム画面
 │   │   ├── project-detail.md         プロジェクト詳細画面

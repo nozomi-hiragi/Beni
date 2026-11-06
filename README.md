@@ -15,7 +15,7 @@ bun run start
 
 ブラウザーで http://127.0.0.1:3210/ を開きます。ポートは `BENI_PORT` で変更できます。
 
-複数起動については [動作条件](docs/next-agent-plan.md#動作条件) を参照してください。
+複数起動については [動作条件](docs/specification.md#動作条件) を参照してください。
 
 ### Tailscale 経由で起動する
 

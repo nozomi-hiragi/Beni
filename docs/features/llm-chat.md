@@ -117,7 +117,7 @@ Beniに保存したメッセージとパックは圧縮操作で変更しない�
 - [Claudeの非対話セッションでのコマンド](https://code.claude.com/docs/en/agent-sdk/slash-commands#compact-history-with-compact)
 - [Claude Code の利用条件](https://code.claude.com/docs/en/legal-and-compliance)
 
-関連：[全体仕様](../next-agent-plan.md) / [プロジェクト詳細画面](../screens/project-detail.md) / [設定画面](../screens/settings.md)
+関連：[全体仕様](../specification.md) / [プロジェクト詳細画面](../screens/project-detail.md) / [設定画面](../screens/settings.md)
 
 ## タスク文書の実ファイル
 
