@@ -85,6 +85,7 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
  workflow.kickJobs();
  chat.setInstructions(()=>store.instructions());
  chat.setInstructionEditor({directory:store.dataDirectory,update:(key,content,expected)=>store.updateInstruction(key,content,expected)});
+ chat.setUsageDirectory(store.dataDirectory);
  chat.setExecutionFinished((p,t)=>{
   const task=store.task(t);
   if(task?.phase!=='execution'||task.status==='completed')return;
@@ -218,6 +219,10 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
    if (new TextEncoder().encode(body).byteLength > bodyLimit) return json({error:'入力が長すぎます'},413);
    const input = JSON.parse(body) as Record<string,unknown>;
    if (!input || typeof input !== 'object' || Array.isArray(input)) return json({error:'入力を確認してください'},400);
+   if (url.pathname === '/api/codex/status' || url.pathname === '/api/claude/status') {
+    if (Object.keys(input).length) return json({error:'入力を確認してください'},400);
+    return json(await chat.refreshUsage(url.pathname === '/api/codex/status' ? 'codex' : 'claude'));
+   }
    if(url.pathname==='/api/instructions/apply'){
     if(typeof input.expected_content!=='string'||Object.keys(input).some(key=>key!=='expected_content'))return json({error:'入力を確認してください'},400);
     try{return json({editorState:await chat.applyInstructionEditor(input.expected_content)})}catch(error){const message=error instanceof Error?error.message:'';return json({error:message==='busy'?'生成中は反映できません':message==='conflict'?'インストラクションが変更されています':'反映できませんでした'},message==='busy'||message==='conflict'?409:500)}

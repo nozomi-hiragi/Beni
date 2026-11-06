@@ -90,7 +90,8 @@ for await (const line of createInterface({input:process.stdin})) {
  if(embedded){const response=JSON.parse(line);if(typeof response.id==='string'&&response.id.startsWith('embedded:')){if(process.env.FAKE_CODEX_LOG)appendFileSync(process.env.FAKE_CODEX_LOG,JSON.stringify(response)+'\n');const call=embedded.call!;if(!embedded.workflow)embedded.results.push(response.result);embeddedEvent('item/completed',{type:'dynamicToolCall',id:response.id,tool:call.tool,arguments:call.arguments,contentItems:response.result?.contentItems,status:response.result?.success?'completed':'failed'});embedded.index++;nextEmbedded(response.result);continue}}
  const msg=JSON.parse(line);if(process.env.FAKE_CODEX_LOG)appendFileSync(process.env.FAKE_CODEX_LOG,JSON.stringify(msg)+'\n');if(msg.id==='approval-test'){if(msg.error?.code===-32601)send({method:'item/agentMessage/delta',params:{threadId:'thread-1',turnId:turn,itemId:'message-1',delta:' denied'}});continue}if(!msg.id)continue;
  if(msg.method==='initialize')send({id:msg.id,result:{}});
- else if(msg.method==='account/read')send({id:msg.id,result:{account:{type:process.env.FAKE_AUTH??'chatgpt'}}});
+ else if(msg.method==='account/read')send({id:msg.id,result:{account:{type:process.env.FAKE_AUTH??'chatgpt',email:process.env.FAKE_CODEX_EMAIL??'example@example.test'}}});
+ else if(msg.method==='account/rateLimits/read')send({id:msg.id,result:{rateLimits:process.env.FAKE_CODEX_RATE_LIMIT ? {primary:{usedPercent:Number(process.env.FAKE_CODEX_RATE_LIMIT),windowDurationMins:300}} : null}});
  else if(msg.method==='config/read')send({id:msg.id,result:{config:{web_search:'disabled',mcp_servers:{},features:{shell_tool:process.argv.some((arg,index)=>arg==='--enable'&&process.argv[index+1]==='shell_tool'),apps:false,plugins:false,multi_agent:false,browser_use:false,computer_use:false,code_mode_host:process.argv.some((arg,index)=>arg==='--enable'&&process.argv[index+1]==='code_mode_host'),hooks:false,skill_mcp_dependency_install:false}}}});
  else if(msg.method==='model/list')send({id:msg.id,result:{data:[{model:'model-a',displayName:'Model A'}],nextCursor:null}});
  else if(msg.method==='thread/start'||msg.method==='thread/resume'){developerInstructions=msg.params.developerInstructions??'';send({id:msg.id,result:{thread:{id:msg.params.threadId??'thread-1',sessionId:'session-1'}}})}
@@ -115,6 +116,7 @@ for await (const line of createInterface({input:process.stdin})) {
  }
  else if(msg.method==='turn/start'||msg.method==='review/start'){
   const text=process.env.FAKE_CODEX_TURN_ACTION??(msg.method==='review/start'?'review':msg.params.input[0].text);
+  if(process.env.FAKE_CODEX_RATE_LIMIT)send({method:'account/rateLimits/updated',params:{rateLimits:{primary:{usedPercent:Number(process.env.FAKE_CODEX_RATE_LIMIT),windowDurationMins:300,resetsAt:2_000_000_000}}}});
   if(text==='write documents'&&!['shell_tool','code_mode_host'].every(feature=>process.argv.some((arg,index)=>arg==='--enable'&&process.argv[index+1]===feature))){send({id:msg.id,error:{code:-32600,message:'Required tools disabled'}});continue}
   if(text==='write documents'){writeFileSync(join(msg.params.cwd,'requirements.md'),'# Updated requirements\n');writeFileSync(join(msg.params.cwd,'implementation.md'),'# Updated plan\n')}
   if(text==='disconnect')process.exit(0);

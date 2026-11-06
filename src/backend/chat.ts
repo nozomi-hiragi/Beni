@@ -5,6 +5,8 @@ import { createInterface } from 'node:readline';
 import { join, dirname, relative, isAbsolute } from 'node:path';
 import { defaultEventKinds, EventToolArgumentsError, eventTools, eventToolArguments, boundedEmbeddedToolResult, toolResult, type EmbeddedTool, type EmbeddedToolResult } from './embedded-tools';
 import { readFileSync, lstatSync, readdirSync, realpathSync } from 'node:fs';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { isTaskPhase, type TaskPhase } from '../shared/task-phase';
 import { createHash, randomUUID } from 'node:crypto';
 import { directory, projectRoot, readJson, writeJson } from './data';
@@ -14,12 +16,14 @@ import { INSTRUCTIONS_CHAT_ID, packHash, packHeader, validPack, isProvider, type
 import { chatCommands, findChatCommand, parseChatCommand, type ChatCommand, type ChatCommandName } from '../shared/chat-commands';
 
 import { ClaudeRpc, ClaudeRejected, claudeStatus } from './claude';
+import { claudeRateLimit, claudeUsageReport, codexRateLimits, restoreRateLimitUsage, type RateLimitUsage } from './rate-limits';
 
 type ChatRpc = Pick<Rpc,'request'|'init'|'onEvent'|'onClose'|'close'|'onToolCall'>;
 type State = 'pending'|'streaming'|'completed'|'failed'|'interrupted'|'unknown';
 type Message = {systemGenerated?:true;errorCode?:'MODEL_UNAVAILABLE';id:string;sendId:string;role:'user'|'assistant';content:string;provider:Provider;model:string|null;createdAt:string;updatedAt:string;status:State;threadId:string|null;sessionId:string|null};
 type Conversation = {workflowJobId?:string;workflowToolsHash?:string;command?:ChatCommand;appliedEditorContent?:string;lastInstructionFocusThreadId?:string;lastInstructionFocus?:InstructionKey;lastInstructionFocusHash?:string;phaseReferenceHash?:string;instructionToolsVersion?:1;eventToolsVersion?:1;sessionProvider?:Provider;selectedModel:{id:string;name:string;provider?:Provider}|null;phase:TaskPhase|null;lastEventId:number;packs:Pack[];version:1;id:string;projectId:string;taskId:string|null;threadId:string|null;sessionId:string|null;messages:Message[]};
-type Status = {installed:boolean;path:string|null;version:string|null;checkedAt:string;auth:'chatgpt'|'apiKey'|'other'|'none'|'unknown';models:{id:string;name:string}[]|null;usage:'unknown'};
+type Status = {installed:boolean;path:string|null;version:string|null;checkedAt:string;auth:'chatgpt'|'apiKey'|'other'|'none'|'unknown';models:{id:string;name:string}[]|null;usage:RateLimitUsage};
+type UsageAccount = { identity: string; usage: RateLimitUsage };
 const key = (p:string,t:string|null) => {if(!(validProjectId(p)||p===INSTRUCTIONS_CHAT_ID)||(p===INSTRUCTIONS_CHAT_ID&&t!==null)||(t!==null&&!validTaskId(t)))throw Error('Invalid chat scope');return JSON.stringify([p,t])};
 const conversationKey = (p:string,t:string|null,phase:TaskPhase|null) => {key(p,t);if(t===null?phase!==null:!isTaskPhase(phase))throw Error('Invalid chat phase');return JSON.stringify([p,t,phase])};
 export type TaskEventsProvider = {capture:(p:string,t:string|null,phase?:TaskPhase|null,operationId?:string)=>unknown;events:(p:string,t:string|null,after:number,through?:number,limit?:number,types?:string[])=>{events:any[];lastEventId:number;nextCursor?:number;through:number;hasMore:boolean};event?:(p:string,id:number)=>any;change?:(p:string,id:number)=>unknown;version?:(p:string,path:string,id:number)=>unknown;append?:(p:string,input:any)=>unknown};
@@ -353,8 +357,147 @@ export class ChatService {
  async packs(p:string,t:string|null,after?:string,phase:TaskPhase|null=t===null?null:'requirements'){const c=await this.get(p,t,phase);const index=after===undefined?-1:c.packs.findIndex(pack=>pack.packId===after);if(after!==undefined&&index<0)throw Error('not found');return {packs:c.packs.slice(index+1).map(({packId,state})=>({packId,state}))}}
  async pack(p:string,t:string|null,id:string,phase:TaskPhase|null=t===null?null:'requirements'){const c=await this.get(p,t,phase);const pack=c.packs.find(pack=>pack.packId===id);if(!pack)throw Error('not found');if(pack.state!=='closed')throw Error('not closed');return {pack}}
  async ack(p:string,t:string|null,id:string,hash:string,phase:TaskPhase|null=t===null?null:'requirements'){const {pack}=await this.pack(p,t,id,phase);return await packHash(pack)===hash?{matched:true as const}:{matched:false as const,pack}}
- async claudeStatus(){return claudeStatus(this.claudeExecutable())}
- async status():Promise<Status>{const executable=this.executable();const status:Status={installed:!!executable,path:executable,version:null,checkedAt:now(),auth:'unknown',models:null,usage:'unknown'};if(!executable)return status;status.version=await new Promise(resolve=>execFile(executable,['--version'],{timeout:5000,maxBuffer:4096},(error,stdout)=>{const match=!error&&stdout.match(/^codex-cli\s+([\w.+-]+)/m);resolve(match?match[1]:null)}));const rpc=new Rpc(executable);try{await rpc.init();const result=await rpc.request('account/read',{refreshToken:false});status.auth=result.account?.type==='chatgpt'?'chatgpt':result.account?.type==='apiKey'?'apiKey':result.account?'other':'none';let cursor:string|null=null;const models:{id:string;name:string}[]=[];do{const page=await rpc.request('model/list',{cursor});for(const m of page.data??[])if(typeof m.model==='string')models.push({id:m.model,name:typeof m.displayName==='string'?m.displayName:m.model});cursor=page.nextCursor??null}while(cursor);status.models=models}catch{}finally{rpc.close()}return status}
+ private usageAccounts = new Map<Provider, UsageAccount>();
+ private usageDirectory?: string;
+ private usageRefreshes = new Map<Provider, Promise<Status | Awaited<ReturnType<typeof claudeStatus>>>>();
+ setUsageDirectory(path: string) {
+  this.usageDirectory = path;
+ }
+ private usagePath(provider: Provider) {
+  return this.usageDirectory && join(directory(this.usageDirectory), `rate-limits-${provider}.json`);
+ }
+ refreshUsage(provider: Provider) {
+  const pending = this.usageRefreshes.get(provider);
+  if (pending) return pending;
+  const request = (provider === 'codex' ? this.status(true) : this.claudeStatus(true))
+   .finally(() => this.usageRefreshes.delete(provider));
+  this.usageRefreshes.set(provider, request);
+  return request;
+ }
+ private usageForAccount(provider: Provider, identity: string | undefined): RateLimitUsage {
+  if (identity === undefined) {
+   this.usageAccounts.delete(provider);
+   return 'unknown';
+  }
+  const current = this.usageAccounts.get(provider);
+  if (current?.identity === identity) return current.usage;
+  let usage: RateLimitUsage = 'unknown';
+  try {
+   const path = this.usagePath(provider);
+   const saved = path ? readJson(path) : undefined;
+   if (saved?.version === 1 && saved.identity === identity) usage = restoreRateLimitUsage(saved.usage);
+  } catch { /* キャッシュがなくても利用枠は再取得できる。 */ }
+  this.usageAccounts.set(provider, {identity, usage});
+  return usage;
+ }
+ private recordUsage(provider: Provider, account: UsageAccount, usage: Exclude<RateLimitUsage, 'unknown'>) {
+  account.usage = usage;
+  try {
+   const path = this.usagePath(provider);
+   if (path) writeJson(path, {version:1, identity:account.identity, usage});
+  } catch { /* 保存できなくても今回の値は表示できる。 */ }
+ }
+ private recordClaudeUsage(info: unknown, account: UsageAccount) {
+  if (this.usageAccounts.get('claude') !== account) return;
+  const window = claudeRateLimit(info);
+  if (!window) return;
+  const previous = account.usage === 'unknown' ? [] : account.usage.windows;
+  const prior = previous.find(item => item.label === window.label && item.resetsAt === window.resetsAt);
+  if (window.usedPercent === undefined && window.resetsAt !== undefined && prior?.usedPercent !== undefined) {
+   window.usedPercent = prior.usedPercent;
+  }
+  this.recordUsage('claude', account, {observedAt:now(),windows:[...previous.filter(item => item.label !== window.label),window]});
+ }
+ private async probeClaudeUsage(executable: string, account: UsageAccount, report: boolean) {
+  const cwd = await mkdtemp(join(tmpdir(), 'beni-claude-usage-'));
+  const rpc = new ClaudeRpc(executable);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let receivedReport = false;
+  try {
+   const {thread} = await rpc.request('thread/start', {
+    cwd, sandbox:'read-only', model:'haiku', builtinTools:false, ephemeral:true,
+   });
+   await new Promise<void>(resolve => {
+    timer = setTimeout(resolve, 15000);
+    rpc.onClose = resolve;
+    rpc.onEvent = (method, params) => {
+     if (report && method === 'account/usage/report' && this.usageAccounts.get('claude') === account) {
+      const windows = claudeUsageReport(params.report);
+      if (windows.length) {
+       this.recordUsage('claude', account, {observedAt:now(),windows});
+       receivedReport = true;
+      }
+     }
+     if (!report && method === 'account/rateLimits/updated') this.recordClaudeUsage(params, account);
+     if (method === 'turn/completed') resolve();
+    };
+    const request = report
+     ? rpc.request('thread/command/start', {threadId:thread.id, command:'usage'})
+     : rpc.request('turn/start', {threadId:thread.id, input:[{type:'text',text:'Reply only with OK.'}]});
+    void request.catch(() => resolve());
+   });
+  } finally {
+   clearTimeout(timer);
+   rpc.close();
+   await rm(cwd, {recursive:true,force:true});
+  }
+  return receivedReport;
+ }
+ async claudeStatus(refreshUsage = false) {
+  let identity: string | undefined;
+  const executable = this.claudeExecutable();
+  const status = await claudeStatus(executable, account => { identity = account; });
+  status.usage = this.usageForAccount('claude', identity);
+  const account = this.usageAccounts.get('claude');
+  if (refreshUsage && executable && account) {
+   const receivedReport = await this.probeClaudeUsage(executable, account, true).catch(() => false);
+   if (!receivedReport && this.usageAccounts.get('claude') === account) {
+    await this.probeClaudeUsage(executable, account, false).catch(() => {});
+   }
+   status.usage = this.usageAccounts.get('claude') === account ? account.usage : 'unknown';
+  }
+  return status;
+ }
+ async status(refreshUsage = false): Promise<Status> {
+  const executable = this.executable();
+  const status:Status = {installed:!!executable,path:executable,version:null,checkedAt:now(),auth:'unknown',models:null,usage:'unknown'};
+  if (!executable) {
+   this.usageForAccount('codex', undefined);
+   return status;
+  }
+  status.version = await new Promise(resolve=>execFile(executable,['--version'],{timeout:5000,maxBuffer:4096},(error,stdout)=>{const match=!error&&stdout.match(/^codex-cli\s+([\w.+-]+)/m);resolve(match?match[1]:null)}));
+  const rpc = new Rpc(executable);
+  let usageAccount: UsageAccount | undefined;
+  try {
+   await rpc.init();
+   const {account} = await rpc.request('account/read',{refreshToken:false});
+   status.auth = account?.type==='chatgpt'?'chatgpt':account?.type==='apiKey'?'apiKey':account?'other':'none';
+   const identity = status.auth === 'chatgpt' && typeof account.email === 'string' && account.email
+    ? createHash('sha256').update(account.email).digest('hex') : undefined;
+   this.usageForAccount('codex', identity);
+   usageAccount = this.usageAccounts.get('codex');
+   if (refreshUsage && status.auth === 'chatgpt') {
+    const limits = await rpc.request('account/rateLimits/read', undefined, 5000).catch(() => undefined);
+    const windows = codexRateLimits(limits);
+    if (windows.length && this.usageAccounts.get('codex') === usageAccount) {
+     status.usage = {observedAt:now(),windows};
+     if (usageAccount) this.recordUsage('codex', usageAccount, status.usage);
+    }
+   }
+   let cursor:string|null = null;
+   const models:{id:string;name:string}[] = [];
+   do {
+    const page = await rpc.request('model/list',{cursor});
+    for (const m of page.data??[]) if (typeof m.model==='string') models.push({id:m.model,name:typeof m.displayName==='string'?m.displayName:m.model});
+    cursor=page.nextCursor??null;
+   } while(cursor);
+   status.models=models;
+  } catch {
+   if (status.auth === 'unknown') this.usageForAccount('codex', undefined);
+  } finally { rpc.close(); }
+  if (usageAccount) status.usage = this.usageAccounts.get('codex') === usageAccount ? usageAccount.usage : 'unknown';
+  return status;
+ }
  private async pendingTaskEvents(p:string,t:string|null,phase:TaskPhase|null){
   if(p===INSTRUCTIONS_CHAT_ID||!this.taskEvents)return undefined;
   this.taskEvents.capture(p,t);
@@ -560,6 +703,8 @@ export class ChatService {
  }
  private async run(k:string,c:Conversation,sendId:string,content:string,model:string|null,cwd:string,workingDirectory:string,active:{rpc:ChatRpc;threadId:string|null;turnId:string|null},instructions:string|(()=>string),writable:boolean,phase:TaskPhase|null=null,history?:{after:number;through:number;reset?:boolean},referenceHistory?:string,instructionFocus?:InstructionKey,focusNotice?:string,focusHash?:string,phaseContext?:{text:string;hash:string},workflow?:WorkflowRun,job?:WorkflowJob){
   let dispatched=false,rejectedStart=false,finished=false,claudePending=c.sessionProvider==='claude',closedWhilePending=false;
+  const provider = c.sessionProvider ?? 'codex';
+  const usageAccount = this.usageAccounts.get(provider);
   const previousSession={threadId:active.threadId,sessionId:c.sessionId};
   let releaseEvents=()=>{};
   // Claude は OS の起動ではなく CLI の受理を確認してからセッションとイベントを保存する。
@@ -687,7 +832,19 @@ export class ChatService {
   };
   const toolTypes=new Set(['commandExecution','fileChange','mcpToolCall','dynamicToolCall','functionCallOutput','webSearch','imageView','imageGeneration']);
   const toolData=(item:any)=>{const name=item.type==='commandExecution'?'command':typeof item.tool==='string'?item.tool:typeof item.name==='string'?item.name:item.type;const input=item.command??item.arguments??item.changes??null;const output=item.aggregatedOutput??item.contentItems??item.output??item.result??item.error??null;const encode=(v:unknown)=>typeof v==='string'?v:JSON.stringify(v);return {name,input:encode(input),output:encode(output)}};
-  active.rpc.onEvent=(method,params)=>{if(claudePending&&method==='turn/started'&&params?.threadId===active.threadId&&typeof params.turn?.id==='string')active.turnId=params.turn.id;eventQueue=eventQueue.then(async()=>{if(finished||params?.threadId!==active.threadId)return;if(method==='turn/started'&&typeof params.turn?.id==='string')active.turnId=params.turn.id;if(params.turnId&&active.turnId&&params.turnId!==active.turnId)return;
+  active.rpc.onEvent=(method,params)=>{
+   if(method==='account/rateLimits/updated'){
+    if (!finished && usageAccount && this.usageAccounts.get(provider) === usageAccount) {
+     if (provider === 'claude') {
+      this.recordClaudeUsage(params, usageAccount);
+     } else {
+      const windows = codexRateLimits(params);
+      if (windows.length) this.recordUsage('codex', usageAccount, {observedAt:now(),windows});
+     }
+    }
+    return;
+   }
+   if(claudePending&&method==='turn/started'&&params?.threadId===active.threadId&&typeof params.turn?.id==='string')active.turnId=params.turn.id;eventQueue=eventQueue.then(async()=>{if(finished||params?.threadId!==active.threadId)return;if(method==='turn/started'&&typeof params.turn?.id==='string')active.turnId=params.turn.id;if(params.turnId&&active.turnId&&params.turnId!==active.turnId)return;
    if(method==='item/agentMessage/delta'&&typeof params.delta==='string'){
     const existing=(await this.load(c.projectId,c.taskId,c.phase,c.workflowJobId)).packs.find(p=>p.packId===textPackId);if((existing?.content.length??0)+params.delta.length>1048576){await finish('failed');return}
     await update((ms,current,events)=>{const a=ms.find(m=>m.role==='assistant');if(!a)return;let pack=current.packs.find(p=>p.packId===textPackId&&p.state==='streaming');if(!pack){pack=this.newPack(current,a);textPackId=pack.packId}if(typeof params.itemId==='string')itemPacks.set(params.itemId,pack.packId);pack.content+=params.delta;a.content+=params.delta;a.status='streaming';a.updatedAt=now();for(let start=0;start<params.delta.length;){let end=Math.min(start+4096,params.delta.length);const last=params.delta.charCodeAt(end-1);if(end<params.delta.length&&last>=0xd800&&last<=0xdbff)end--;const delta=params.delta.slice(start,end);events.push({name:'chat.pack.delta',data:{packId:pack.packId,delta,header:packHeader(pack)}});start=end}})

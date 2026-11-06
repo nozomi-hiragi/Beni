@@ -13,11 +13,17 @@ afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 it('refreshes installation and login state without starting login', async () => {
   let calls = 0;
-  vi.stubGlobal('fetch', vi.fn((url: string) => {
+  vi.stubGlobal('fetch', vi.fn((url: string, init?: RequestInit) => {
     if (url === '/api/claude/status') return Promise.resolve(json({installed:false,auth:'none',models:[]}));
     expect(url).toBe('/api/codex/status');
     calls++;
-    return Promise.resolve(json(calls === 1 ? { installed: false, auth: 'unknown', models: null, usage: 'unknown' } : { installed: true, path: '/usr/bin/codex', version: '1.2.3', checkedAt: '2026-01-02T03:04:05Z', auth: 'none', models: null, usage: 'unknown' }));
+    if (calls === 1) {
+      expect(init?.method).toBeUndefined();
+      return Promise.resolve(json({ installed: false, auth: 'unknown', models: null, usage: 'unknown' }));
+    }
+    expect(init?.method).toBe('POST');
+    expect(init?.body).toBe('{}');
+    return Promise.resolve(json({ installed: true, path: '/usr/bin/codex', version: '1.2.3', checkedAt: '2026-01-02T03:04:05Z', auth: 'none', models: null, usage: {observedAt:'2026-01-02T03:04:05Z',windows:[{label:'週間',usedPercent:25}]} }));
   }));
   render(() => <CodexSettings />);
   expect(await screen.findByText('Codex CLI をインストールしてください')).toBeTruthy();
@@ -26,6 +32,7 @@ it('refreshes installation and login state without starting login', async () => 
   expect(await screen.findByText('Codex にログインしてください')).toBeTruthy();
   expect(screen.getByText('/usr/bin/codex')).toBeTruthy();
   expect(screen.getByText('1.2.3')).toBeTruthy();
+  expect(screen.getByText('残り 75%')).toBeTruthy();
   expect(calls).toBe(2);
 });
 

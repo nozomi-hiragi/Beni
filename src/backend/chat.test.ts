@@ -7,6 +7,94 @@ import {ChatService} from './chat';
 const projectFolder=(root:string,id:string)=>{const folder=join(root,id);mkdirSync(folder,{recursive:true});return folder};
 const fake=join(import.meta.dir,'test/fake-codex.ts');
 async function waitFor(fn:()=>Promise<boolean>){for(let i=0;i<100;i++){if(await fn())return;await Bun.sleep(20)}throw Error('timed out')}
+test('records subscription limits received during ordinary chats outside conversation history', async () => {
+ const root = await mkdtemp(join(tmpdir(), 'beni-rate-limits-'));
+ const projectId = '019a0000-0000-7000-8000-000000000001';
+ const createChat = () => {
+  const service = new ChatService(p => projectFolder(root, p), () => fake, () => join(import.meta.dir, 'test/fake-claude.ts'));
+  service.setUsageDirectory(root);
+  return service;
+ };
+ const chat = createChat();
+ try {
+  process.env.FAKE_CODEX_RATE_LIMIT = '25';
+  process.env.FAKE_CLAUDE_RATE_LIMIT = '0.4';
+  expect((await chat.status()).usage).toBe('unknown');
+  await chat.send(projectId, null, 'hello', 'model-a', root);
+  await waitFor(async () => (await chat.get(projectId, null)).messages.at(-1)?.status === 'completed');
+  const codexUsage = (await chat.status()).usage;
+  expect(codexUsage).toMatchObject({windows:[{label:'5時間枠', usedPercent:25, resetsAt:2_000_000_000}]});
+  expect((await chat.claudeStatus()).usage).toBe('unknown');
+  await chat.send(projectId, null, 'hello', 'haiku', root, undefined, null, false, 'claude');
+  await waitFor(async () => (await chat.get(projectId, null)).messages.at(-1)?.status === 'completed');
+  const claudeUsage = (await chat.claudeStatus()).usage;
+  expect(claudeUsage).toMatchObject({windows:[{label:'7日枠', usedPercent:40, resetsAt:2_000_000_100}]});
+  expect(JSON.stringify(await chat.get(projectId, null))).not.toContain('resetsAt');
+  const restarted = createChat();
+  expect((await restarted.status()).usage).toEqual(codexUsage);
+  expect((await restarted.claudeStatus()).usage).toEqual(claudeUsage);
+  process.env.FAKE_CODEX_EMAIL = 'other@example.test';
+  expect((await restarted.status()).usage).toBe('unknown');
+  process.env.FAKE_CLAUDE_AUTH = 'none';
+  expect((await restarted.claudeStatus()).usage).toBe('unknown');
+ } finally {
+  delete process.env.FAKE_CODEX_RATE_LIMIT;
+  delete process.env.FAKE_CODEX_EMAIL;
+  delete process.env.FAKE_CLAUDE_RATE_LIMIT;
+  delete process.env.FAKE_CLAUDE_AUTH;
+  await rm(root, {recursive:true, force:true});
+ }
+});
+test('refreshes both subscription limits before any chat and shares concurrent probes', async () => {
+ const root = await mkdtemp(join(tmpdir(), 'beni-rate-limit-refresh-'));
+ const createChat = () => {
+  const service = new ChatService(() => { throw Error('No project should be accessed'); }, () => fake, () => join(import.meta.dir, 'test/fake-claude.ts'));
+  service.setUsageDirectory(root);
+  return service;
+ };
+ const chat = createChat();
+ try {
+  process.env.FAKE_CODEX_RATE_LIMIT = '23';
+  process.env.FAKE_CLAUDE_RATE_LIMIT = '0.37';
+  expect((await chat.status()).usage).toBe('unknown');
+  expect((await chat.claudeStatus()).usage).toBe('unknown');
+  const claude = chat.refreshUsage('claude');
+  expect(chat.refreshUsage('claude')).toBe(claude);
+  const [codexResult, claudeResult] = await Promise.all([chat.refreshUsage('codex'), claude]);
+  expect(codexResult.usage).toMatchObject({windows:[{label:'5時間枠',usedPercent:23}]});
+  expect(claudeResult.usage).toMatchObject({windows:[{label:'7日枠',usedPercent:37}]});
+  const restarted = createChat();
+  expect((await restarted.status()).usage).toEqual(codexResult.usage);
+  expect((await restarted.claudeStatus()).usage).toEqual(claudeResult.usage);
+ } finally {
+  delete process.env.FAKE_CODEX_RATE_LIMIT;
+  delete process.env.FAKE_CLAUDE_RATE_LIMIT;
+  await rm(root, {recursive:true,force:true});
+ }
+});
+test('Claude refresh prefers the structured usage report and retains the percentage for the same window', async () => {
+ const root = await mkdtemp(join(tmpdir(), 'beni-claude-usage-report-'));
+ const projectId = '019a0000-0000-7000-8000-000000000001';
+ const chat = new ChatService(p => projectFolder(root, p), () => fake, () => join(import.meta.dir, 'test/fake-claude.ts'));
+ try {
+  process.env.FAKE_CLAUDE_USAGE_REPORT = '1';
+  process.env.FAKE_CLAUDE_RATE_LIMIT = 'missing';
+  expect((await chat.refreshUsage('claude')).usage).toMatchObject({windows:[
+   {label:'5時間枠',usedPercent:0},
+   {label:'7日枠',usedPercent:45,resetsAt:2_000_000_100},
+  ]});
+  await chat.send(projectId, null, 'hello', 'haiku', root, undefined, null, false, 'claude');
+  await waitFor(async () => (await chat.get(projectId, null)).messages.at(-1)?.status === 'completed');
+  expect((await chat.claudeStatus()).usage).toMatchObject({windows:[
+   {label:'5時間枠',usedPercent:0},
+   {label:'7日枠',usedPercent:45,resetsAt:2_000_000_100,status:'allowed'},
+  ]});
+ } finally {
+  delete process.env.FAKE_CLAUDE_USAGE_REPORT;
+  delete process.env.FAKE_CLAUDE_RATE_LIMIT;
+  await rm(root, {recursive:true,force:true});
+ }
+});
 test('streams, persists, resumes, isolates scopes, and interrupts',async()=>{
  const dir=await mkdtemp(join(tmpdir(),'beni-chat-'));try{
   const chat=new ChatService(p=>projectFolder(dir,p),()=>fake);const status=await chat.status();expect(status).toMatchObject({installed:true,path:fake,version:'1.2.3',auth:'chatgpt',models:[{id:'model-a',name:'Model A'}],usage:'unknown'});expect(Number.isNaN(Date.parse(status.checkedAt))).toBe(false);
