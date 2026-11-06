@@ -90,9 +90,11 @@ export function retrospectiveDocument(path:string) {
  try {writeFileSync(file,'# 反省会\n\n## 未達・意図との差\n\n## 原因\n\n## 次回への改善\n',{flag:'wx',mode:0o600})} catch(error:any){if(error.code!=='EEXIST')throw error}
  regularFile(file);
 }
-export function projectKnowledge(folder:string) {
+export function projectKnowledge(folder:string, create=true) {
  const root=realpathSync(folder), path=join(directory(join(root,'.beni')),'knowledge.md');
- try {writeFileSync(path,'# プロジェクトの学び\n',{flag:'wx',mode:0o600})}catch(error:any){if(error.code!=='EEXIST')throw error}
- if(regularFile(path).size>1024*1024)throw Error('Knowledge too large');
+ if(create)try {writeFileSync(path,'# プロジェクトの学び\n',{flag:'wx',mode:0o600})}catch(error:any){if(error.code!=='EEXIST')throw error}
+ try {
+  if(regularFile(path).size>1024*1024)throw Error('Knowledge too large');
+ }catch(error:any){if(create||error.code!=='ENOENT')throw error}
  return path;
 }

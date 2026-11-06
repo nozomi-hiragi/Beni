@@ -97,8 +97,8 @@ UUIDv7は生成時刻を含むため、IDによって時刻順に並べやすい
 
 [データ設計の全体像](../README.md)
 
-## 反省会と完了状態
+## 反省会と終了の保存状態
 
-反省会のphaseは `retrospective`。初回到達時にタスクフォルダの `retrospective.md` を用意し、既存本文は上書きしない。通常のタスク文書として変更履歴を保存する。タスクの完了は `status: completed`、再開後は `status: idle` とし、phaseは反省会のまま維持する。完了・再開で更新日時を更新する。
+反省会のphaseは `retrospective`。初回到達時にタスクフォルダの `retrospective.md` を用意し、既存本文は上書きしない。通常のタスク文書として変更履歴を保存する。「タスク完了」を押して開始した終了処理は `phase: finalization`、実行中は `status: idle` とする。処理の終端で `status: completed` にする。再開すると `phase: retrospective`、`status: idle` に戻る。移行前に完了した `retrospective / completed` のタスクも読み取れる。完了・再開で更新日時を更新する。
 
-プロジェクト共通の `.beni/knowledge.md` は反省会で蓄積し、次のタスクに引き継ぐ。タスクの文書変更イベントには含めず、送信時に最新版を参照する。
+プロジェクト共通の `.beni/knowledge.md` は終了フェーズで更新し、次のタスクに引き継ぐ。タスクの文書変更イベントには含めず、送信時に最新版を参照する。

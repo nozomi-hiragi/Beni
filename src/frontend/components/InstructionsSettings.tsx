@@ -4,9 +4,10 @@ import { communication } from '../communication';
 import MarkdownPreview from './MarkdownPreview';
 import ChatPanel from './ChatPanel';
 import ResizeHandle from './ResizeHandle';
+import { phaseLabels } from './PhaseIndicator';
+import { taskPhases as phases, type TaskPhase } from '../../shared/task-phase';
 
-const phases = ['requirements', 'documents', 'implementation', 'execution', 'retrospective'];
-const labels: Record<string, string> = {editor:'編集相談用プロンプト', common:'全共通', requirements:'要件定義', documents:'仕様整理', implementation:'実装手順', execution:'実装中', retrospective:'反省会'};
+const labels: Record<string, string> = {editor:'編集相談用プロンプト', common:'全共通', ...phaseLabels};
 const variables = [
  { name: 'project_directory', description: 'プロジェクトのディレクトリ' },
  { name: 'working_directory', description: '作業ディレクトリ' },
@@ -16,6 +17,7 @@ const variables = [
  { name: 'knowledge_path', description: 'ナレッジのパス' },
  { name: 'knowledge_content', description: 'ナレッジの本文' },
  { name: 'execution_chat_path', description: '実装中チャットのパス' },
+ { name: 'retrospective_chat_path', description: '反省会チャットのパス' },
 ];
 const variableLabels = Object.fromEntries(variables.map(variable => [variable.name, variable.description]));
 const embeddedTools = [
@@ -29,7 +31,7 @@ const embeddedTools = [
 export default function InstructionsSettings() {
  const [instructions, setInstructions] = createSignal<{key:string;content:string}[]>([]);
  const [instructionFocus, setInstructionFocus] = createSignal<string|null>(null);
- const [selected, setSelected] = createSignal('requirements');
+ const [selected, setSelected] = createSignal<TaskPhase>('requirements');
  const [leftRatio, setLeftRatio] = createSignal(50);
  const [selectedGroup, setSelectedGroup] = createSignal('instructions');
  const [chatRatio, setChatRatio] = createSignal(65);

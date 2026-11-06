@@ -266,7 +266,7 @@ it('利用不可の保存モデルを表示して送信を止め、有効モデ�
  expect(screen.queryByRole('option',{name:'⚠️ Codex/Saved model'})).toBeNull();
 });
 
-it('実装担当モデルをチャットと独立して記憶し、実装から反省会・完了・再開へ進む', async () => {
+it('実装担当モデルをチャットと独立して記憶し、実装から反省会・終了・再開へ進む', async () => {
   const projectId = '019a0000-0000-7000-8000-000000000001', taskId = '019a0000-0000-7100-8000-000000000089';
   let task = {id: taskId, projectId, name: 'サンプル', phase: 'requirements', status: 'idle'};
   const posted: {path: string; body: any}[] = [];
@@ -275,15 +275,18 @@ it('実装担当モデルをチャットと独立して記憶し、実装から�
     if (path === `/api/tasks/${taskId}`) return json({task, documents: [], canStart: true});
     if (path === '/api/codex/status') return json({installed: true, auth: 'chatgpt', models: [{id:'c', name:'Codex model'}]});
     if (path === '/api/claude/status') return json({installed: true, auth: 'claude', models: [{id:'a', name:'Claude model'}]});
-    if (path.startsWith('/api/chat?')) return json({id:'conversation', messages: []});
-    const pack = packResponse(path, []); if (pack) return pack;
+    if (path.startsWith('/api/chat?') || path.startsWith('/api/chat/packs')) {
+      const phase = new URL(path, 'http://localhost').searchParams.get('phase');
+      const messages = phase ? [{id:phase, role:'assistant', content:phase + ' の会話', status:phase === 'finalization' && task.status === 'idle' ? 'streaming' : 'completed'}] : [];
+      return packResponse(path, messages) ?? json({id:phase ?? 'conversation', messages});
+    }
     if (path.startsWith(`/api/tasks/${taskId}/`)) {
       const body = JSON.parse(String(init?.body)); posted.push({path, body});
       if (path.endsWith('/start')) task = {...task, phase: 'execution', status: 'running'};
       if (path.endsWith('/stop')) task = {...task, phase: 'implementation', status: 'idle'};
       if (path.endsWith('/phase')) task = {...task, phase: body.target};
-      if (path.endsWith('/complete')) task = {...task, status:'completed'};
-      if (path.endsWith('/reopen')) task = {...task, status:'idle'};
+      if (path.endsWith('/complete')) task = {...task, phase:'finalization', status:'idle'};
+      if (path.endsWith('/reopen')) task = {...task, phase:'retrospective', status:'idle'};
       return json(task);
     }
     return json({sessions: []});
@@ -310,12 +313,32 @@ it('実装担当モデルをチャットと独立して記憶し、実装から�
   await screen.findByRole('textbox', {name:'希望や回答を入力'});
   expect((screen.getByRole('button', {name:'要件定義'}) as HTMLButtonElement).disabled).toBe(true);
   fireEvent.click(screen.getByRole('button', {name:'タスク完了'}));
-  await screen.findByRole('button', {name:'再開'});
+  await screen.findByText('finalization の会話');
   expect(posted.at(-1)?.body).toEqual({projectId, phase:'retrospective'});
+  expect(screen.getByRole('button', {name:'終了'}).getAttribute('aria-current')).toBe('step');
+  expect(screen.queryByRole('button', {name:'再開'})).toBeNull();
+  expect(screen.queryByRole('button', {name:'タスク完了'})).toBeNull();
+  expect(screen.queryByRole('button', {name:'停止'})).toBeNull();
+  expect(screen.queryByRole('button', {name:'中断'})).toBeNull();
+  expect(screen.queryByRole('combobox', {name:'モデル'})).toBeNull();
+  expect(screen.queryByRole('combobox', {name:'実装担当モデル'})).toBeNull();
+  fireEvent.click(screen.getByRole('button', {name:'実装中'}));
+  await screen.findByText('execution の会話');
+  fireEvent.click(screen.getByRole('button', {name:'反省会'}));
+  await screen.findByText('retrospective の会話');
   expect(screen.queryByRole('textbox', {name:'希望や回答を入力'})).toBeNull();
+  fireEvent.click(screen.getByRole('button', {name:'終了'}));
+  await screen.findByText('finalization の会話');
+
+  const socket = FakeWebSocket.instances.find(item => !item.closed)!;
+  task = {...task, status:'completed'};
+  socket.event('task-events', {name:'task.events.changed', data:{lastEventId:1}});
+  socket.change('chat', taskId);
   await waitFor(() => expect((screen.getByRole('button', {name:'再開'}) as HTMLButtonElement).disabled).toBe(false));
   fireEvent.click(screen.getByRole('button', {name:'再開'}));
   await screen.findByRole('textbox', {name:'希望や回答を入力'});
+  expect(posted.at(-1)?.body).toEqual({projectId, phase:'finalization'});
+  expect(screen.getByRole('button', {name:'反省会'}).getAttribute('aria-current')).toBe('step');
   second.unmount(); task = {...task, phase:'requirements'};
   render(() => <Workspace taskId={taskId} onHome={() => {}} />);
   await waitFor(() => expect((screen.getByRole('combobox', {name:'実装担当モデル'}) as HTMLSelectElement).value).toBe('claude:a'));

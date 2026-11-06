@@ -119,6 +119,31 @@ test('固定上限と絞り込み前の走査カーソルで空ページも進�
   expect(() => projectEvents(root, {after: 2, through: 1})).toThrow('Invalid event cursor');
 });
 
+test('モデル用ページは対象外の操作とタスクを飛ばし、最終ページで固定上限まで進める', () => {
+  const {root, id} = fixture();
+  const other = generateId('task');
+  for (let index = 0; index < 101; index++) appendProjectEvent(root, {type: 'tool.started', taskId: id});
+  appendProjectEvent(root, {type: 'task.created', taskId: other});
+  const created = appendProjectEvent(root, {type: 'task.created', taskId: id});
+  appendProjectEvent(root, {type: 'task.completed', taskId: other});
+  const completed = appendProjectEvent(root, {type: 'task.completed', taskId: id});
+  const tail = appendProjectEvent(root, {type: 'tool.finished', taskId: id});
+  const options = {taskId: id, types: ['task.created', 'task.completed'], limit: 1};
+  const audit = projectEvents(root, options);
+  expect(audit).toMatchObject({events: [], nextCursor: 1, hasMore: true});
+  const first = projectEvents(root, {...options, modelPage: true});
+  expect(first.events.map(event => event.id)).toEqual([created.id]);
+  expect(first).toMatchObject({nextCursor: created.id, through: tail.id, hasMore: true});
+  appendProjectEvent(root, {type: 'task.completed', taskId: id});
+  const last = projectEvents(root, {...options, modelPage: true, after: first.nextCursor, through: first.through});
+  expect(last.events.map(event => event.id)).toEqual([completed.id]);
+  expect(last).toMatchObject({nextCursor: tail.id, hasMore: false});
+  expect(projectEvents(root, {...options, modelPage: true, after: completed.id, through: first.through})).toMatchObject({
+    events: [], nextCursor: tail.id, hasMore: false,
+  });
+  expect(projectEvents(root, {modelPage: true, types: [], limit: 1}).events.map(event => event.type)).toEqual(['tool.started']);
+});
+
 test('10変更ごとにキャッシュし、古い間隔を倍にして間引いても全版を復元できる', () => {
   const {root, id, file, path} = fixture();
   const ids: number[] = [];

@@ -4,6 +4,7 @@ import { Database } from 'bun:sqlite';
 import { cpSync, linkSync, symlinkSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, readdirSync, renameSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { defaultInstructions } from '../instructions';
 import { generateId, validProjectId, validTaskId } from '../../shared/ids';
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'beni-store-'));
@@ -432,6 +433,29 @@ test('task operations emit create rename phase complete and reopen events once',
   } finally { store.close(); rmSync(f.root, {recursive: true, force: true}); }
 });
 
+test('終了済みタスクの再開時はフェーズと再開イベントをまとめて記録する', () => {
+  const f = fixture(), store = new Store(f.path);
+  try {
+    const p = store.createProject('Demo', f.folder), task = store.createTask(p.id, 'Task');
+    store.selectTaskPhase(p.id, task.id, 'requirements', 'retrospective');
+    store.startTaskFinalization(p.id, task.id);
+    store.setTaskCompleted(p.id, task.id, true, 'finalization');
+    const completed = store.task(task.id);
+    const before = store.taskEvents(p.id, task.id);
+    const db = new Database(join(f.folder, '.beni', 'events.sqlite'));
+    try {
+      db.exec("CREATE TRIGGER fail_reopen BEFORE INSERT ON events WHEN NEW.type='task.reopened' BEGIN SELECT RAISE(ABORT, 'simulated reopen failure'); END");
+      expect(() => store.setTaskCompleted(p.id, task.id, false, 'finalization')).toThrow('simulated reopen failure');
+      expect(store.task(task.id)).toEqual(completed);
+      expect(store.taskEvents(p.id, task.id)).toEqual(before);
+      db.exec('DROP TRIGGER fail_reopen');
+    } finally { db.close(); }
+    expect(store.setTaskCompleted(p.id, task.id, false, 'finalization')).toMatchObject({phase: 'retrospective', status: 'idle'});
+    const reopened = store.taskEvents(p.id, task.id, before.through).events;
+    expect(reopened.map(event => event.type)).toEqual(['phase.changed', 'task.reopened']);
+  } finally { store.close(); rmSync(f.root, {recursive: true, force: true}); }
+});
+
 test('task deletion refuses lost history and rolls back its deletion event on filesystem failure', async () => {
   const f = fixture(), store = new Store(f.path), fs = await import('node:fs'), original = fs.renameSync;
   let fault: ReturnType<typeof spyOn> | undefined;
@@ -495,17 +519,39 @@ test('instructions seed missing keys and preserve saved templates across restart
  const f=fixture();
  try {
   let store=new Store(f.path);
-  expect(store.instructions().map(item=>item.key)).toEqual(['common','requirements','documents','implementation','execution','retrospective','editor']);
+  expect(store.instructions().map(item=>item.key)).toEqual(['common','requirements','documents','implementation','execution','retrospective','finalization','editor']);
   store.close();
   const db=new Database(f.path);
   db.query('UPDATE instructions SET content=? WHERE key=?').run('# Saved {{project_directory}}','common');
   db.query('DELETE FROM instructions WHERE key=?').run('documents'); db.close();
   store=new Store(f.path);
-  expect(store.instructions()).toHaveLength(7);
+  expect(store.instructions()).toHaveLength(8);
   expect(store.instructions()[0]!.content).toBe('# Saved {{project_directory}}');
   expect(store.instructions().find(item=>item.key==='documents')!.content).toContain('仕様整理');
   store.close();
  } finally {rmSync(f.root,{recursive:true,force:true})}
+});
+
+test('既知の旧反省会本文だけを更新し、カスタム本文は保持する', () => {
+ const f=fixture();
+ try {
+  const current=defaultInstructions.find(item=>item.key==='retrospective')!.content;
+  const legacy=current
+   .replace('準備・実装では、ここに添付されたプロジェクトナレッジを参照する。保存先: {{knowledge_path}}。','準備・実装の前にプロジェクトナレッジ {{knowledge_path}} を読む。')
+   .replace('反省会、終了。変更は UI','反省会。変更は UI')
+   .replace('既存の文書と決定を保つ。','既存の文書と決定を保つ。\nナレッジには確認済みで再利用できる教訓だけを追記し、仮説を区別して既存内容を保つ。')
+   .replace('Beniから入力に添付される実装の発言と結果の抜粋を読み取り専用の文脈として確認する。不足する場合だけ関連するイベントや差分を追加で調べる。保存用 JSON や CLI ログを丸読みしない。','実装の会話と終端メッセージの状態を {{execution_chat_path}} から読み取り専用の文脈として確認する。');
+  const store=new Store(f.path);
+  store.close();
+  const db=new Database(f.path);
+  db.query('UPDATE instructions SET content=? WHERE key=?').run(legacy,'retrospective');
+  db.query('UPDATE instructions SET content=? WHERE key=?').run('# Custom prompt','execution');
+  db.close();
+  const migrated=new Store(f.path);
+  expect(migrated.instructions().find(item=>item.key==='retrospective')!.content).toBe(current);
+  expect(migrated.instructions().find(item=>item.key==='execution')!.content).toBe('# Custom prompt');
+  migrated.close();
+ } finally { rmSync(f.root,{recursive:true,force:true}); }
 });
 
 test('instruction replacement validates variables and never re-evaluates inserted content', async () => {

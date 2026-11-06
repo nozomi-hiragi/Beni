@@ -200,6 +200,93 @@ test('旧タスク会話は移行せず、フェーズ別会話を独立して�
  }finally{await rm(root,{recursive:true,force:true})}
 });
 
+test('終了はプロジェクト内で直列化し、受付前の失敗では前回の会話を保つ',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'beni-finalization-chat-'));
+ const p='019a0000-0000-7000-8000-000000000001',t='019a0000-0000-7100-8000-000000000001',other='019a0000-0000-7100-8000-000000000002';
+ const {taskDocuments}=await import('./documents');
+ const documents=taskDocuments(root,t,{requirements:'# 要件\n'});
+ const otherDocuments=taskDocuments(root,other,{requirements:'# 要件\n'});
+ let executable:string|null=fake,finished=0,rollbacks=0;
+ const chat=new ChatService(()=>root,()=>executable);
+ chat.setFinalizationFinished(()=>{finished++});
+ try{
+  const started=chat.startFinalization(p,t,()=>true,()=>{rollbacks++},root,documents);
+  await expect(chat.startFinalization(p,other,()=>true,()=>{},root,otherDocuments)).rejects.toThrow('busy');
+  expect(await started).toBe(true);
+  await waitFor(async()=>finished===1);
+  const first=await chat.get(p,t,'finalization');
+  expect(first.messages).toHaveLength(2);
+  expect(await Bun.file(join(root,'.beni','knowledge.md')).exists()).toBe(false);
+
+  executable=null;
+  await expect(chat.startFinalization(p,t,()=>true,()=>{rollbacks++},root,documents)).rejects.toThrow('unavailable');
+  expect(rollbacks).toBe(1);
+  expect(await chat.get(p,t,'finalization')).toEqual(first);
+
+  executable=fake;
+  await chat.startFinalization(p,t,()=>true,()=>{rollbacks++},root,documents);
+  await waitFor(async()=>finished===2);
+  const second=await chat.get(p,t,'finalization');
+  expect(second.id).not.toBe(first.id);
+  expect(second.messages).toHaveLength(2);
+  expect(JSON.parse(await readFile(join(root,'.beni','chat',t,'history',`${first.id}.json`),'utf8'))).toEqual(first);
+ }finally{await rm(root,{recursive:true,force:true})}
+});
+
+test('大きなツール出力を省略して完了し、実装と反省会の発言だけを次のフェーズに渡す',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'beni-phase-reference-'));
+ const p='019a0000-0000-7000-8000-000000000001',t='019a0000-0000-7100-8000-000000000001';
+ const log=join(root,'rpc.jsonl'),chat=new ChatService(()=>root,()=>fake),records:any[]=[];
+ const {taskDocuments}=await import('./documents');
+ const documents=taskDocuments(root,t,{requirements:'# 要件\n'});
+ const waitForPhase=async(phase:'execution'|'retrospective'|'finalization')=>waitFor(async()=>(await chat.get(p,t,phase)).messages.at(-1)?.status==='completed');
+ chat.setTaskEvents({capture:()=>{},events:()=>({events:[],lastEventId:records.length,through:records.length,hasMore:false}),append:(_p,input)=>records.push(input)});
+ process.env.FAKE_CODEX_LOG=log;
+ try{
+  await chat.send(p,t,'large tools',null,root,documents,'execution');
+  await waitForPhase('execution');
+  const execution=await chat.get(p,t,'execution'),pack=execution.packs.find(pack=>pack.kind==='tool')!;
+  expect(pack.status).toBe('completed');
+  expect(pack.tool?.input).toContain('省略');
+  expect(pack.tool?.output).toContain('省略');
+  expect(pack.tool?.output.endsWith('OUTPUT_TAIL')).toBe(true);
+  expect(Buffer.byteLength(JSON.stringify(pack))).toBeLessThanOrEqual(1024*1024);
+  expect(records.at(-1)?.details.result).toBe('completed');
+  expect(execution.messages.at(-1)?.content).toContain('After tool');
+  const executionFile=join(root,'.beni','chat',t,'execution.json');
+  execution.messages.at(-1)!.content='実装報告🧪"\\'.repeat(2_000)+'最終結論';
+  await writeFile(executionFile,JSON.stringify(execution));
+
+  await chat.send(p,t,'反省会の質問',null,root,documents,'retrospective');
+  await waitForPhase('retrospective');
+  await chat.send(p,t,'反省会の続き',null,root,documents,'retrospective');
+  await waitForPhase('retrospective');
+  execution.messages.at(-1)!.content='修正済みの実装報告';
+  await writeFile(executionFile,JSON.stringify(execution));
+  await chat.send(p,t,'更新された報告を確認',null,root,documents,'retrospective');
+  await waitForPhase('retrospective');
+  await chat.startFinalization(p,t,()=>true,()=>{},root,documents);
+  await waitForPhase('finalization');
+  const turns=(await readFile(log,'utf8')).trim().split('\n').map(line=>JSON.parse(line)).filter(row=>row.method==='turn/start');
+  const inputs=turns.map(row=>row.params.input.map((input:{text:string})=>input.text));
+  const excerpt=inputs[1].find((text:string)=>text.startsWith('実装の会話抜粋'));
+  expect(Buffer.byteLength(excerpt)).toBeLessThanOrEqual(16*1024);
+  expect(excerpt).not.toContain('\ufffd');
+  expect(excerpt).not.toContain('TOOL_OUTPUT_PRIVATE');
+  expect(JSON.parse(excerpt.split('\n')[1])).toMatchObject({omitted:true,messages:[{role:'assistant',status:'completed'}]});
+  expect(excerpt).toContain('最終結論');
+  expect(inputs[2].some((text:string)=>text.startsWith('実装の会話抜粋'))).toBe(false);
+  expect(inputs[3].find((text:string)=>text.startsWith('実装の会話抜粋'))).toContain('修正済みの実装報告');
+  const finalExcerpt=inputs[4].find((text:string)=>text.startsWith('反省会の会話抜粋'));
+  expect(JSON.parse(finalExcerpt.split('\n')[1])).toMatchObject({omitted:false,messages:[
+   {role:'user',status:'completed',content:'反省会の質問'},{role:'assistant',status:'completed',content:'Hello'},
+   {role:'user',status:'completed',content:'反省会の続き'},{role:'assistant',status:'completed',content:'Hello'},
+   {role:'user',status:'completed',content:'更新された報告を確認'},{role:'assistant',status:'completed',content:'Hello'}
+  ]});
+  expect(inputs[4].some((text:string)=>text.startsWith('Beni project event review range:'))).toBe(false);
+ }finally{delete process.env.FAKE_CODEX_LOG;await rm(root,{recursive:true,force:true})}
+});
+
 test('引継ぎは上限だけ渡し、ツールの確認完了で進め、未確認範囲を再送する',async()=>{
  const root=await mkdtemp(join(tmpdir(),'beni-phase-cursor-')),p='019a0000-0000-7000-8000-000000000001',t='019a0000-0000-7100-8000-000000000001',log=join(root,'rpc.jsonl');process.env.FAKE_CODEX_LOG=log;let tail=3;
  const chat=new ChatService(()=>root,()=>fake);chat.setTaskEvents({capture:()=>{},events:(_p,_t,after,through=tail,limit=100)=>{const next=Math.min(after+limit,through);return {events:next>after?[{id:next,type:'document.updated',path:'requirements.md',secret:'never-injected'}]:[],lastEventId:next,nextCursor:next,through,hasMore:next<through}}});
@@ -393,7 +480,17 @@ test('両接続先の埋め込みツールは同一プロジェクトだけを�
  for(const provider of ['codex','claude'] as const){
   const root=await mkdtemp(join(tmpdir(),'beni-embedded-')),p='019a0000-0000-7000-8000-000000000001',t='019a0000-0000-7100-8000-000000000001',other='019a0000-0000-7100-8000-000000000002';
   const chat=new ChatService(()=>root,()=>fake,()=>fakeClaude),lookups:any[]=[];
-  chat.setTaskEvents({capture:()=>{},events:(project,task,after,through=6,limit=100)=>{lookups.push([project,task,after,through]);const next=Math.min(after+limit,through);return {events:next>after?[{id:next,type:'document.updated',taskId:other}]:[],lastEventId:next,nextCursor:next,through,hasMore:next<through}},event:(project,id)=>{lookups.push([project,id]);return {id,taskId:other}},change:(_project,id)=>({eventId:id,patch:'recorded patch'}),version:(_project,path,id)=>({path,changeId:id,content:'recorded version'})});
+  chat.setTaskEvents({capture:()=>{},events:(project,task,after,through=6,limit=100,types)=>{
+   lookups.push([project,task,after,through,limit,types]);
+   const data=[
+    {id:1,type:'document.updated',taskId:t,path:'requirements.md',version:'latest',previousVersion:'previous',chatId:'hidden'},
+    {id:2,type:'tool.finished',taskId:t,details:{result:'completed'}},
+    {id:3,type:'tool.finished',taskId:other,details:{result:'completed'}}
+   ];
+   const matches=data.filter(event=>event.id>after&&event.id<=through&&(task===null||event.taskId===task)&&(!types||types.includes(event.type)));
+   const events=matches.slice(0,limit),hasMore=matches.length>limit,next=hasMore?events.at(-1)!.id:through;
+   return {events,lastEventId:next,nextCursor:next,through,hasMore};
+  },event:(project,id)=>{lookups.push([project,id]);return {id,taskId:other}},change:(_project,id)=>({eventId:id,patch:'recorded patch'}),version:(_project,path,id)=>({path,changeId:id,content:'recorded version'})});
   const calls=[
    {tool:'list_events',arguments:{after:0,through:6,limit:1,task_id:other,kind:'tool.finished'}},
    {tool:'get_event',arguments:{event_id:2}},
@@ -401,6 +498,9 @@ test('両接続先の埋め込みツールは同一プロジェクトだけを�
    {tool:'get_file_version',arguments:{path:`.beni/tasks/${other}/requirements.md`,change_id:3}},
    {tool:'acknowledge_events',arguments:{through:6}},
    {tool:'acknowledge_events',arguments:{through:4}},
+   {tool:'list_events',arguments:{}},
+   {tool:'list_events',arguments:{limit:101}},
+   {tool:'list_events',arguments:{kind:'tool.*'}},
    {tool:'unknown_tool',arguments:{}},
    {tool:'get_event',arguments:{event_id:2,project_id:'another-project'}},
    {tool:'get_event',arguments:{event_id:-1}},
@@ -412,8 +512,15 @@ test('両接続先の埋め込みツールは同一プロジェクトだけを�
   try{
    await chat.send(p,t,'event tools',null,root,undefined,'requirements',false,provider);await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='completed');
    const c=await chat.get(p,t),results=JSON.parse(c.messages.at(-1)!.content).map((result:any)=>({success:provider==='codex'?result.success:!result.isError,value:JSON.parse(provider==='codex'?result.contentItems[0].text:result.content[0].text)}));
-   expect(c.lastEventId).toBe(6);expect(results.slice(0,6).every((result:any)=>result.success)).toBe(true);expect(results.slice(6).every((result:any)=>!result.success)).toBe(true);
-   expect(results[0].value).toMatchObject({events:[],nextCursor:1,hasMore:true});expect(results[1].value.taskId).toBe(other);expect(results[3].value.content).toBe('recorded version');expect(results[5].value.through).toBe(6);expect(lookups.every(value=>value[0]===p)).toBe(true);
+   expect(c.lastEventId).toBe(6);expect(results.slice(0,7).every((result:any)=>result.success)).toBe(true);expect(results.slice(7).every((result:any)=>!result.success)).toBe(true);
+   expect(results[0].value).toMatchObject({events:[{id:3,type:'tool.finished',taskId:other}],nextCursor:6,hasMore:false});
+   expect(results[1].value.taskId).toBe(other);expect(results[3].value.content).toBe('recorded version');expect(results[5].value.through).toBe(6);
+   expect(results[6].value.events).toEqual([{id:1,type:'document.updated',taskId:t,path:'requirements.md',version:'latest',previousVersion:'previous'}]);
+   expect(results[7].value.error).toContain('1〜100');
+   expect(results[8].value.error).toContain('tool.finished');
+   expect(lookups).toContainEqual([p,other,0,6,1,['tool.finished']]);
+   expect(lookups.some(value=>value[1]===t&&value[4]===20&&value[5].includes('document.updated'))).toBe(true);
+   expect(lookups.every(value=>value[0]===p)).toBe(true);
    delete process.env.FAKE_EMBEDDED_CALLS;
    await chat.send(p,null,'event tools',null,root,undefined,null,false,provider);await waitFor(async()=>(await chat.get(p,null)).messages.at(-1)?.status==='completed');expect((await chat.get(p,null)).lastEventId).toBe(6);
   }finally{delete process.env.FAKE_EMBEDDED_CALLS;await rm(root,{recursive:true,force:true})}
@@ -621,7 +728,7 @@ test('instruction read tools return latest raw data and strictly validate argume
    const records=(await readFile(log,'utf8')).trim().split('\n').map(line=>JSON.parse(line));
    const results=provider==='codex'?records.filter(item=>item.id?.startsWith?.('embedded:')).map(item=>item.result):JSON.parse((await chat.get('instructions',null)).messages.at(-1)!.content).map((item:any)=>({success:!item.isError,contentItems:item.content}));
    expect(results.map((item:any)=>item.success)).toEqual([true,true,false,false,false,false,false,false,false]);
-   const list=JSON.parse(results[0].contentItems[0].text);expect(list.instructions).toHaveLength(7);expect(list.instructions.every((item:any)=>Object.keys(item).sort().join(',')==='key,name')).toBe(true);
+   const list=JSON.parse(results[0].contentItems[0].text);expect(list.instructions).toHaveLength(8);expect(list.instructions.every((item:any)=>Object.keys(item).sort().join(',')==='key,name')).toBe(true);
    expect(JSON.parse(results[1].contentItems[0].text)).toEqual({key:'editor',content:'# pending raw {{custom}}'});
    const system=provider==='codex'?records.find(item=>item.method==='thread/start').params.developerInstructions:records[0].args[records[0].args.indexOf('--append-system-prompt')+1];
    expect(system).toContain(editor.content);expect(system).not.toContain('# pending raw');expect(system).not.toContain(store.instructions()[1]!.content);
@@ -835,7 +942,7 @@ test('保存済の確認位置が現在の履歴上限を超えていたら0に�
    expect(after.lastEventId).toBe(6);expect(after.messages.slice(0,before.messages.length)).toEqual(before.messages);expect(after.packs.slice(0,before.packs.length)).toEqual(before.packs);expect(after.phase).toBe(before.phase);expect(after.selectedModel?.provider??'codex').toBe(provider);
    const rows=(await readFile(log,'utf8')).trim().split('\n').map(line=>JSON.parse(line));
    const notice=provider==='codex'?rows.find(row=>row.method==='turn/start')?.params.input.find((input:any)=>input.text.startsWith('Beni project event review range:'))?.text:rows.filter(row=>row.prompt).at(-1)?.prompt;
-   expect(notice).toContain('after 0, through 6');expect(notice).toContain('保存済の確認位置が現在の履歴範囲外だったので無効化しました。現在の履歴を0から確認してください。');
+   expect(notice).toContain('after 0, through 6');expect(notice).toContain('保存済の確認位置が現在の履歴範囲外だったので無効化しました。必要な変更を調べる場合の起点は0です。');
    if(provider==='claude'){expect(after.threadId).toBe(before.threadId);expect(rows.filter(row=>row.prompt).at(-1).args).toContain('--resume')}
    await writeFile(file,JSON.stringify({...after,lastEventId:3}));
    await chat.send(p,t,'hello',provider==='codex'?'model-a':'sonnet',root,root,'requirements',false,provider);await waitFor(async()=>(await chat.get(p,t)).messages.at(-1)?.status==='completed');expect((await chat.get(p,t)).lastEventId).toBe(3);

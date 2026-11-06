@@ -51,7 +51,12 @@ export default function Workspace(props: WorkspaceProps) {
     return isTaskPhase(phase) ? phase : undefined;
   });
   createEffect(() => { activeTask(); setViewPhase(actualPhase()); });
-  const chatPhase = () => actualPhase() === 'retrospective' && viewPhase() === 'execution' ? 'execution' : actualPhase();
+  const chatPhase = () => {
+    const phase = actualPhase(), selected = viewPhase();
+    if (phase === 'finalization' && (selected === 'execution' || selected === 'retrospective')) return selected;
+    if (phase === 'retrospective' && selected === 'execution') return selected;
+    return phase;
+  };
   const [openTasks, setOpenTasks] = createSignal<string[]>(props.taskId === undefined ? [] : [props.taskId]);
   const [projectId, setProjectId] = createSignal<string | undefined>(props.projectId);
   const [tasks, setTasks] = createSignal<Task[]>([]);
@@ -306,7 +311,7 @@ export default function Workspace(props: WorkspaceProps) {
                     }
                   }
                 } catch (error) {
-                  if (error instanceof ApiError && error.code === 'MODEL_UNAVAILABLE' && requestedModel) rejectModel(modelScope(current.task.projectId, current.task.id, 'implementation-assignee'), requestedModel.id, requestedModel.provider);
+                  if (target === 'start' && error instanceof ApiError && error.code === 'MODEL_UNAVAILABLE' && requestedModel) rejectModel(modelScope(current.task.projectId, current.task.id, 'implementation-assignee'), requestedModel.id, requestedModel.provider);
                   if (error instanceof ApiError && error.status === 409) {
                     try { const refreshed = await api<TaskDetail>(`/api/tasks/${current.task.id}`); if (alive && detail()?.task.id === current.task.id) { batch(() => { setDetail(refreshed); adoptDocuments(current.task.id, refreshed.documents); setTasks(previous => previous.map(item => item.id === refreshed.task.id ? refreshed.task : item)); }); props.onTaskChange?.(refreshed.task.id, refreshed.task); } } catch { /* 元のエラーを表示する。 */ }
                   }
@@ -315,7 +320,7 @@ export default function Workspace(props: WorkspaceProps) {
                 finally { setAdvancing(false); }
               }} />
               <Show when={phaseError()}><p role="alert" class="p-2 text-sm text-error">{phaseError()}</p></Show>
-              <Show when={isTaskPhase(detail()?.task.phase)}><ChatPanel onTaskRename={applyRenamedTask} readOnly={chatPhase() === 'execution' || detail()?.task.status === 'completed'} onBusyChange={setChatBusy} onModelUnavailable={(model, provider) => { if (detail()?.task.phase === 'execution') rejectModel(implementationScope(), model, provider); }} projectId={detail()!.task.projectId} taskId={activeTask()} phase={chatPhase()} /></Show>
+              <Show when={isTaskPhase(detail()?.task.phase)}><ChatPanel onTaskRename={applyRenamedTask} readOnly={chatPhase() === 'execution' || actualPhase() === 'finalization' || detail()?.task.status === 'completed'} onBusyChange={setChatBusy} onModelUnavailable={(model, provider) => { if (detail()?.task.phase === 'execution') rejectModel(implementationScope(), model, provider); }} projectId={detail()!.task.projectId} taskId={activeTask()} phase={chatPhase()} /></Show>
             </Show>
           </Show>
         </div>

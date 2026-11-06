@@ -52,7 +52,8 @@ for await (const line of createInterface({input:process.stdin})) {
    embedded={calls:process.env.FAKE_EMBEDDED_CALLS?JSON.parse(process.env.FAKE_EMBEDDED_CALLS):[{tool:'list_events',arguments:{after:Number(range?.[1]??0),through:Number(range?.[2]??0),limit:1}},{tool:'acknowledge_events',arguments:{through:Number(range?.[2]??0)}}],results:[],index:0};
    send({method:'turn/started',params:{threadId:'thread-1',turn:{id:turn}}});send({id:msg.id,result:{turn:{id:turn}}});nextEmbedded();continue;
   }
-  if(['tools','unfinished tools','duplicate tools','failed tools'].includes(text)){
+  if(['tools','unfinished tools','duplicate tools','failed tools','large tools'].includes(text)){
+   if(process.env.FAKE_CODEX_WRITE_KNOWLEDGE==='1')writeFileSync(join(msg.params.cwd,'knowledge.md'),'# プロジェクトの学び\n\n- テストは専用の入力を使う。\n');
    send({method:'turn/started',params:{threadId:'thread-1',turn:{id:turn}}});
    const event=(method:string,extra:Record<string,unknown>)=>send({method,params:{threadId:'thread-1',turnId:turn,...extra}});
    event('item/started',{item:{type:'agentMessage',id:'before',text:''}});event('item/agentMessage/delta',{itemId:'before',delta:'Before tool'});
@@ -60,7 +61,10 @@ for await (const line of createInterface({input:process.stdin})) {
    send({id:msg.id,result:{turn:{id:turn}}});
    if(text==='unfinished tools'){setTimeout(()=>send({method:'turn/completed',params:{threadId:'thread-1',turn:{id:turn,status:'failed'}}}),30);continue}
    if(text==='duplicate tools')event('item/started',{item:{type:'commandExecution',id:'command-1',command:'echo example',status:'inProgress'}});
-   setTimeout(()=>{event('item/completed',{item:{type:'commandExecution',id:'command-1',command:'echo example',aggregatedOutput:'example\n',exitCode:text==='failed tools'?7:0,status:text==='failed tools'?'failed':'completed'}});if(text==='duplicate tools')event('item/completed',{item:{type:'commandExecution',id:'command-1',command:'echo example',aggregatedOutput:'example\n',status:'completed'}});event('item/agentMessage/delta',{itemId:'after',delta:'After tool'});event('item/completed',{item:{type:'agentMessage',id:'after',text:'After tool'}});send({method:'turn/completed',params:{threadId:'thread-1',turn:{id:turn,status:'completed'}}})},150);continue
+   const large=text==='large tools';
+   const command=large?'🛠"\\'.repeat(220_000):'echo example';
+   const output=large?'TOOL_OUTPUT_PRIVATE\u0001🧪"\\'.repeat(100_000)+'OUTPUT_TAIL':'example\n';
+   setTimeout(()=>{event('item/completed',{item:{type:'commandExecution',id:'command-1',command,aggregatedOutput:output,exitCode:text==='failed tools'?7:0,status:text==='failed tools'?'failed':'completed'}});if(text==='duplicate tools')event('item/completed',{item:{type:'commandExecution',id:'command-1',command:'echo example',aggregatedOutput:'example\n',status:'completed'}});event('item/agentMessage/delta',{itemId:'after',delta:'After tool'});event('item/completed',{item:{type:'agentMessage',id:'after',text:'After tool'}});send({method:'turn/completed',params:{threadId:'thread-1',turn:{id:turn,status:'completed'}}})},150);continue
   }
   if(text==='approval')send({id:'approval-test',method:'item/commandExecution/requestApproval',params:{}});
   send({method:'turn/started',params:{threadId:'thread-1',turn:{id:turn}}});

@@ -8,7 +8,7 @@ const chatMock = vi.hoisted(()=>({busyChange: undefined as ((busy:boolean)=>void
 vi.mock('./ChatPanel',()=>({default: (props: {projectId:string; instructionFocus?:string|null; instructionFocusLabel?:string; onBusyChange?:(busy:boolean)=>void})=>{chatMock.busyChange=props.onBusyChange;return <div data-testid="instructions-chat">{props.projectId}<span data-testid="focus-label">{props.instructionFocusLabel??'未選択'}</span></div>}}));
 afterEach(()=>{cleanup();vi.unstubAllGlobals()});
 it('loads templates and switches the Markdown preview with descriptive variable badges',async()=>{
- vi.stubGlobal('fetch',vi.fn().mockResolvedValue({ok:true,json:async()=>({instructions:[{key:'editor',content:'# Editor {{working_directory}} {{custom}}'},{key:'common',content:'# Common {{project_directory}}'},{key:'requirements',content:'# Requirements {{task_id}}'},{key:'execution',content:'# Execution instructions'},{key:'retrospective',content:'# Retrospective instructions'}]})}));
+ vi.stubGlobal('fetch',vi.fn().mockResolvedValue({ok:true,json:async()=>({instructions:[{key:'editor',content:'# Editor {{working_directory}} {{custom}}'},{key:'common',content:'# Common {{project_directory}}'},{key:'requirements',content:'# Requirements {{task_id}}'},{key:'execution',content:'# Execution instructions'},{key:'retrospective',content:'# Retrospective instructions'},{key:'finalization',content:'# 終了時に参照する {{retrospective_chat_path}}'}]})}));
  render(()=> <InstructionsSettings/>);
  expect(screen.getAllByRole('status')[0].textContent).toContain('読み込み中');
  expect(await screen.findByRole('heading',{name:'Common プロジェクトのディレクトリ'})).toBeTruthy();
@@ -23,7 +23,7 @@ it('loads templates and switches the Markdown preview with descriptive variable 
  expect(projectTools.textContent).toContain('list_events');
  expect(projectTools.textContent).not.toContain('list_instructions');
  expect(projectTools.textContent).not.toContain('get_instruction');
- expect(screen.getAllByRole('tab')).toHaveLength(9);
+ expect(screen.getAllByRole('tab')).toHaveLength(10);
  expect(screen.getByRole('tab',{name:'要件定義'}).getAttribute('aria-selected')).toBe('true');
  expect(screen.getByRole('tabpanel',{name:'要件定義'}).textContent).toContain('Requirements タスクID');
  const common=screen.getByRole('region',{name:'全共通のフォーカス対象'});
@@ -42,9 +42,13 @@ it('loads templates and switches the Markdown preview with descriptive variable 
  fireEvent.keyDown(document.activeElement!,{key:'Home'});
  expect(document.activeElement).toBe(screen.getByRole('tab',{name:'要件定義'}));
  fireEvent.keyDown(document.activeElement!,{key:'ArrowLeft'});
- expect(document.activeElement).toBe(screen.getByRole('tab',{name:'反省会'}));
+ expect(document.activeElement).toBe(screen.getByRole('tab',{name:'終了'}));
  fireEvent.keyDown(document.activeElement!,{key:'End'});
- expect(screen.getByRole('tab',{name:'反省会'}).getAttribute('aria-selected')).toBe('true');
+ expect(screen.getByRole('tab',{name:'終了'}).getAttribute('aria-selected')).toBe('true');
+ const finalization = screen.getByRole('region',{name:'終了のフォーカス対象'});
+ expect(within(finalization).getByRole('heading',{name:'終了時に参照する 反省会チャットのパス'})).toBeTruthy();
+ fireEvent.click(finalization);
+ expect(screen.getByTestId('focus-label').textContent).toBe('終了');
  expect(screen.getByRole('heading',{name:'Common プロジェクトのディレクトリ'})).toBeTruthy();
  fireEvent.click(within(screen.getByRole('tablist',{name:'プロンプトの種類'})).getByRole('tab',{name:'編集用'}));
  expect(screen.getByRole('heading',{name:'Editor {{working_directory}} {{custom}}'}).querySelector('.badge')).toBeNull();
@@ -240,7 +244,7 @@ it('switches reference tabs independently with correctly categorized variables a
  const prompts=within(screen.getByRole('tablist',{name:'プロンプトの種類'}));
  const panel=()=>document.getElementById(references.getByRole('tab',{selected:true}).getAttribute('aria-controls')!)!;
  expect(references.getByRole('tab',{name:'インストラクション'}).getAttribute('aria-selected')).toBe('true');
- expect(within(panel()).getAllByRole('listitem')).toHaveLength(8);
+ expect(within(panel()).getAllByRole('listitem')).toHaveLength(9);
  expect(panel().querySelectorAll('dt')).toHaveLength(6);
  expect(within(panel()).queryByLabelText('編集相談チャット専用ツール')).toBeNull();
  fireEvent.click(references.getByRole('tab',{name:'編集用'}));
@@ -262,7 +266,7 @@ it('switches reference tabs independently with correctly categorized variables a
  fireEvent.keyDown(editor,{key:'ArrowRight'});
  expect(document.activeElement).toBe(references.getByRole('tab',{name:'インストラクション'}));
  expect(prompts.getByRole('tab',{name:'編集用'}).getAttribute('aria-selected')).toBe('true');
- expect(within(panel()).getAllByRole('listitem')).toHaveLength(8);
+ expect(within(panel()).getAllByRole('listitem')).toHaveLength(9);
  fireEvent.keyDown(document.activeElement!,{key:'ArrowRight'});
  expect(document.activeElement).toBe(editor);
  fireEvent.keyDown(editor,{key:'End'});

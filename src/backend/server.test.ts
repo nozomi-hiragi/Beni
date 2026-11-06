@@ -485,7 +485,7 @@ test('Claude の状態・送信と実装開始は接続先を検証して引き�
  }finally{store.close();await rm(folder,{recursive:true,force:true})}
 });
 
-test('反省会の完了と再開はidle時のみ許可し、実装中と完了後の送信を拒否する',async()=>{
+test('反省会の完了で終了のチャットを起動し、処理が終わると反省会に再開できる',async()=>{
  const folder=await mkdtemp(join(tmpdir(),'beni-retro-')),store=new Store(':memory:');
  const project=store.createProject('Example',folder),task=store.createTask(project.id,'Task');
  const chat=new ChatService(()=>folder,()=>join(import.meta.dir,'test/fake-codex.ts'));
@@ -500,12 +500,34 @@ test('反省会の完了と再開はidle時のみ許可し、実装中と完了�
   expect(store.task(task.id)!.phase).toBe('retrospective');expect(notifications).toBeGreaterThan(1);
   expect(await readFile(join(store.taskDocumentFolder(project.id,task.id),'retrospective.md'),'utf8')).toContain('原因');
   expect((await post(`/api/tasks/${task.id}/phase`,{phase:'retrospective',target:'requirements'})).status).toBe(409);
-  expect((await post(`/api/tasks/${task.id}/complete`,{phase:'retrospective'})).status).toBe(200);
-  expect(store.task(task.id)!.status).toBe('completed');
+  const log=join(folder,'rpc.jsonl');
+  process.env.FAKE_CODEX_LOG=log;
+  process.env.FAKE_CODEX_TURN_ACTION='tools';
+  process.env.FAKE_CODEX_WRITE_KNOWLEDGE='1';
+  const complete=await post(`/api/tasks/${task.id}/complete`,{phase:'retrospective'});
+  expect(complete.status).toBe(200);
+  expect(await complete.json()).toMatchObject({phase:'finalization',status:'idle'});
+  expect((await post(`/api/tasks/${task.id}/reopen`,{phase:'finalization'})).status).toBe(409);
+  expect((await post('/api/chat/send',{taskId:task.id,phase:'finalization',content:'hello',model:null})).status).toBe(409);
+  expect((await post('/api/chat/interrupt',{taskId:task.id,phase:'finalization'})).status).toBe(409);
+  expect((await post('/api/chat/commands',{taskId:task.id,phase:'finalization',command:'clear',provider:'codex'})).status).toBe(409);
   expect((await post('/api/chat/send',{taskId:task.id,phase:'retrospective',content:'hello',model:null})).status).toBe(409);
   expect((await post(`/api/tasks/${task.id}/complete`,{phase:'retrospective'})).status).toBe(409);
-  expect((await post(`/api/tasks/${task.id}/reopen`,{phase:'retrospective'})).status).toBe(200);
-  expect(store.task(task.id)!.status).toBe('idle');
+  for(let i=0;i<100&&store.task(task.id)!.status==='idle';i++)await Bun.sleep(20);
+  expect(store.task(task.id)).toMatchObject({phase:'finalization',status:'completed'});
+  const history=await handle(new Request(`http://127.0.0.1:3210/api/chat?projectId=${project.id}&taskId=${task.id}&phase=finalization`));
+  expect(history.status).toBe(200);
+  expect((await history.json()).messages.at(-1)?.status).toBe('completed');
+  const records=(await readFile(log,'utf8')).trim().split('\n').map(line=>JSON.parse(line));
+  const finalizationInput=records.find(record=>record.method==='turn/start').params.input.map((item:{text:string})=>item.text).join('\n');
+  expect(finalizationInput).toContain('反省会の会話抜粋');
+  expect(finalizationInput).toContain('ナレッジ');
+  expect(await readFile(join(folder,'.beni','knowledge.md'),'utf8')).toBe('# プロジェクトの学び\n\n- テストは専用の入力を使う。\n');
+  expect((await post(`/api/tasks/${task.id}/reopen`,{phase:'retrospective'})).status).toBe(409);
+  expect((await post(`/api/tasks/${task.id}/reopen`,{phase:'finalization'})).status).toBe(200);
+  expect(store.task(task.id)).toMatchObject({phase:'retrospective',status:'idle'});
+  delete process.env.FAKE_CODEX_TURN_ACTION;
+  delete process.env.FAKE_CODEX_WRITE_KNOWLEDGE;
   expect((await post('/api/chat/send',{taskId:task.id,phase:'retrospective',content:'hello',model:null})).status).toBe(202);
   for(let i=0;i<100;i++){if((await chat.get(project.id,task.id,'retrospective')).messages.at(-1)?.status==='completed')break;await Bun.sleep(20)}
   expect((await chat.get(project.id,task.id,'retrospective')).messages.at(-1)?.status).toBe('completed');
@@ -514,7 +536,29 @@ test('反省会の完了と再開はidle時のみ許可し、実装中と完了�
   const restarted=createHandler(store,folder,new ChatService(()=>folder,()=>null));
   const state=await (await restarted(new Request('http://127.0.0.1:3210/api/state'))).json();
   expect(state.tasks.find((value:any)=>value.id===task.id).phase).toBe('retrospective');
- }finally{store.close();await rm(folder,{recursive:true,force:true})}
+ }finally{delete process.env.FAKE_CODEX_TURN_ACTION;delete process.env.FAKE_CODEX_LOG;delete process.env.FAKE_CODEX_WRITE_KNOWLEDGE;store.close();await rm(folder,{recursive:true,force:true})}
+});
+
+test('終了の送信受付前に失敗、またはサーバーが停止した場合は反省会に戻す', async () => {
+ const folder=await mkdtemp(join(tmpdir(),'beni-finalization-recover-')),store=new Store(':memory:');
+ const project=store.createProject('Example',folder),task=store.createTask(project.id,'Task');
+ const handler=()=>createHandler(store,folder,new ChatService(()=>folder,()=>null));
+ const address='http://127.0.0.1:3210';
+ try {
+  store.selectTaskPhase(project.id,task.id,'requirements','retrospective');
+  const unavailable=await handler()(new Request(`${address}/api/tasks/${task.id}/complete`,{
+   method:'POST',headers:{origin:address,'content-type':'application/json'},
+   body:JSON.stringify({projectId:project.id,phase:'retrospective'})
+  }));
+  expect(unavailable.status).toBe(400);
+  expect(await unavailable.json()).toEqual({error:'終了に使うモデルの接続状態を確認してください'});
+  expect(store.task(task.id)).toMatchObject({phase:'retrospective',status:'idle'});
+  store.startTaskFinalization(project.id,task.id);
+  const state=await handler()(new Request(`${address}/api/state`));
+  expect(state.status).toBe(200);
+  expect((await state.json()).tasks).toMatchObject([{phase:'retrospective',status:'idle'}]);
+  expect(store.taskEvents(project.id,task.id).events.some(event=>event.type==='task.completed')).toBe(false);
+ } finally {store.close();await rm(folder,{recursive:true,force:true})}
 });
 
 test('knowledgeのリンク拒否でも実装開始を戻しactiveを解放する',async()=>{
@@ -579,7 +623,8 @@ test('次回準備の知識本文と反省会のproject cwdをCLIへ渡す',asyn
   const records=(await readFile(log,'utf8')).trim().split('\n').map(line=>JSON.parse(line)),starts=records.filter(record=>record.method==='thread/start'),turns=records.filter(record=>record.method==='turn/start');
   expect(starts[0].params.developerInstructions).toContain('確認済み: 検証は段階ごとに実施する。');
   expect(starts[0].params.cwd).toBe(store.taskDocumentFolder(project.id,task.id));
-  expect(starts[1].params.cwd).toBe(folder);expect(starts[1].params.developerInstructions).toContain('execution.json');
+  expect(starts[1].params.cwd).toBe(folder);
+  expect(turns[1].params.input.some((item:{text:string})=>item.text.includes('実装の会話抜粋'))).toBe(true);
   expect(turns[1].params.sandboxPolicy.writableRoots).toEqual([folder]);
  }finally{delete process.env.FAKE_CODEX_LOG;store.close();await rm(folder,{recursive:true,force:true})}
 });
@@ -599,6 +644,10 @@ test('埋め込みツールの保存成功だけをタスクイベントへ通�
   expect(notifications).toEqual([{projectId:project.id,taskId:task.id},{projectId:project.id,taskId:task.id}]);
   provider!.append!(project.id,{type:'tool.started',operationId:'general-operation',taskId:null,phase:null});
   expect(notifications).toHaveLength(2);
+  expect(provider!.events(project.id,task.id,0,undefined,1).events[0]?.type).toBe('task.created');
+  expect(provider!.events(project.id,task.id,0,undefined,1,['tool.finished'])).toMatchObject({
+   events:[{type:'tool.finished',operationId:operation.operationId}],hasMore:false
+  });
   expect(()=>provider!.append!(project.id,{...operation,type:'invalid.event'})).toThrow();
   expect(notifications).toHaveLength(2);
   createServerOptions(store,folder,chat);

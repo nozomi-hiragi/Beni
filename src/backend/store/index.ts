@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { defaultInstructions, validateInstruction, type Instruction } from '../instructions';
 import { taskDocuments, taskDocumentSnapshot, documentContentsKey, retrospectiveDocument } from '../documents';
 import { tmpdir } from 'node:os';
@@ -8,12 +9,22 @@ import { dirname, join, resolve } from 'node:path';
 import { validProjectId, validTaskId } from '../../shared/ids';
 import { cleanDeletedTask, directory, metadata, newMetadata, projectRoot, recoverTasks, pathExists, readJson, writeJson, validateChatDirectory, type TaskMetadata } from '../data';
 import { taskPhases, type TaskPhase } from '../../shared/task-phase';
-import { captureProjectTaskHistory, projectEvents, projectEvent, getProjectFileChange, getProjectFileVersion, projectTaskVersion, appendProjectEvent, projectTaskDeleted, type ProjectEventInput } from '../project-events';
+import { captureProjectTaskHistory, projectEvents, projectEvent, getProjectFileChange, getProjectFileVersion, projectTaskVersion, appendProjectEvent, projectTaskDeleted, type ProjectEventInput, type ProjectEventsOptions } from '../project-events';
 export { taskPhases } from '../../shared/task-phase';
 export type Project = {
   id: string;
   name: string;
   folder: string;
+};
+// 終了フェーズ追加の前後で保存された初期本文だけを更新する。
+const legacyInstructionHashes: Partial<Record<Instruction['key'], readonly string[]>> = {
+  common: ['75814755c3e5fb64f465e9c333e78409d088b61cbd3149a4d5c57559961d4252'],
+  requirements: ['72baf44f5568ef82c01aa73b0de875f64443767af15a1b23ba1740da4e47e19b', '829aff7cc0073e57a4e9c59d111b4b62e485cbd751d0057643b665343fb36623'],
+  documents: ['6b004fa0d4faa88974fc0461e2122e1abd9ed303d003733a605bbad229c5cbe7', 'db04e338ea0a5e3928f8d7705be969314ae2d68d5e7adb44892290156e921976'],
+  implementation: ['c96c0d5db393de3048363bbe27dc02ecd95dbaf1ba8aa30a6fc55d1ff19240db', '244094cc78ff4fbd8a91d7e6cd9750db5df5a2b62d76545a23f8d35bca14fcf7'],
+  execution: ['3cf2d5369d6808dd3223bacb91f01e77b94430dd23d978e9e4641a780f2b17eb', 'd3d53499b0dd83c123aae152e02b841f3a661720b60004be9a3af9aed646175c'],
+  retrospective: ['197564ac50f478ce0e916049c0edf5b75d5ed9486d7652b6f85af503e887449e', 'eadacb92d68c1df5e3b3b74c9bb6c5489ce5e85c0dd5924bfd746f7acdc8f984'],
+  finalization: ['715cb6f374fc043f43fd3f37e50dd1dba1129ecc792e66d2eb6927ef72c05735'],
 };
 export type TaskRow = {
   id: string;
@@ -59,7 +70,16 @@ export class Store {
     this.db.exec('CREATE TABLE IF NOT EXISTS instructions(key TEXT PRIMARY KEY,content TEXT NOT NULL)');
     this.db.transaction(() => {
       const insert = this.db.query('INSERT OR IGNORE INTO instructions(key,content) VALUES (?,?)');
-      for (const instruction of defaultInstructions) insert.run(instruction.key, instruction.content);
+      for (const instruction of defaultInstructions) {
+        insert.run(instruction.key, instruction.content);
+        const legacyHashes = legacyInstructionHashes[instruction.key];
+        if (legacyHashes) {
+          const old = this.db.query('SELECT content FROM instructions WHERE key=?').get(instruction.key) as {content: string} | null;
+          if (old && legacyHashes.includes(createHash('sha256').update(old.content).digest('hex'))) {
+            this.db.query('UPDATE instructions SET content=? WHERE key=?').run(instruction.content, instruction.key);
+          }
+        }
+      }
     })();
   }
   instructions(): Instruction[] {
@@ -217,10 +237,10 @@ export class Store {
     const {value} = this.scopedTask(projectId, taskId);
     captureProjectTaskHistory(project.folder, taskId, value.phase, sourcePhase, operationId);
   }
-  projectEvents(projectId: string, options: {after?: number; through?: number; limit?: number; taskId?: string; types?: string[]} = {}) {
+  projectEvents(projectId: string, options: ProjectEventsOptions = {}) {
     const project = this.scopedProject(projectId);
     if (options.taskId !== undefined && !validTaskId(options.taskId)) throw Error('Invalid task scope');
-    this.captureTaskHistory(projectId, null);
+    if (!options.modelPage || options.through === undefined) this.captureTaskHistory(projectId, null);
     return projectEvents(project.folder, options);
   }
   projectEventCursor(projectId: string) {
@@ -255,29 +275,43 @@ export class Store {
   selectTaskPhase(projectId: string, taskId: string, expectedPhase: string, target: TaskPhase): TaskRow {
     const {project, file, value} = this.scopedTask(projectId, taskId);
     if (!taskPhases.includes(target)) throw Error('invalid phase');
-    if (value.phase !== expectedPhase || value.status==='completed') throw Error('phase conflict');
+    if (value.phase !== expectedPhase || value.status==='completed' || target==='finalization' || value.phase==='finalization') throw Error('phase conflict');
     if(target==='retrospective')retrospectiveDocument(join(file,'..'));
     if(value.phase===target)return {id:value.id,project_id:projectId,name:value.name,phase:value.phase,status:value.status,createdAt:value.createdAt,updatedAt:value.updatedAt};
-    captureProjectTaskHistory(project.folder, taskId, value.phase);
+    return this.saveTaskTransition(project, file, value, target, value.status);
+  }
+  startTaskFinalization(projectId: string, taskId: string): TaskRow {
+    const {project, file, value} = this.scopedTask(projectId, taskId);
+    if (value.phase !== 'retrospective' || value.status !== 'idle') throw Error('phase conflict');
+    return this.saveTaskTransition(project, file, value, 'finalization', 'idle');
+  }
+  rollbackTaskFinalization(projectId: string, taskId: string): TaskRow {
+    const {project, file, value} = this.scopedTask(projectId, taskId);
+    if (value.phase !== 'finalization' || value.status !== 'idle') throw Error('phase conflict');
+    return this.saveTaskTransition(project, file, value, 'retrospective', 'idle');
+  }
+  setTaskCompleted(projectId: string, taskId: string, completed: boolean, expectedPhase?: TaskPhase): TaskRow {
+    const {project, file, value} = this.scopedTask(projectId, taskId);
+    if ((value.phase !== 'retrospective' && value.phase !== 'finalization') ||
+        (expectedPhase !== undefined && value.phase !== expectedPhase) ||
+        value.status !== (completed ? 'idle' : 'completed')) throw Error('phase conflict');
+    const phase = completed ? value.phase : 'retrospective';
+    return this.saveTaskTransition(project, file, value, phase, completed ? 'completed' : 'idle', completed ? 'task.completed' : 'task.reopened');
+  }
+  private saveTaskTransition(project: Project, file: string, value: TaskMetadata, phase: TaskPhase, status: string, event?: 'task.completed' | 'task.reopened'): TaskRow {
+    const taskId = value.id, previousPhase = value.phase as TaskPhase;
+    captureProjectTaskHistory(project.folder, taskId, previousPhase);
     const before = structuredClone(value);
-    value.phase = target;
+    value.phase = phase;
+    value.status = status;
     value.updatedAt = new Date(Math.max(Date.now(), (Date.parse(value.updatedAt ?? '') || 0) + 1)).toISOString();
     writeJson(file, value);
-    try { captureProjectTaskHistory(project.folder, taskId, target, expectedPhase as TaskPhase); }
+    try {
+      if (phase !== previousPhase) captureProjectTaskHistory(project.folder, taskId, phase, previousPhase, undefined, event);
+      else if (event) appendProjectEvent(project.folder, {type: event, taskId, phase});
+    }
     catch (error) { writeJson(file, before); throw error; }
-    return {id: value.id, project_id: projectId, name: value.name, phase: value.phase, status: value.status, createdAt: value.createdAt, updatedAt: value.updatedAt};
-  }
-  setTaskCompleted(projectId:string,taskId:string,completed:boolean):TaskRow {
-    const {project,file,value}=this.scopedTask(projectId,taskId);
-    if(value.phase!=='retrospective'||value.status!==(completed?'idle':'completed'))throw Error('phase conflict');
-    captureProjectTaskHistory(project.folder, taskId, value.phase);
-    const before = structuredClone(value);
-    value.status=completed?'completed':'idle';
-    value.updatedAt=new Date(Math.max(Date.now(),(Date.parse(value.updatedAt??'')||0)+1)).toISOString();
-    writeJson(file,value);
-    try { appendProjectEvent(project.folder, {type: completed ? 'task.completed' : 'task.reopened', taskId, phase: value.phase as TaskPhase}); }
-    catch (error) { writeJson(file, before); throw error; }
-    return {id:value.id,project_id:projectId,name:value.name,phase:value.phase,status:value.status,createdAt:value.createdAt,updatedAt:value.updatedAt};
+    return {id: taskId, project_id: project.id, name: value.name, phase, status, createdAt: value.createdAt, updatedAt: value.updatedAt};
   }
   advanceTaskPhase(projectId: string, taskId: string, expectedPhase: string, direction: 'next' | 'back' = 'next'): TaskRow {
     const {file, value} = this.scopedTask(projectId, taskId);

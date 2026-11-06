@@ -26,8 +26,8 @@ HTTP による取得・操作と、チャットのパック同期の契約を定
 | `POST /api/tasks/:id/phase` | `{projectId: string, phase: string, target: string}`。現在と移動先の準備フェーズを指定 | 200 移動後の `Task` | 400 入力不正、404 タスクなし・所属不一致、409 実行中・フェーズ不一致 |
 | `POST /api/tasks/:id/start` | `{projectId: string, phase: string, model: string \| null, provider?: "codex" \| "claude"}` | 200 実装中の `Task`。選択モデルへ実装開始の依頼を送信 | 400 入力不正、404 対象なし、409 実行中・フェーズ不一致・実装手順未編集、500 開始失敗 |
 | `POST /api/tasks/:id/stop` | `{projectId: string, phase: "execution"}` | 200 停止完了後の実装手順の `Task` | 404 対象なし、409 フェーズ不一致・停止処理中、500 停止失敗 |
-| `POST /api/tasks/:id/complete` | `{projectId: string, phase: "retrospective"}` | 200 `status: completed` の `Task` | 404 対象なし、409 フェーズ・状態不一致、チャット実行中 |
-| `POST /api/tasks/:id/reopen` | `{projectId: string, phase: "retrospective"}` | 200 反省会・`status: idle` の `Task` | 404 対象なし、409 フェーズ・状態不一致 |
+| `POST /api/tasks/:id/complete` | `{projectId: string, phase: "retrospective"}` | 200 `phase: finalization` の `Task` | 404 対象なし、409 フェーズ・状態不一致、チャット実行中 |
+| `POST /api/tasks/:id/reopen` | `{projectId: string, phase: "finalization" または "retrospective"}` | 200 反省会・`status: idle` の `Task` | 404 対象なし、409 フェーズ・状態不一致 |
 | `POST /api/tasks/:id/rename` | `{projectId: string, name: string}`。名前の前後の空白を除く | 200 更新後の `Task` | 400 名前不正、404 タスクなし・所属不一致、500 保存失敗 |
 | `GET /api/tasks/:id` | パスのタスク ID | 200 `{task: Task, documents: Document[], canStart: boolean}` | 404 タスクなし、500 文書取得失敗 |
 | `POST /api/folders/list` | `{path?: string}`。指定時は絶対パス | 200 `FolderList` | 400 パス不正・開けない |
@@ -38,7 +38,7 @@ HTTP による取得・操作と、チャットのパック同期の契約を定
 | `POST /api/chat/commands` | `{projectId, taskId, phase?, command, args?, provider?, model?}` | 202 `{command: ChatCommand}` | 400 未対応コマンド・接続先利用不可、404 対象なし、409 実行中・セッションなし・接続先やフェーズ・状態の不一致、500 保存・接続失敗 |
 | `POST /api/chat/interrupt` | `{projectId, taskId, phase}` | 200 `{ok: true}` | 409 停止対象なし、404 対象なし、500 保存・接続失敗 |
 
-タスクチャットの `phase` は `requirements`・`documents`・`implementation`・`execution`・`retrospective` のいずれかとする。
+タスクチャットの `phase` は `requirements`・`documents`・`implementation`・`execution`・`retrospective`・`finalization` のいずれかとする。
 
 `chat/send` の 202 は受け付けであり、返答終了ではない。メッセージの送信は `/api/chat/send` を使う。
 
@@ -184,7 +184,7 @@ status/state は生成状態を表し、本文のハッシュには含めませ�
 
 送信・実装開始の `provider` は `codex` または `claude`。省略時は既存クライアント互換として `codex`。モデルIDは接続先の生IDを送り、画面表示の接頭辞は含めない。選択した接続先だけへ送信し、他方へ自動変更しない。
 
-実装中の一般の `chat/send`・`chat/interrupt` は409で拒否する。開始の定型送信とタスクのstopだけを使う。完了中も送信・中断・フェーズ変更・開始を409で拒否し、reopenで反省会を再開する。実装の終了はBEが反省会への遷移を保存して通知する。完了はLLMの応答終了と区別し、ユーザーのcomplete操作だけで確定する。
+実装中・終了フェーズ・完了済みタスクの `chat/send`・`chat/interrupt`・`chat/commands` は409で拒否する。実装中はタスクのstopを利用できる。実装が終わるとBEが反省会への遷移を保存して通知する。反省会のcomplete操作で終了の定型依頼を送信し、処理の終端でタスクを完了にする。終了のチャットは履歴を取得・購読できる。処理中のreopenは409で拒否し、完了後のreopenで反省会に戻す。
 
 ## インストラクション
 

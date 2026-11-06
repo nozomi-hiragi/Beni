@@ -5,6 +5,7 @@ import { communication } from '../communication';
 import { ChatSync } from '../chat-sync';
 import { followChatBottom } from '../chat-scroll';
 import type { Pack, TaskPhase } from '../../shared/communication';
+import { isTaskPhase } from '../../shared/task-phase';
 import { commandsForProvider, findChatCommand, parseChatCommand, type ChatCommand, type ChatCommandDefinition } from '../../shared/chat-commands';
 import { availableModels, chooseModel, loadModels, modelIsAvailable, modelLabel, modelScope, modelStatus, modelValue, providerName, providerReady, rejectModel, selectedModel } from '../model-cache';
 import type { ChatMessage, Conversation, Model, Task } from '../types';
@@ -184,7 +185,7 @@ export default function ChatPanel(props: { projectId: string; taskId?: string; p
     });
   });
   createEffect(() => props.onBusyChange?.(busy()));
-  const validInstructionFocus = () => props.projectId !== 'instructions' || ['common','requirements','documents','implementation','execution','retrospective','editor'].includes(props.instructionFocus ?? '');
+  const validInstructionFocus = () => props.projectId !== 'instructions' || props.instructionFocus === 'common' || props.instructionFocus === 'editor' || isTaskPhase(props.instructionFocus);
   async function runClientCommand(definition: ChatCommandDefinition, args: string): Promise<string> {
     if (args && !['model','rename'].includes(definition.name)) throw new Error(`${definition.command} に引数は指定できません。`);
     const value = conversation()!;

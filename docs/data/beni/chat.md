@@ -16,7 +16,7 @@
 
 ## フェーズ別の保存
 
-`phase` は `requirements`、`documents`、`implementation`、`execution`、`retrospective`。各会話は独立した会話ID・発言・パック列・CLIセッション・`lastEventId` を持つ。未送信のフェーズは空の会話として扱い、保存ファイルは必要時に作成する。Generalのphaseはnull。`lastEventId` はプロジェクトイベントについてLLMが確認完了を通知した上限であり、送信受付だけでは更新しない。
+`phase` は `requirements`、`documents`、`implementation`、`execution`、`retrospective`、`finalization`。各会話は独立した会話ID・発言・パック列・CLIセッション・`lastEventId` を持つ。未送信のフェーズは空の会話として扱い、保存ファイルは必要時に作成する。Generalのphaseはnull。`lastEventId` はプロジェクトイベントについてLLMが確認完了を通知した上限であり、送信受付だけでは更新しない。
 
 | フェーズ | チャットファイル | 対応するタスク文書 |
 | --- | --- | --- |
@@ -25,8 +25,11 @@
 | 実装手順 | `implementation.json` | `implementation.md` |
 | 実装中 | `execution.json` | 専用文書なし |
 | 反省会 | `retrospective.json` | `retrospective.md` |
+| 終了 | `finalization.json` | 専用文書なし。反省会の内容を参照し、プロジェクトの `knowledge.md` を更新 |
 
 変更イベントと本文の版は [タスクの変更履歴](../../objects/task-events.md) に従う。
+
+再開したタスクを再び完了する場合は、前回の終了会話を同じタスクの `history/<会話ID>.json` に残し、新しい終了会話を作る。
 
 ## 選択モデル
 

@@ -17,7 +17,7 @@ export type ProjectEventInput = {
   operationId?: string | null; chatId?: string | null; sendId?: string | null; packId?: string | null; toolCallId?: string | null;
   details?: ProjectEventDetails; from?: TaskPhase; to?: TaskPhase;
 };
-export type ProjectEventsOptions = {after?: number; through?: number; limit?: number; taskId?: string; types?: string[]};
+export type ProjectEventsOptions = {after?: number; through?: number; limit?: number; taskId?: string; types?: string[]; modelPage?: boolean};
 type EventRow = {
   id: number; type: string; at: string; task_id: string | null; phase: TaskPhase | null; source_phase: TaskPhase | null;
   operation_id: string | null; chat_id: string | null; send_id: string | null; pack_id: string | null; tool_call_id: string | null;
@@ -248,7 +248,7 @@ function recordFile(db: Database, input: Omit<ProjectEventInput, 'type'>, type: 
 export function appendProjectEvent(folder: string, input: ProjectEventInput) {
   return withDatabase(folder, db => db.transaction(() => insertEvent(db, input))());
 }
-export function captureProjectTaskHistory(folder: string, taskId: string, phase: string, sourcePhase: TaskPhase | null = null, operationId?: string) {
+export function captureProjectTaskHistory(folder: string, taskId: string, phase: string, sourcePhase: TaskPhase | null = null, operationId?: string, taskEvent?: 'task.completed' | 'task.reopened') {
   if (!isTaskPhase(phase) || sourcePhase !== null && !isTaskPhase(sourcePhase)) throw Error('Invalid history phase');
   const prefix = taskPrefix(taskId);
   return withDatabase(folder, db => db.transaction(() => {
@@ -297,11 +297,12 @@ export function captureProjectTaskHistory(folder: string, taskId: string, phase:
       if (before && before.after_hash !== hash(content)) events.push(recordFile(db, input, 'document.updated', path, before, content));
     }
     if (lastPhase && lastPhase.phase !== phase) events.push(insertEvent(db, {...input, type: 'phase.changed', from: lastPhase.phase, to: phase}));
+    if (taskEvent) events.push(insertEvent(db, {...input, type: taskEvent}));
     return {phase, snapshot: Object.fromEntries([...current].map(([path, content]) => [path.slice(prefix.length), hash(content)])), events};
   }).immediate());
 }
 export function projectEvents(folder: string, options: ProjectEventsOptions = {}) {
-  const {after = 0, through, limit = 100, taskId, types} = options;
+  const {after = 0, through, limit = 100, taskId, types, modelPage} = options;
   if (!Number.isSafeInteger(after) || after < 0 || through !== undefined && (!Number.isSafeInteger(through) || through < after) || !Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw Error('Invalid event cursor');
   if (taskId !== undefined) taskPrefix(taskId);
   if (types !== undefined && (!Array.isArray(types) || types.length > 100 || types.some(type => typeof type !== 'string' || !/^[a-z]+\.[a-z]+$/.test(type)))) throw Error('Invalid event types');
@@ -309,6 +310,23 @@ export function projectEvents(folder: string, options: ProjectEventsOptions = {}
     const tail = (db.query('SELECT COALESCE(MAX(id),0) AS id FROM events').get() as {id: number}).id;
     if (after > tail || through !== undefined && through > tail) throw Error('Unknown event cursor');
     const upper = through ?? tail;
+    if (modelPage) {
+      const conditions = ['id>?', 'id<=?'];
+      const values: (number | string)[] = [after, upper];
+      if (taskId !== undefined) {
+        conditions.push('task_id=?');
+        values.push(taskId);
+      }
+      if (types?.length) {
+        conditions.push(`type IN (${types.map(() => '?').join(',')})`);
+        values.push(...types);
+      }
+      const rows = db.query(`SELECT * FROM events WHERE ${conditions.join(' AND ')} ORDER BY id LIMIT ?`).all(...values, limit + 1) as EventRow[];
+      const hasMore = rows.length > limit;
+      if (hasMore) rows.pop();
+      const nextCursor = hasMore ? rows[limit - 1]!.id : upper;
+      return {events: rows.map(row => eventValue(db, row)), lastEventId: nextCursor, nextCursor, through: upper, hasMore};
+    }
     // 返した最後のIDではなく、絞り込み前に走査した範囲をカーソルにする。
     const rows = db.query('SELECT * FROM events WHERE id>? AND id<=? ORDER BY id LIMIT ?').all(after, upper, limit) as EventRow[];
     const nextCursor = rows.at(-1)?.id ?? upper;
