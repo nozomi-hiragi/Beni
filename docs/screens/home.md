@@ -30,4 +30,4 @@
 - 利用枠は接続先ごとに、取得できた残量や更新予定時刻を表示する。取得できない場合は「未取得」「取得できない」など実際の状態を表示し、更新失敗時は前回取得時刻を示す。接続先ごとの取得方法は実装時に確認する。
 - 検索の詳細は[タスク検索の仕様](../features/task-search.md)を参照。
 
-関連：[プロジェクト詳細画面](project-detail.md) / [プロジェクト設定](project-settings.md) / [全体仕様](../next-agent-plan.md)
+関連：[プロジェクト詳細画面](project-detail.md) / [プロジェクト設定](project-settings.md) / [全体仕様](../specification.md)

@@ -5,6 +5,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-li
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import Workspace from './Workspace';
 import {FakeWebSocket, packResponse} from './test-events';
+import type { TaskDetail } from './types';
 
 type Deferred<T> = { promise: Promise<T>; resolve(value: T): void };
 function deferred<T>(): Deferred<T> {
@@ -97,10 +98,16 @@ it('refreshes real Markdown content without duplicating tabs and selects require
  FakeWebSocket.instances=[];vi.stubGlobal('WebSocket',FakeWebSocket);
  const task={id:'019a0000-0000-7100-8000-000000000385',projectId:'019a0000-0000-7000-8000-000000000001',name:'Documents',phase:'requirements',status:'idle'};
  let content='# Initial',version=1, currentPhase='requirements';
+ const provenanceRequests: URLSearchParams[] = [];
  vi.stubGlobal('fetch',vi.fn((path:string, init?: RequestInit)=>{
   if(path.endsWith('/phase')) { expect(JSON.parse(String(init?.body))).toEqual({projectId:task.projectId,phase:'requirements',target:'documents'}); currentPhase='documents'; return Promise.resolve(json({...task,phase:currentPhase})); }
   if(path==='/api/state')return Promise.resolve(json({projects:[],tasks:[task]}));
-  if(path==='/api/tasks/019a0000-0000-7100-8000-000000000385')return Promise.resolve(json({task:{...task,phase:currentPhase},messages:[],documents:[{path:'requirements.md',name:'requirements.md',content,version},{path:'documents.md',name:'documents.md',content:'# Index\n\n## 仕様\n\n[API](api.md)',version:1},{path:'api.md',name:'api.md',content:'# API specification',version:1},{path:'implementation.md',name:'implementation.md',content:'# Plan',version:1}]}));
+  if(path==='/api/tasks/019a0000-0000-7100-8000-000000000385')return Promise.resolve(json({task:{...task,phase:currentPhase},messages:[],documents:[{path:'requirements.md',name:'requirements.md',content,version,provenance:{revision:`revision-${version}`,items:[{id:'item',start:0,end:content.length}]}},{path:'documents.md',name:'documents.md',content:'# Index\n\n## 仕様\n\n[API](api.md)',version:1},{path:'api.md',name:'api.md',content:'# API specification',version:1},{path:'implementation.md',name:'implementation.md',content:'# Plan',version:1}]}));
+  if(path.startsWith('/api/document-provenance?')){
+   const query = new URL(path, 'http://localhost').searchParams;
+   provenanceRequests.push(query);
+   return Promise.resolve(json({reason:`根拠 ${query.get('revision')}`,sources:[]}));
+  }
   if(path==='/api/codex/status')return Promise.resolve(json({installed:false,auth:'none',models:[],usage:'unknown'}));
   if(path.startsWith('/api/chat/packs'))return Promise.resolve(json({packs:[]}));
   if(path.startsWith('/api/chat?'))return Promise.resolve(json({id:'document-test',messages:[]}));
@@ -108,6 +115,9 @@ it('refreshes real Markdown content without duplicating tabs and selects require
  }));
  render(()=><Workspace projectId={'019a0000-0000-7000-8000-000000000001'} taskId={'019a0000-0000-7100-8000-000000000385'} onHome={()=>{}}/>);
  const heading=await screen.findByRole('heading',{name:'Initial',level:1});
+ fireEvent.mouseOver(heading);
+ await screen.findByText('根拠 revision-1');
+ expect(Object.fromEntries(provenanceRequests[0]!)).toEqual({name:'requirements.md',revision:'revision-1',itemId:'item',projectId:task.projectId,taskId:task.id});
  const preview=heading.closest('article')!;
  const tab=screen.getByRole('tab',{name:'要件定義'});
  preview.scrollTop=12;
@@ -120,6 +130,9 @@ it('refreshes real Markdown content without duplicating tabs and selects require
  await waitFor(()=>expect(screen.getByRole('heading',{name:'Updated from disk',level:1})).toBeTruthy(),{timeout:3000});
  expect(screen.getAllByRole('tab',{name:'要件定義'})).toHaveLength(1);
  expect(screen.getByRole('tab',{name:'要件定義'})).toBe(tab);expect(screen.getByRole('heading',{name:'Updated from disk',level:1}).closest('article')).toBe(preview);expect(preview.scrollTop).toBe(12);
+ fireEvent.mouseOver(screen.getByRole('heading',{name:'Updated from disk',level:1}));
+ await screen.findByText('根拠 revision-2');
+ expect(provenanceRequests.map(query => query.get('revision'))).toEqual(['revision-1','revision-2']);
  fireEvent.click(screen.getByRole('tab',{name:'実装手順'}));
  expect(screen.getByRole('heading',{name:'Plan',level:1})).toBeTruthy();
  fireEvent.click(screen.getByRole('tab',{name:'要件定義'}));
@@ -266,7 +279,7 @@ it('利用不可の保存モデルを表示して送信を止め、有効モデ�
  expect(screen.queryByRole('option',{name:'⚠️ Codex/Saved model'})).toBeNull();
 });
 
-it('実装担当モデルをチャットと独立して記憶し、実装から反省会・完了・再開へ進む', async () => {
+it('実装担当モデルをチャットと独立して記憶し、実装から反省会・終了・再開へ進む', async () => {
   const projectId = '019a0000-0000-7000-8000-000000000001', taskId = '019a0000-0000-7100-8000-000000000089';
   let task = {id: taskId, projectId, name: 'サンプル', phase: 'requirements', status: 'idle'};
   const posted: {path: string; body: any}[] = [];
@@ -275,15 +288,18 @@ it('実装担当モデルをチャットと独立して記憶し、実装から�
     if (path === `/api/tasks/${taskId}`) return json({task, documents: [], canStart: true});
     if (path === '/api/codex/status') return json({installed: true, auth: 'chatgpt', models: [{id:'c', name:'Codex model'}]});
     if (path === '/api/claude/status') return json({installed: true, auth: 'claude', models: [{id:'a', name:'Claude model'}]});
-    if (path.startsWith('/api/chat?')) return json({id:'conversation', messages: []});
-    const pack = packResponse(path, []); if (pack) return pack;
+    if (path.startsWith('/api/chat?') || path.startsWith('/api/chat/packs')) {
+      const phase = new URL(path, 'http://localhost').searchParams.get('phase');
+      const messages = phase ? [{id:phase, role:'assistant', content:phase + ' の会話', status:phase === 'finalization' && task.status === 'idle' ? 'streaming' : 'completed'}] : [];
+      return packResponse(path, messages) ?? json({id:phase ?? 'conversation', messages});
+    }
     if (path.startsWith(`/api/tasks/${taskId}/`)) {
       const body = JSON.parse(String(init?.body)); posted.push({path, body});
       if (path.endsWith('/start')) task = {...task, phase: 'execution', status: 'running'};
       if (path.endsWith('/stop')) task = {...task, phase: 'implementation', status: 'idle'};
       if (path.endsWith('/phase')) task = {...task, phase: body.target};
-      if (path.endsWith('/complete')) task = {...task, status:'completed'};
-      if (path.endsWith('/reopen')) task = {...task, status:'idle'};
+      if (path.endsWith('/complete')) task = {...task, phase:'finalization', status:'idle'};
+      if (path.endsWith('/reopen')) task = {...task, phase:'retrospective', status:'idle'};
       return json(task);
     }
     return json({sessions: []});
@@ -310,12 +326,32 @@ it('実装担当モデルをチャットと独立して記憶し、実装から�
   await screen.findByRole('textbox', {name:'希望や回答を入力'});
   expect((screen.getByRole('button', {name:'要件定義'}) as HTMLButtonElement).disabled).toBe(true);
   fireEvent.click(screen.getByRole('button', {name:'タスク完了'}));
-  await screen.findByRole('button', {name:'再開'});
+  await screen.findByText('finalization の会話');
   expect(posted.at(-1)?.body).toEqual({projectId, phase:'retrospective'});
+  expect(screen.getByRole('button', {name:'終了'}).getAttribute('aria-current')).toBe('step');
+  expect(screen.queryByRole('button', {name:'再開'})).toBeNull();
+  expect(screen.queryByRole('button', {name:'タスク完了'})).toBeNull();
+  expect(screen.queryByRole('button', {name:'停止'})).toBeNull();
+  expect(screen.queryByRole('button', {name:'中断'})).toBeNull();
+  expect(screen.queryByRole('combobox', {name:'モデル'})).toBeNull();
+  expect(screen.queryByRole('combobox', {name:'実装担当モデル'})).toBeNull();
+  fireEvent.click(screen.getByRole('button', {name:'実装中'}));
+  await screen.findByText('execution の会話');
+  fireEvent.click(screen.getByRole('button', {name:'反省会'}));
+  await screen.findByText('retrospective の会話');
   expect(screen.queryByRole('textbox', {name:'希望や回答を入力'})).toBeNull();
+  fireEvent.click(screen.getByRole('button', {name:'終了'}));
+  await screen.findByText('finalization の会話');
+
+  const socket = FakeWebSocket.instances.find(item => !item.closed)!;
+  task = {...task, status:'completed'};
+  socket.event('task-events', {name:'task.events.changed', data:{lastEventId:1}});
+  socket.change('chat', taskId);
   await waitFor(() => expect((screen.getByRole('button', {name:'再開'}) as HTMLButtonElement).disabled).toBe(false));
   fireEvent.click(screen.getByRole('button', {name:'再開'}));
   await screen.findByRole('textbox', {name:'希望や回答を入力'});
+  expect(posted.at(-1)?.body).toEqual({projectId, phase:'finalization'});
+  expect(screen.getByRole('button', {name:'反省会'}).getAttribute('aria-current')).toBe('step');
   second.unmount(); task = {...task, phase:'requirements'};
   render(() => <Workspace taskId={taskId} onHome={() => {}} />);
   await waitFor(() => expect((screen.getByRole('combobox', {name:'実装担当モデル'}) as HTMLSelectElement).value).toBe('claude:a'));
@@ -424,4 +460,69 @@ it('初回から実装実行中のタスクはexecution会話をreadOnlyで表�
  expect(screen.queryByRole('textbox',{name:'希望や回答を入力'})).toBeNull();expect(screen.queryByRole('combobox',{name:'モデル'})).toBeNull();
  expect(screen.queryByRole('button',{name:'実装中'})).toBeNull();expect(screen.getByRole('button',{name:'停止'})).toBeTruthy();
  expect(posted).toEqual([]);
+});
+
+it('自動精査の進捗と再試行に応じて反省会のチャットと完了操作を切り替え、指示更新も再試行できる', async () => {
+  const projectId = '019a0000-0000-7000-8000-000000000001';
+  const id = '019a0000-0000-7100-8000-000000000099';
+  const task = { id, projectId, name: '精査の確認', phase: 'retrospective', status: 'idle' };
+  const workflow: NonNullable<TaskDetail['workflow']> = { review: { state: 'pending', remaining: 3 } };
+  const documents = [{ path: 'retrospective.md', name: 'retrospective.md', content: '# 精査結果', version: 1 }];
+  const retries: string[] = [];
+  vi.stubGlobal('fetch', vi.fn(async (path: string, init?: RequestInit) => {
+    if (path === '/api/state') return json({ projects: [], tasks: [task] });
+    if (path === `/api/tasks/${id}`) return json(structuredClone({ task, documents, workflow }));
+    if (path === `/api/tasks/${id}/retry-review` || path === `/api/tasks/${id}/retry-instructions`) {
+      expect(init?.method).toBe('POST');
+      expect(JSON.parse(String(init?.body))).toEqual({ projectId });
+      retries.push(path);
+      if (path.endsWith('retry-review')) workflow.review = { state: 'running', remaining: 2 };
+      else workflow.instructionJob = { status: 'pending' };
+      return json({ ok: true });
+    }
+    if (path.startsWith('/api/chat?')) return json({ id: 'review-conversation', messages: [] });
+    return packResponse(path, []) ?? json({ sessions: [] });
+  }));
+  render(() => <Workspace taskId={id} onHome={() => {}} />);
+  const composer = () => screen.queryByRole('textbox', { name: '希望や回答を入力' });
+  const complete = () => screen.getByRole<HTMLButtonElement>('button', { name: 'タスク完了' });
+  await screen.findByText('反省会の自動精査 · 待機中 · 残り 3 件');
+  expect(composer()).toBeNull();
+  expect(complete().disabled).toBe(true);
+
+  const socket = FakeWebSocket.instances.find(item => !item.closed)!;
+  let lastEventId = 0;
+  const notify = () => socket.event('task-events', { name: 'task.events.changed', data: { lastEventId: ++lastEventId } });
+  await waitFor(() => expect([...socket.subscriptions.values()].some(item => item.topic === 'task-events')).toBe(true));
+  workflow.review = { state: 'failed', remaining: 2, error: '精査に失敗しました' };
+  notify();
+  const retry = await screen.findByRole('button', { name: '自動精査を再試行' });
+  expect(screen.getByText('精査に失敗しました')).toBeTruthy();
+  expect(composer()).toBeTruthy();
+  expect(complete().disabled).toBe(true);
+  fireEvent.click(retry);
+  await screen.findByText('反省会の自動精査 · 実行中 · 残り 2 件');
+  expect(composer()).toBeNull();
+  expect(complete().disabled).toBe(true);
+
+  workflow.review = { state: 'done', remaining: 0 };
+  notify();
+  await screen.findByText('反省会の自動精査 · 完了');
+  await screen.findByRole('heading', { name: '精査結果' });
+  expect(composer()).toBeTruthy();
+  expect(complete().disabled).toBe(false);
+
+  task.phase = 'finalization';
+  notify();
+  await waitFor(() => expect(screen.getByRole('button', { name: '終了' }).getAttribute('aria-current')).toBe('step'));
+  task.status = 'completed';
+  documents.push({ path: 'knowledge.md', name: 'knowledge.md', content: '# 次回に活かす知識', version: 1 });
+  workflow.instructionJob = { status: 'failed', error: '更新に失敗しました' };
+  notify();
+  fireEvent.click(await screen.findByRole('button', { name: 'インストラクションの更新を再試行' }));
+  await screen.findByText('インストラクションの更新 · 処理中');
+  expect(screen.getByRole('tab', { name: 'ナレッジ' }).getAttribute('aria-selected')).toBe('true');
+  expect(screen.getByRole('heading', { name: '次回に活かす知識' })).toBeTruthy();
+  expect(screen.queryByRole('button', { name: 'インストラクションの更新を再試行' })).toBeNull();
+  expect(retries).toEqual([`/api/tasks/${id}/retry-review`, `/api/tasks/${id}/retry-instructions`]);
 });

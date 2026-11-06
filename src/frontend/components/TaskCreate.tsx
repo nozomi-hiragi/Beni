@@ -16,7 +16,7 @@ export interface TaskCreateProps {
 }
 
 export default function TaskCreate(props: TaskCreateProps) {
-  return <div class="rounded-2xl border border-base-300 bg-base-100 p-[1.1rem] shadow-sm">
+  return <div class="card card-border border-base-300 bg-base-100 shadow-sm p-[1.1rem]">
     <form class="flex items-center gap-3 max-[900px]:flex-wrap max-[540px]:[&>*]:w-full" onSubmit={props.onCreateTask}>
       <input
         class="input input-bordered min-w-0 flex-[1_1_18rem] max-[900px]:basis-full"

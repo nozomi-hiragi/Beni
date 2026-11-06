@@ -5,6 +5,7 @@ import { communication } from '../communication';
 import { ChatSync } from '../chat-sync';
 import { followChatBottom } from '../chat-scroll';
 import type { Pack, TaskPhase } from '../../shared/communication';
+import { isTaskPhase } from '../../shared/task-phase';
 import { commandsForProvider, findChatCommand, parseChatCommand, type ChatCommand, type ChatCommandDefinition } from '../../shared/chat-commands';
 import { availableModels, chooseModel, loadModels, modelIsAvailable, modelLabel, modelScope, modelStatus, modelValue, providerName, providerReady, rejectModel, selectedModel } from '../model-cache';
 import type { ChatMessage, Conversation, Model, Task } from '../types';
@@ -117,7 +118,27 @@ export default function ChatPanel(props: { projectId: string; taskId?: string; p
       if(fetching){reload=true;return}fetching=true;
       do {reload=false;
       const request = ++sequence;
-      try { const value = await api<Conversation>(url, undefined, controller.signal); if (active && request === sequence) { if (!untrack(() => selectedModel(currentKey)) && value.selectedModel) { chooseModel(currentKey, value.selectedModel); if (hadModels && !untrack(() => modelIsAvailable(currentKey)) && modelRefreshRequested) {modelRefreshRequested = false; void loadModels(true, value.selectedModel.provider ?? 'codex').catch(() => {});} } sync.conversation(value.id); setConversation(value); setLoadError(''); } }
+      try {
+        const value = await api<Conversation>(url, undefined, controller.signal);
+        if (active && request === sequence) {
+          if (!untrack(() => selectedModel(currentKey)) && value.selectedModel) {
+            chooseModel(currentKey, value.selectedModel);
+            if (hadModels && !untrack(() => modelIsAvailable(currentKey)) && modelRefreshRequested) {
+              modelRefreshRequested = false;
+              void loadModels(true, value.selectedModel.provider ?? 'codex').catch(() => {});
+            }
+          }
+          const previous = conversation();
+          const latest = value.messages.findLast(message => message.role === 'assistant');
+          if (previous && latest && latest.status !== 'pending' && latest.status !== 'streaming') {
+            const last = previous.messages.findLast(message => message.role === 'assistant');
+            if (last?.id !== latest.id || last?.status !== latest.status) void loadModels(true, latest.provider).catch(() => {});
+          }
+          sync.conversation(value.id);
+          setConversation(value);
+          setLoadError('');
+        }
+      }
       catch { if (active && request === sequence) setLoadError('履歴を取得できませんでした'); }
       }while(reload&&active);fetching=false;
     };
@@ -184,7 +205,7 @@ export default function ChatPanel(props: { projectId: string; taskId?: string; p
     });
   });
   createEffect(() => props.onBusyChange?.(busy()));
-  const validInstructionFocus = () => props.projectId !== 'instructions' || ['common','requirements','documents','implementation','execution','retrospective','editor'].includes(props.instructionFocus ?? '');
+  const validInstructionFocus = () => props.projectId !== 'instructions' || props.instructionFocus === 'common' || props.instructionFocus === 'editor' || isTaskPhase(props.instructionFocus);
   async function runClientCommand(definition: ChatCommandDefinition, args: string): Promise<string> {
     if (args && !['model','rename'].includes(definition.name)) throw new Error(`${definition.command} に引数は指定できません。`);
     const value = conversation()!;
@@ -308,11 +329,11 @@ export default function ChatPanel(props: { projectId: string; taskId?: string; p
           <Show when={conversation()?.command?.output} fallback={<p role="status" class="min-w-0 flex-1">{commandOutcome()}</p>}>
             <details class="min-w-0 flex-1"><summary class="cursor-pointer truncate">{commandOutcome()}</summary><pre class="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words">{conversation()?.command?.output}</pre></details>
           </Show>
-          <button type="button" class="btn btn-ghost btn-xs shrink-0" aria-label="コマンド結果を閉じる" onClick={() => dismissCommand(id)}>×</button>
+          <button type="button" class="btn btn-ghost btn-xs shrink-0" aria-label="コマンド結果を閉じる" onClick={() => dismissCommand(id)}><span aria-hidden="true">×</span></button>
         </div>}</Show>
         <Show when={localResult()} keyed>{result => <div class="flex min-w-0 items-start gap-2 rounded-box border border-base-300 px-3 py-2 text-sm">
           <details class="min-w-0 flex-1"><summary class="cursor-pointer truncate">{result.name} · 結果</summary><pre class="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words">{result.output}</pre></details>
-          <button type="button" class="btn btn-ghost btn-xs shrink-0" aria-label="ローカルコマンド結果を閉じる" onClick={() => setLocalResult(undefined)}>×</button>
+          <button type="button" class="btn btn-ghost btn-xs shrink-0" aria-label="ローカルコマンド結果を閉じる" onClick={() => setLocalResult(undefined)}><span aria-hidden="true">×</span></button>
         </div>}</Show>
       </div>
     </div>

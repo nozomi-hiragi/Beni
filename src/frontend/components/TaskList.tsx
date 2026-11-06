@@ -26,7 +26,7 @@ function TaskDate(props: { value?: string | null }) {
 }
 
 export default function TaskList(props: TaskListProps) {
-  return <div class="mt-6 overflow-hidden rounded-2xl border border-base-300 bg-base-100 shadow-sm">
+  return <div class="card card-border border-base-300 bg-base-100 shadow-sm mt-6 overflow-hidden">
     <div class="flex items-center gap-2.5 border-b border-base-300 px-[1.4rem] py-[1.2rem]"><h2 class="text-[.95rem] font-bold">タスク一覧</h2><span class="text-xs text-base-content/55">{props.tasks.length} 件</span></div>
     <div class="overflow-x-auto">
       <table class="table w-full [&_th]:px-[1.4rem] [&_th]:py-[.95rem] [&_td]:px-[1.4rem] [&_td]:py-[.95rem] max-[540px]:[&_th]:p-[.8rem] max-[540px]:[&_td]:p-[.8rem] max-[540px]:[&_th]:whitespace-nowrap max-[540px]:[&_td]:whitespace-nowrap">

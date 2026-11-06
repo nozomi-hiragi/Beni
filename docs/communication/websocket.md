@@ -158,6 +158,6 @@ FE は不正な応答または INTERNAL_ERROR を受けたときに接続をや�
 
 ## フェーズ別チャットと変更履歴
 
-`chat` のscopeはタスク会話で `{projectId, taskId, phase}` とする。phaseは反省会を含む5フェーズの識別子で、Generalはnullまたは省略する。購読共有・キャッシュ・再接続の対象はphaseまで含めて分離する。`documents`・`terminal` のscopeにphaseは指定しない。
+`chat` のscopeはタスク会話で `{projectId, taskId, phase}` とする。phaseは終了を含む6フェーズの識別子で、Generalはnullまたは省略する。購読共有・キャッシュ・再接続の対象はphaseまで含めて分離する。`documents`・`terminal` のscopeにphaseは指定しない。
 
 `task-events` は `{projectId, taskId}` をscopeとし、タスク全体の変更を購読する。イベント名は `task.events.changed`、dataは `{lastEventId: number}`。通知を受けた画面はHTTPでタスクのフェーズと変更履歴を再取得する。通知本文に文書の過去版を載せない。`lastEventId` はプロジェクト共通のイベントIDであり、タスク単位の連番ではない。削除済みタスクも履歴の購読・取得ができる。

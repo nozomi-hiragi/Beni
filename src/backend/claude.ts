@@ -1,12 +1,13 @@
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { createInterface } from 'node:readline';
 import { type EmbeddedTool, type EmbeddedToolResult, toolResult } from './embedded-tools';
+import type { RateLimitUsage } from './rate-limits';
 
 // 安全性に関わるフラグの組み合わせを確認した CLI 以降だけを使用する。
 export const CLAUDE_MIN_VERSION = '2.1.292';
 export const claudeModels = [{id:'sonnet',name:'Sonnet'},{id:'opus',name:'Opus'},{id:'haiku',name:'Haiku'}];
-export type ClaudeStatus = {installed:boolean;path:string|null;version:string|null;checkedAt:string;auth:'claude'|'apiKey'|'other'|'none'|'unknown';models:{id:string;name:string}[]|null;usage:'unknown'};
+export type ClaudeStatus = {installed:boolean;path:string|null;version:string|null;checkedAt:string;auth:'claude'|'apiKey'|'other'|'none'|'unknown';models:{id:string;name:string}[]|null;usage:RateLimitUsage};
 export class ClaudeRejected extends Error { constructor(public modelUnavailable=false,public interrupted=false,public code?:string) { super('Request rejected'); } }
 
 const versionSupported=(version:string)=>{const actual=version.split('.').map(Number),minimum=CLAUDE_MIN_VERSION.split('.').map(Number);for(let i=0;i<3;i++){if(actual[i]!==minimum[i])return actual[i]>minimum[i]}return true};
@@ -16,7 +17,7 @@ const foreignAuth=():ClaudeStatus['auth']|null=>{
  return null;
 };
 const command=(executable:string,args:string[],allowFailure=false)=>new Promise<string>((resolve,reject)=>execFile(executable,args,{timeout:5000,maxBuffer:65536},(error,stdout)=>error&&!(allowFailure&&stdout)?reject(Error('Claude status unavailable')):resolve(stdout)));
-export async function claudeStatus(executable:string|null):Promise<ClaudeStatus>{
+export async function claudeStatus(executable:string|null, onAccount?:(identity:string)=>void):Promise<ClaudeStatus>{
  const status:ClaudeStatus={installed:!!executable,path:executable,version:null,checkedAt:new Date().toISOString(),auth:'unknown',models:null,usage:'unknown'};
  if(!executable)return status;
  try{const match=(await command(executable,['--version'])).match(/^(\d+\.\d+\.\d+)(?:[-+][\w.-]+)?\s+\(Claude Code\)/m);status.version=match?.[1]??null}catch{}
@@ -27,11 +28,15 @@ export async function claudeStatus(executable:string|null):Promise<ClaudeStatus>
   // アカウント識別子・メールアドレスなどは保存・返却しない。
   const auth=JSON.parse(await command(executable,['auth','status','--json'],true));
   status.auth=auth.loggedIn===false?'none':auth.loggedIn===true&&auth.authMethod==='claude.ai'&&auth.apiProvider==='firstParty'?'claude':['api_key','api_key_helper'].includes(auth.authMethod)?'apiKey':auth.loggedIn===true?'other':'unknown';
+  if(status.auth==='claude'&&onAccount){
+   const identity = [auth.accountId, auth.email, auth.orgId].map(value => typeof value === 'string' ? value : null);
+   if(identity[0]||identity[1])onAccount(createHash('sha256').update(JSON.stringify(identity)).digest('hex'));
+  }
  }catch{}
  return status;
 }
 
-type Options={builtinTools?:false;cwd:string;model:string|null;sandbox:'read-only'|'workspace-write';developerInstructions?:string;dynamicTools?:EmbeddedTool[]};
+type Options={builtinTools?:false;ephemeral?:true;cwd:string;model:string|null;sandbox:'read-only'|'workspace-write';developerInstructions?:string;dynamicTools?:EmbeddedTool[]};
 const generationCommands=['code-review','simplify','security-review','recap'] as const;
 const localCommands=['context','usage'] as const;
 const maxCommandOutput=64*1024;
@@ -61,6 +66,7 @@ export class ClaudeRpc {
  private localCommand:'context'|'usage'|null=null;
  private commandFallback=false;
  private commandOutput:string|null=null;
+ private usageReport:unknown;
  private commandUnavailable=false;
  private generationCommand:string|null=null;
  private initialPrompt:string|null=null;
@@ -85,7 +91,7 @@ export class ClaudeRpc {
    if(!maintenance&&params.command!==undefined&&(!generation||typeof generation!=='object'||Array.isArray(generation)||!generationCommands.includes(generation.name)||typeof generation.args!=='string'||generation.args.length>16384||/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(generation.args)||Object.keys(generation).some(key=>key!=='name'&&key!=='args')))throw new ClaudeRejected();
    if(generation?.name==='code-review'&&/(?:^|[\s"'`])(?:ultra|--(?:post|comment))(?:$|[\s="'`])/i.test(generation.args))throw new ClaudeRejected(false,false,'COMMAND_ARGUMENTS_UNSUPPORTED');
    if(!this.session||!this.options||this.child||params.threadId!==this.session)throw new ClaudeRejected();
-   if(maintenance&&!this.resumed)throw new ClaudeRejected();
+   if(maintenance&&!this.resumed&&!(local&&params.command==='usage'&&this.options.ephemeral))throw new ClaudeRejected();
    const model=params.model??this.options.model;
    if(!claudeModels.some(candidate=>candidate.id===model))throw new ClaudeRejected(true);
    if(foreignAuth())throw new ClaudeRejected();
@@ -100,6 +106,7 @@ export class ClaudeRpc {
    const settings={disableAllHooks:true,...(writable?{sandbox:{enabled:true,failIfUnavailable:true,autoAllowBashIfSandboxed:true,allowUnsandboxedCommands:false,excludedCommands:[],enableWeakerNestedSandbox:false,enableWeakerNetworkIsolation:false,allowAppleEvents:false,filesystem:{disabled:false,allowWrite:[]},network:{strictAllowlist:true,allowedDomains:[],deniedDomains:['*'],allowUnixSockets:[],allowAllUnixSockets:false,allowLocalBinding:false,allowMachLookup:[]}}}:{})};
    // 固定 allowlist の専用経路だけ組み込み slash command を有効にする。
    const args=['--print','--output-format','stream-json','--verbose','--include-partial-messages','--restricted','--safe-mode','--setting-sources','','--strict-mcp-config','--mcp-config','{"mcpServers":{}}','--no-chrome',...(!maintenance&&!generation?['--disable-slash-commands']:[]),'--permission-mode','dontAsk','--permission-prompts','none','--tools',tools,'--allowedTools',tools,'--disallowedTools','mcp__*','--settings',JSON.stringify(settings),'--system-prompt-snapshot','off','--model',model,this.resumed?'--resume':'--session-id',this.session];
+   if(this.options.ephemeral)args.push('--no-session-persistence');
    if(!maintenance&&this.options.dynamicTools?.length){
     // ユーザー設定を読まず、Beni 内部の SDK transport だけを接続する。
     args[args.indexOf('--mcp-config')+1]=JSON.stringify({mcpServers:{beni:{type:'sdk',name:'beni'}}});
@@ -145,6 +152,10 @@ export class ClaudeRpc {
  private completeText(block:Block){if(block.complete)return;block.complete=true;this.emit('item/completed',{item:{id:block.id,type:'agentMessage',text:block.text}})}
  private finish(status:'completed'|'failed'|'interrupted',modelUnavailable=false,errorCode?:string){if(this.completed)return;this.completed=true;this.child?.stdin.end();for(const block of this.blocks.values())if(block.type==='text')this.completeText(block);this.emit('turn/completed',{turn:{id:this.turn,status,...(modelUnavailable||errorCode?{error:{code:modelUnavailable?'model_not_found':errorCode}}:{})}})}
  private receive(message:any){
+  if(message.type==='rate_limit_event'){
+   if(message.session_id===this.session&&message.parent_tool_use_id==null)this.onEvent('account/rateLimits/updated',message.rate_limit_info);
+   return;
+  }
   if(this.compacting||this.localCommand){
    if(message.parent_tool_use_id)return;
    if(message.session_id!==undefined&&message.session_id!==this.session){this.rejectPending(new ClaudeRejected());this.close();return}
@@ -174,7 +185,10 @@ export class ClaudeRpc {
     const local=this.initialized&&message.session_id===this.session&&message.parent_tool_use_id==null&&message.local_command_run?.command===this.localCommand&&message.local_command_run?.args===''&&typeof message.local_command_source==='string'&&!('local_command_outcome' in message);
     if(message.local_command_outcome?.kind==='unavailable_headless')this.commandUnavailable=true;
     if(!local||text===null||!text.trim()||Buffer.byteLength((this.commandOutput??'')+text,'utf8')>maxCommandOutput)this.commandFallback=true;
-    else this.commandOutput=(this.commandOutput??'')+text;
+    else {
+     this.commandOutput=(this.commandOutput??'')+text;
+     if(this.localCommand==='usage'&&this.options?.ephemeral&&message.usage_report!==undefined)this.usageReport=message.usage_report;
+    }
    }
    if(message.type==='stream_event')this.commandFallback=true;
    if(message.type==='result'){
@@ -186,7 +200,14 @@ export class ClaudeRpc {
      `Unknown command: /${this.localCommand}`,
     ].includes(message.result.trim());
     const failed=message.session_id!==this.session||!this.initialized||message.is_error===true||message.subtype!=='success'||unavailable||this.commandFallback||typeof output!=='string'||!output.trim()||Buffer.byteLength(output,'utf8')>maxCommandOutput;
-    if(failed)this.rejectPending(new ClaudeRejected(false,this.interrupted));else{this.accept();if(!this.interrupted)this.emit('thread/command/output',{output})}
+    if(failed)this.rejectPending(new ClaudeRejected(false,this.interrupted));
+    else{
+     this.accept();
+     if(!this.interrupted){
+      if(this.usageReport!==undefined)this.emit('account/usage/report',{report:this.usageReport});
+      this.emit('thread/command/output',{output});
+     }
+    }
     this.finish(this.interrupted?'interrupted':failed?'failed':'completed',false,failed?(unavailable?'COMMAND_UNAVAILABLE':'COMMAND_NOT_PERFORMED'):undefined);
    }
    return;

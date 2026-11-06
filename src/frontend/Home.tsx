@@ -6,7 +6,6 @@ import ProjectCreateDialog from './components/ProjectCreateDialog';
 import type { AppState, Project, Task } from './types';
 
 export interface HomeProps {
-  query: string;
   onOpenProject?: (project: Project) => void;
   onOpenTask: (task: Task, project: Project, created: boolean) => void;
 }
@@ -54,22 +53,10 @@ export default function Home(props: HomeProps) {
   let projectSelectVersion = 0;
   let alive = true;
   let interactionVersion = 0;
-  let lastQuery = props.query;
 
   const selectedProject = createMemo(() => projects().find(project => String(project.id) === projectId()));
-  const filteredTasks = createMemo(() => {
-    const query = props.query.trim().toLocaleLowerCase();
-    return tasks().filter(task => `${task.id} ${task.name}`.toLocaleLowerCase().includes(query));
-  });
   const canCreate = createMemo(() => Boolean(taskName().trim() && selectedProject()) && !creatingTask());
 
-  createEffect(() => {
-    const next = props.query;
-    if (next !== lastQuery) {
-      lastQuery = next;
-      interactionVersion++;
-    }
-  });
   // The value can be restored before asynchronous project options exist. Reapply it
   // after Solid has updated the <option> nodes, including when a project is created.
   createEffect(() => {
@@ -199,7 +186,7 @@ export default function Home(props: HomeProps) {
     props.onOpenTask(task, project, false);
   }
 
-  return <section class="mx-auto max-w-6xl py-[clamp(1rem,3vw,2.5rem)]">
+  return <section class="mx-auto py-2">
     <Show when={error() || actionError()}><p role="alert" class="alert alert-error mb-4">{error() || actionError()}</p></Show>
     <TaskCreate
       taskName={taskName()}
@@ -214,7 +201,7 @@ export default function Home(props: HomeProps) {
       onCreateTask={createTask}
       onOpenProject={props.onOpenProject}
     />
-    <TaskList tasks={filteredTasks()} loading={loading()} sortKey={sortKey()} sortDirection={sortDirection()} onSort={sort} onOpenTask={openTask} />
+    <TaskList tasks={tasks()} loading={loading()} sortKey={sortKey()} sortDirection={sortDirection()} onSort={sort} onOpenTask={openTask} />
     <ProjectCreateDialog
       dialogRef={element => { dialog = element; }}
       creating={creatingProject()}

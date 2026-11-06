@@ -54,7 +54,7 @@ Beni/
 │           ├── ResizeHandle.tsx      作業領域の左右・上下比率を調整するハンドル
 │           ├── TerminalPanel.tsx     ターミナルタブ・描画・操作権・再接続
 │           ├── MarkdownPreview.tsx   Markdown の変換・サニタイズ・装飾表示
-│           ├── InstructionsSettings.tsx  指示テンプレートの閲覧
+│           ├── PromptTableMarkdownPreview.tsx  出典と根拠を表示する Markdown プレビュー
 │           ├── Menu.tsx              ホーム・設定への移動と検索のメニュー
 │           ├── TaskCreate.tsx        プロジェクトを選び、タスクを作成するフォーム
 │           ├── TaskList.tsx          タスク一覧と並べ替え操作
@@ -90,7 +90,8 @@ Beni/
 │   │   ├── websocket.md              WS の接続・購読・メッセージ仕様
 │   │   ├── terminal.md               ターミナルの操作権・画面復元・入出力
 │   │   └── chat-sync.md              チャットのパック確定・再接続時の同期
-│   ├── next-agent-plan.md            アプリ全体の目的、利用の流れ、構想
+│   ├── specification.md             アプリ全体の確定仕様
+│   ├── future-considerations.md     未決定の構想と検討事項
 │   ├── screens/                      画面ごとの仕様
 │   │   ├── home.md                   ホーム画面
 │   │   ├── project-detail.md         プロジェクト詳細画面

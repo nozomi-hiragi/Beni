@@ -35,6 +35,7 @@ if(action==='reject assistant model'){send({type:'assistant',error:'model_not_fo
 if(action==='unknown model error'){send({type:'result',subtype:'error_during_execution',is_error:true,errors:['The selected model was not found']});process.exit(1)}
 if(action==='reject'){send({type:'result',subtype:'error_during_execution',is_error:true,errors:['Request failed']});process.exit(1)}
 if(process.env.FAKE_CLAUDE_COMMAND!=='no-init')send({type:'system',subtype:'init',session_id:session,...(process.env.FAKE_CLAUDE_COMMAND==='not-listed'?{slash_commands:['compact']}:builtin?{slash_commands:[builtin]}:{})});
+if(process.env.FAKE_CLAUDE_RATE_LIMIT)send({type:'rate_limit_event',session_id:session,rate_limit_info:{status:'allowed',...(process.env.FAKE_CLAUDE_RATE_LIMIT==='missing'?{}:{utilization:Number(process.env.FAKE_CLAUDE_RATE_LIMIT)}),rateLimitType:'seven_day',resetsAt:2_000_000_100}});
 if(process.env.FAKE_CLAUDE_ACCEPT_DELAY_MS)await Bun.sleep(Number(process.env.FAKE_CLAUDE_ACCEPT_DELAY_MS));
 if(action==='/compact'){
  const mode=process.env.FAKE_CLAUDE_COMPACT??'success';
@@ -77,6 +78,12 @@ if(builtin){
   const output=['oversize','legacy-oversize'].includes(mode)?'x'.repeat(65537):mode==='multibyte-oversize'?'界'.repeat(21846):mode==='limit'?'x'.repeat(65536):mode==='empty'?'':mode==='non-text'?{}:`${builtin==='context'?'Context usage: 12%':'Usage: 3 fictional requests'}\n`;
   if(!mode.startsWith('legacy')){
    const synthetic:any={type:'assistant',session_id:session,parent_tool_use_id:null,local_command_run:{command:builtin,args:''},local_command_source:'<local-command-stdout>Raw fixture that must not be displayed</local-command-stdout>',message:{id:'local-result',role:'assistant',content:mode==='string-content'?output:[{type:'text',text:output}]},...(builtin==='usage'?{usage_report:{fictional:true}}:{context_usage:{fictional:true}})};
+   if (builtin === 'usage' && process.env.FAKE_CLAUDE_USAGE_REPORT && args.includes('--no-session-persistence')) {
+    synthetic.usage_report = {rate_limits:{limits:[
+     {kind:'session',group:'session',percent:0,resets_at:null},
+     {kind:'weekly_all',group:'weekly',percent:45,resets_at:new Date(2_000_000_100_000).toISOString()},
+    ]}};
+   }
    if(mode==='text-blocks'&&typeof output==='string')synthetic.message.content=[{type:'text',text:output.slice(0,8)},{type:'text',text:output.slice(8)}];
    if(mode==='mixed-tool')synthetic.message.content.push({type:'tool_use',id:'private-tool',name:'Read',input:{}});
    if(mode==='invalid-content')synthetic.message.content={text:output};

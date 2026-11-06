@@ -42,7 +42,7 @@ describe('Home creation across navigation', () => {
     vi.stubGlobal('fetch', fetchMock);
     const onOpenTask = vi.fn();
 
-    const first = render(() => <Home query="" onOpenTask={onOpenTask} />);
+    const first = render(() => <Home onOpenTask={onOpenTask} />);
     await screen.findByRole('option', { name: 'プロジェクト A' });
     fireEvent.change(screen.getByRole('combobox', { name: 'プロジェクト' }), { target: { value: '019a0000-0000-7000-8000-000000000001' } });
     fireEvent.input(screen.getByRole('textbox', { name: 'タスク名' }), { target: { value: '最初の作業' } });
@@ -51,7 +51,7 @@ describe('Home creation across navigation', () => {
 
     // Settings/navigation unmounts Home while the POST is still in flight.
     first.unmount();
-    const second = render(() => <Home query="" onOpenTask={onOpenTask} />);
+    const second = render(() => <Home onOpenTask={onOpenTask} />);
     remountState.resolve(json(state));
     await screen.findByRole('option', { name: 'プロジェクト A' });
     const select = screen.getByRole('combobox', { name: 'プロジェクト' }) as HTMLSelectElement;
@@ -68,7 +68,7 @@ describe('Home creation across navigation', () => {
     fireEvent.input(screen.getByRole('textbox', { name: 'タスク名' }), { target: { value: '次の作業' } });
     fireEvent.change(select, { target: { value: '019a0000-0000-7000-8000-000000000002' } });
     second.unmount();
-    render(() => <Home query="" onOpenTask={onOpenTask} />);
+    render(() => <Home onOpenTask={onOpenTask} />);
     await screen.findByRole('option', { name: 'プロジェクト B' });
     await waitFor(() => expect((screen.getByRole('combobox', { name: 'プロジェクト' }) as HTMLSelectElement).value).toBe('019a0000-0000-7000-8000-000000000002'));
     expect((screen.getByRole('button', { name: 'タスク作成' }) as HTMLButtonElement).disabled).toBe(true);
@@ -89,7 +89,7 @@ describe('project selection and cancellation', () => {
       if (path === '/api/state') return json({ projects: [{ id:'019a0000-0000-7000-8000-000000000001', name: 'プロジェクト A', folder: '/tmp/example' }], tasks: [] });
       throw new Error(`Unexpected request: ${path}`);
     }));
-    render(() => <Home query="" onOpenTask={vi.fn()} />);
+    render(() => <Home onOpenTask={vi.fn()} />);
     await screen.findByRole('option', { name: 'プロジェクト A' });
     const select = screen.getByRole('combobox', { name: 'プロジェクト' }) as HTMLSelectElement;
     fireEvent.input(screen.getByRole('textbox', { name: 'タスク名' }), { target: { value: '作業' } });
@@ -123,7 +123,7 @@ describe('project selection and cancellation', () => {
       throw new Error(`Unexpected request: ${path}`);
     });
     vi.stubGlobal('fetch', request);
-    render(() => <Home query="" onOpenTask={vi.fn()} />);
+    render(() => <Home onOpenTask={vi.fn()} />);
     fireEvent.change(screen.getByRole('combobox', { name: 'プロジェクト' }), { target: { value: 'new' } });
     fireEvent.input(screen.getByRole('textbox', { name: 'プロジェクト名' }), { target: { value: '新しいプロジェクト' } });
     fireEvent.click(screen.getByRole('button', { name: '参照' }));
@@ -150,7 +150,7 @@ describe('task list sorting', () => {
       if (path === '/api/state') return json({ projects: [{ id:'019a0000-0000-7000-8000-000000000001', name: '架空', folder: '/tmp/example' }], tasks });
       throw new Error(`Unexpected request: ${path}`);
     }));
-    const view = render(() => <Home query="" onOpenTask={vi.fn()} />);
+    const view = render(() => <Home onOpenTask={vi.fn()} />);
     await screen.findAllByRole('cell', { name: 'B' });
     expect(screen.queryByRole('columnheader', { name: 'ID' })).toBeNull();
     const ids = () => [...view.container.querySelectorAll('tbody tr')].map(row => row.getAttribute('data-id'));
@@ -174,7 +174,7 @@ it('sorts creation dates newest first, preserves equal dates, and keeps unknown 
     { id: '5', name: '欠落' },
   ].map(task => ({ ...task, projectId: 'project', phase: 'requirements', status: 'idle' }));
   vi.stubGlobal('fetch', vi.fn(async () => json({ projects: [], tasks })));
-  const view = render(() => <Home query="" onOpenTask={vi.fn()} />);
+  const view = render(() => <Home onOpenTask={vi.fn()} />);
   await screen.findByRole('cell', { name: '古い' });
   const names = () => [...view.container.querySelectorAll('tbody tr')].map(row => row.firstElementChild!.textContent);
   const date = view.container.querySelector('time')!;
