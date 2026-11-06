@@ -8,7 +8,12 @@ const chatMock = vi.hoisted(()=>({busyChange: undefined as ((busy:boolean)=>void
 vi.mock('./ChatPanel',()=>({default: (props: {projectId:string; instructionFocus?:string|null; instructionFocusLabel?:string; onBusyChange?:(busy:boolean)=>void})=>{chatMock.busyChange=props.onBusyChange;return <div data-testid="instructions-chat">{props.projectId}<span data-testid="focus-label">{props.instructionFocusLabel??'未選択'}</span></div>}}));
 afterEach(()=>{cleanup();vi.unstubAllGlobals()});
 it('loads templates and switches the Markdown preview with descriptive variable badges',async()=>{
- vi.stubGlobal('fetch',vi.fn().mockResolvedValue({ok:true,json:async()=>({instructions:[{key:'editor',content:'# Editor {{working_directory}} {{custom}}'},{key:'common',content:'# Common {{project_directory}}'},{key:'requirements',content:'# Requirements {{task_id}}'},{key:'execution',content:'# Execution instructions'},{key:'retrospective',content:'# Retrospective instructions'},{key:'finalization',content:'# 終了時に参照する {{retrospective_chat_path}}'}]})}));
+ const executionContent = '# Execution instructions';
+ const fetch = vi.fn().mockResolvedValueOnce({ok:true,json:async()=>({
+  instructions:[{key:'editor',content:'# Editor {{working_directory}} {{custom}}'},{key:'common',content:'# Common {{project_directory}}'},{key:'requirements',content:'# Requirements {{task_id}}'},{key:'execution',content:executionContent},{key:'retrospective',content:'# Retrospective instructions'},{key:'finalization',content:'# 終了時に参照する {{retrospective_chat_path}}'}],
+  provenance:{execution:{revision:'execution-revision',items:[{id:'execution-item',start:0,end:executionContent.length}]}},
+ })}).mockResolvedValueOnce({ok:true,json:async()=>({reason:'実装時の指示の根拠',sources:[]})});
+ vi.stubGlobal('fetch',fetch);
  render(()=> <InstructionsSettings/>);
  expect(screen.getAllByRole('status')[0].textContent).toContain('読み込み中');
  expect(await screen.findByRole('heading',{name:'Common プロジェクトのディレクトリ'})).toBeTruthy();
@@ -31,7 +36,11 @@ it('loads templates and switches the Markdown preview with descriptive variable 
  expect(common.classList.contains('aura')).toBe(true);
  expect(screen.getByTestId('focus-label').textContent).toBe('全共通');
  fireEvent.click(screen.getByRole('tab',{name:'実装中'}));
- expect(await screen.findByText('Execution instructions')).toBeTruthy();
+ fireEvent.mouseOver(await screen.findByRole('heading',{name:'Execution instructions'}));
+ fireEvent.click(await screen.findByText('実装時の指示の根拠'));
+ const query = new URL(fetch.mock.calls[1]![0], 'http://localhost').searchParams;
+ expect(Object.fromEntries(query)).toEqual({name:'execution',revision:'execution-revision',itemId:'execution-item'});
+ expect(screen.getByTestId('focus-label').textContent).toBe('全共通');
  expect(screen.getByRole('heading',{name:'Common プロジェクトのディレクトリ'})).toBeTruthy();
  expect(screen.queryByText('Requirements instructions')).toBeNull();
  const execution=screen.getByRole('tab',{name:'実装中'});

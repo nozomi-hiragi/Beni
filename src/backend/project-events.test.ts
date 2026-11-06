@@ -18,7 +18,7 @@ function fixture() {
 }
 const digest = (content: string | Buffer) => createHash('sha256').update(content).digest('hex');
 function editDatabase(root: string, edit: (db: Database) => void) {
-  const db = new Database(join(root, '.beni', 'events.sqlite'));
+  const db = new Database(join(root, '.beni', 'project.sqlite'));
   try { edit(db); } finally { db.close(); }
 }
 
@@ -220,14 +220,40 @@ test('イベントDBやsidecarのシンボリックリンク・ハードリン�
   for (const suffix of ['', '-journal', '-wal', '-shm']) {
     const {root} = fixture(), outside = join(root, 'outside.sqlite');
     writeFileSync(outside, 'untouched');
-    symlinkSync(outside, join(root, '.beni', 'events.sqlite' + suffix));
+    symlinkSync(outside, join(root, '.beni', 'project.sqlite' + suffix));
     expect(() => projectEvents(root)).toThrow('Invalid event database file');
     expect(readFileSync(outside, 'utf8')).toBe('untouched');
   }
   const {root} = fixture();
   projectEvents(root);
-  linkSync(join(root, '.beni', 'events.sqlite'), join(root, 'linked.sqlite'));
+  linkSync(join(root, '.beni', 'project.sqlite'), join(root, 'linked.sqlite'));
   expect(() => projectEvents(root)).toThrow('Invalid event database file');
+});
+
+test('旧イベントDBをWALから復旧して改名し、イベントを維持する', () => {
+  const {root} = fixture(), legacy = join(root, '.beni', 'events.sqlite');
+  const db = new Database(legacy);
+  db.exec(`CREATE TABLE events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, type TEXT NOT NULL, at TEXT NOT NULL, task_id TEXT, phase TEXT, source_phase TEXT,
+    operation_id TEXT, chat_id TEXT, send_id TEXT, pack_id TEXT, tool_call_id TEXT, details TEXT NOT NULL, from_phase TEXT, to_phase TEXT);
+    PRAGMA journal_mode=WAL;`);
+  db.query('INSERT INTO events(type,at,details) VALUES (?,?,?)').run('project.created', '2026-01-01T00:00:00.000Z', '{}');
+  db.close();
+  expect(projectEvents(root).events.map(event => event.type)).toEqual(['project.created']);
+  expect(readFileSync(join(root, '.beni', 'project.sqlite')).byteLength).toBeGreaterThan(0);
+  expect(() => readFileSync(legacy)).toThrow();
+  const reopened = new Database(join(root, '.beni', 'project.sqlite'));
+  expect(reopened.query('PRAGMA journal_mode').get()).toEqual({journal_mode: 'delete'});
+  reopened.close();
+});
+
+test('新旧イベントDBが両方ある場合はどちらにも触れず拒否する', () => {
+  const {root} = fixture();
+  writeFileSync(join(root, '.beni', 'events.sqlite'), 'legacy');
+  writeFileSync(join(root, '.beni', 'project.sqlite'), 'current');
+  expect(() => projectEvents(root)).toThrow('Both project event databases exist');
+  expect(readFileSync(join(root, '.beni', 'events.sqlite'), 'utf8')).toBe('legacy');
+  expect(readFileSync(join(root, '.beni', 'project.sqlite'), 'utf8')).toBe('current');
 });
 
 test('タスク文書だけを保存し、プロジェクト共通知識とソースコードを追跡しない', () => {

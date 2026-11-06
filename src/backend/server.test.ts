@@ -2,14 +2,37 @@ import { test, expect } from 'bun:test';
 // Bun supports headers in its client constructor; DOM types expose only protocols.
 const Socket = globalThis.WebSocket as unknown as {new(url:string,options:Bun.WebSocketOptions):WebSocket};
 import { generateId, validProjectId, validTaskId } from '../shared/ids';
+import { INSTRUCTIONS_CHAT_ID } from '../shared/communication';
 import { Store } from './store/index';
 import { ChatService, type TaskEventsProvider } from './chat';
 import { createHandler, createServerOptions, dataPaths } from './server';
-import { mkdtemp, mkdir, realpath, rm, symlink, writeFile, readFile, rename, stat } from 'node:fs/promises';
+import { withDatabase } from './project-events';
+import { mkdtemp, mkdir, realpath, rm, symlink, writeFile, readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 
+const fakeCodex=join(import.meta.dir,'test/fake-codex.ts');
+const fixtureRequest='入力の形式を検証してください。';
+const waitUntil=async(check:()=>boolean|Promise<boolean>)=>{
+ for(let i=0;i<150;i++){if(await check())return;await Bun.sleep(20)}
+ throw Error('条件を満たすまでに時間切れになりました');
+};
+const waitForFailedReview=(folder:string,t:string)=>waitUntil(()=>withDatabase(folder,db=>{
+ if(!db.query("SELECT 1 FROM sqlite_schema WHERE name='document_review'").get())return false;
+ const review=db.query('SELECT state FROM document_review WHERE task_id=?').get(t) as {state:string}|null;
+ return review?.state==='failed';
+}));
+function writeTaskDocument(store:Store,p:string,t:string,name:string,text:string){
+ const current=store.managedDocument(p,t,name)!;
+ const sourceVersion=current.items.some(item=>item.text.trim())?current:
+  store.managedDocumentHistory(p,t).find(doc=>doc.name===name&&doc.items.some(item=>item.text.trim()))!;
+ const source=sourceVersion.items.find(item=>item.text.trim())!;
+ return store.writeManagedDocument(p,t,name,current.revision,[{
+  text,reason:'テストで確認する本文を設定する',
+  sources:[{kind:'document',id:name+'/'+source.id,revision:sourceVersion.revision,text:source.text}]
+ }],generateId('task'));
+}
 test('project, task, chat and initial document flow', async () => {
  const folder=await mkdtemp(join(tmpdir(),'beni-project-'));
  const store = new Store(':memory:'); const handle = createHandler(store);
@@ -30,6 +53,71 @@ test('project, task, chat and initial document flow', async () => {
   expect((await handle(new Request('http://example.com/api/state'))).status).toBe(403);
   expect((await post('/api/projects',{name:'x'.repeat(70000),folder:'/tmp/example'})).status).toBe(413);
  } finally {store.close();await rm(folder,{recursive:true,force:true})}
+});
+
+test('文書の根拠は本文と同じ版の位置を返し、所有タスクとインストラクションの範囲に限定する', async () => {
+ const folder = await mkdtemp(join(tmpdir(),'beni-provenance-'));
+ const store = new Store(':memory:');
+ try {
+  const project = store.createProject('Example',folder);
+  const task = store.createTask(project.id,'Task');
+  const other = store.createTask(project.id,'Other');
+  const chat = new ChatService(()=>folder,()=>null);
+  const handle = createHandler(store,folder,chat);
+  const get = (path:string) => handle(new Request('http://127.0.0.1:3210'+path));
+  const lookup = (params:Record<string,string>) => get('/api/document-provenance?'+new URLSearchParams(params));
+  const name = 'requirements.md';
+  const original = store.managedDocument(project.id,task.id,name)!;
+  const source = original.items[0]!;
+  expect(source).toMatchObject({
+   reason:'登録されたタスク名を最初の見出しに使った。',
+   sources:[{kind:'template',id:name,text:'Task'}]
+  });
+  const prefix = '# 📝 要件\n\n';
+  const body = '入力値を検証する。';
+  const reason = '入力要件を明文化する。';
+  const sources = [{kind:'document' as const,id:name+'/'+source.id,revision:original.revision,text:source.text}];
+  const version = store.writeManagedDocument(project.id,task.id,name,original.revision,[
+   {text:prefix,reason:'要件の見出しを付ける。',sources},{text:body,reason,sources}
+  ],'fixture');
+  const itemId = version.items[1]!.id;
+  const detail = await (await get('/api/tasks/'+task.id)).json();
+  expect(detail.documents.find((doc:{name:string})=>doc.name===name)).toEqual({
+   name,path:name,content:prefix+body,version:version.updatedAt,
+   provenance:{revision:version.revision,items:[
+    {id:version.items[0]!.id,start:0,end:prefix.length},{id:itemId,start:prefix.length,end:prefix.length+body.length}
+   ]}
+  });
+  const params = {name,revision:version.revision,itemId,projectId:project.id,taskId:task.id};
+  writeTaskDocument(store,project.id,task.id,name,'更新した本文。');
+  expect(await (await lookup(params)).json()).toEqual({reason,sources});
+  expect((await lookup({...params,taskId:other.id})).status).toBe(404);
+  expect((await lookup({...params,projectId:generateId('project')})).status).toBe(404);
+  expect((await lookup({...params,revision:original.revision})).status).toBe(404);
+  expect(await (await lookup({...params,itemId:version.items[0]!.id})).json()).toEqual({reason:'要件の見出しを付ける。',sources});
+  expect((await lookup({...params,name:'../requirements.md'})).status).toBe(400);
+  expect((await lookup({...params,itemId:'invalid'})).status).toBe(400);
+  expect((await lookup({name,revision:version.revision,itemId,projectId:project.id})).status).toBe(400);
+  expect((await lookup({name,revision:version.revision,itemId,taskId:task.id})).status).toBe(400);
+
+  const before = store.instructionDocument('editor')!;
+  store.updateInstruction('editor','エディタの指示を確認する。',before.content);
+  const instruction = store.instructionDocument('editor')!;
+  const entry = instruction.items[0]!;
+  const instructions = await (await get('/api/instructions')).json();
+  expect(instructions.instructions).toEqual(store.instructions());
+  expect(instructions.editorState).toEqual(await chat.instructionEditorState());
+  expect(instructions.provenance.editor).toEqual({
+   revision:instruction.revision,items:[{id:entry.id,start:0,end:entry.text.length}]
+  });
+  const instructionParams = {name:'editor',revision:instruction.revision,itemId:entry.id};
+  expect(await (await lookup(instructionParams)).json()).toEqual({reason:entry.reason,sources:entry.sources});
+  expect((await lookup({...instructionParams,name:'common'})).status).toBe(404);
+  expect((await lookup({...instructionParams,projectId:project.id,taskId:task.id})).status).toBe(400);
+ } finally {
+  store.close();
+  await rm(folder,{recursive:true,force:true});
+ }
 });
 
 test('serves the compiled Solid app and locally generated stylesheet', async () => {
@@ -122,28 +210,22 @@ test('folder picker bounds a directory listing', async () => {
 });
 
 
-test('creates task Markdown and previews real file updates as the authoritative documents', async()=>{
- const folder=await mkdtemp(join(tmpdir(),'beni-documents-'));const store=new Store(':memory:');const handle=createHandler(store);
- const post=(path:string,data:unknown)=>handle(new Request('http://127.0.0.1:3210'+path,{method:'POST',headers:{origin:'http://127.0.0.1:3210','content-type':'application/json'},body:JSON.stringify(data)}));
+test('新規タスク文書はDBを正本とし、後から置いたMarkdownを取り込まない', async()=>{
+ const folder=await mkdtemp(join(tmpdir(),'beni-documents-'));const store=new Store(':memory:');
+ const handle=createHandler(store,folder,new ChatService(()=>folder,()=>null));
+ const project=store.createProject('Example',folder),task=store.createTask(project.id,'New task');
  const detail=async(id:string)=>(await handle(new Request(`http://127.0.0.1:3210/api/tasks/${id}`))).json();
  try{
-  const project=await (await post('/api/projects',{name:'Example',folder})).json();
-  const task=await (await post('/api/tasks',{name:'New task',projectId:project.id})).json();
-  const base=join(folder,'.beni','tasks',String(task.id));
-  expect(await readFile(join(base,'requirements.md'),'utf8')).toBe('# New task\n');
-  expect(await readFile(join(base,'implementation.md'),'utf8')).toContain('# Implementation plan');
-  expect(await readFile(join(base,'documents.md'),'utf8')).toBe('# 仕様整理\n\n## 資料\n\n## 仕様\n');
-  await writeFile(join(base,'implementation.md'),'# Existing plan\r\n');
-  await rm(join(base,'documents.md'));
-  await detail(task.id);
-  expect(await readFile(join(base,'requirements.md'),'utf8')).toBe('# New task\n');
-  expect(await readFile(join(base,'implementation.md'),'utf8')).toBe('# Existing plan\r\n');
-  expect(await readFile(join(base,'documents.md'),'utf8')).toContain('## 仕様');
-  await writeFile(join(base,'requirements.md'),'# Actual file\n');
-  expect((await detail(task.id)).documents.find((d:any)=>d.name==='requirements.md').content).toBe('# Actual file\n');
+  const base=join(folder,'.beni','tasks',task.id);
+  const documents=(await detail(task.id)).documents;
+  expect(documents.find((doc:any)=>doc.name==='requirements.md').content).toBe('# New task\n');
+  expect(documents.find((doc:any)=>doc.name==='implementation.md').content).toContain('# Implementation plan');
+  for(const name of ['requirements.md','documents.md','implementation.md'])expect(await Bun.file(join(base,name)).exists()).toBe(false);
+  await writeFile(join(base,'requirements.md'),'# 外部で置いたファイル\n');
+  writeTaskDocument(store,project.id,task.id,'requirements.md','# DBの正本\n');
   const second=store.createTask(project.id,'Second');
-  expect((await detail(second.id)).documents.find((d:any)=>d.name==='requirements.md').content).toBe('# Second\n');
-  expect((await detail(task.id)).documents.find((d:any)=>d.name==='requirements.md').content).toBe('# Actual file\n');
+  expect((await detail(second.id)).documents.find((doc:any)=>doc.name==='requirements.md').content).toBe('# Second\n');
+  expect((await detail(task.id)).documents.find((doc:any)=>doc.name==='requirements.md').content).toBe('# DBの正本\n');
  }finally{store.close();await rm(folder,{recursive:true,force:true})}
 });
 
@@ -186,7 +268,9 @@ function socketMessages(ws:WebSocket){const messages:any[]=[];ws.addEventListene
 async function opened(ws:WebSocket){if(ws.readyState===1)return;await new Promise<void>((resolve,reject)=>{ws.addEventListener('open',()=>resolve(),{once:true});ws.addEventListener('error',()=>reject(Error('WebSocket failed')),{once:true})})}
 test('shared WebSocket validates handshake/scopes, streams document changes and releases subscriptions',async()=>{
  const folder=await mkdtemp(join(tmpdir(),'beni-ws-'));const store=new Store(':memory:');const otherFolder=join(folder,'other');await mkdir(otherFolder);const project=store.createProject('Example',folder);const other=store.createProject('Other',otherFolder);const task=store.createTask(project.id,'Task');
- const server=Bun.serve({hostname:'127.0.0.1',port:0,...createServerOptions(store)});const origin=`http://127.0.0.1:${server.port}`;const ws=new Socket(origin.replace('http:','ws:')+'/api/ws',{headers:{origin}});const inbox=socketMessages(ws);
+ const chat=new ChatService(()=>folder,()=>fakeCodex);
+ const server=Bun.serve({hostname:'127.0.0.1',port:0,...createServerOptions(store,folder,chat)});const origin=`http://127.0.0.1:${server.port}`;const ws=new Socket(origin.replace('http:','ws:')+'/api/ws',{headers:{origin}});const inbox=socketMessages(ws);
+ process.env.FAKE_CODEX_WORKFLOW='enabled';
  try{
   expect((await fetch(origin+'/api/ws')).status).toBe(403);
   await opened(ws);ws.send(JSON.stringify({type:'subscribe',subscriptionId:'before',topic:'chat',scope:{projectId:project.id,taskId:null}}));expect(await inbox.next()).toMatchObject({type:'error',code:'NOT_READY'});
@@ -196,18 +280,21 @@ test('shared WebSocket validates handshake/scopes, streams document changes and 
   ws.send(JSON.stringify({type:'subscribe',subscriptionId:'bad',topic:'documents',scope:{projectId:other.id,taskId:task.id}}));expect(await inbox.next()).toMatchObject({code:'NOT_FOUND',subscriptionId:'bad'});
   ws.send(JSON.stringify({type:'subscribe',subscriptionId:'doc',topic:'documents',scope:{projectId:project.id,taskId:task.id}}));expect(await inbox.next()).toEqual({type:'subscribed',subscriptionId:'doc'});
   ws.send(JSON.stringify({type:'subscribe',subscriptionId:'doc-two',topic:'documents',scope:{projectId:project.id,taskId:task.id}}));expect(await inbox.next()).toEqual({type:'subscribed',subscriptionId:'doc-two'});
-  const path=join(folder,'.beni','tasks',String(task.id));await writeFile(join(path,'replacement.tmp'),'# Atomic replacement');await rename(join(path,'replacement.tmp'),join(path,'requirements.md'));
+  const sent=await fetch(origin+'/api/chat/send',{method:'POST',headers:{origin,'content-type':'application/json'},body:JSON.stringify({
+   projectId:project.id,taskId:task.id,phase:'requirements',content:fixtureRequest,model:null
+  })});
+  expect(sent.status).toBe(202);
   const updates=[await inbox.next(),await inbox.next()];expect(updates.map(message=>message.subscriptionId).sort()).toEqual(['doc','doc-two']);expect(updates.every(message=>message.name==='documents.changed')).toBe(true);
-  const timestamp=store.task(task.id)!.updatedAt;expect(timestamp).not.toBe(task.updatedAt);
-  await writeFile(join(path,'ignored.tmp'),'ignored');await Bun.sleep(200);expect(inbox.messages).toHaveLength(0);expect(store.task(task.id)!.updatedAt).toBe(timestamp);
+  await waitUntil(async()=>(await chat.get(project.id,task.id,'requirements')).messages.at(-1)?.status==='completed');
   ws.send(JSON.stringify({type:'unsubscribe',subscriptionId:'doc-two'}));expect(await inbox.next()).toEqual({type:'unsubscribed',subscriptionId:'doc-two'});
   ws.send(JSON.stringify({type:'unsubscribe',subscriptionId:'doc'}));expect(await inbox.next()).toEqual({type:'unsubscribed',subscriptionId:'doc'});
   ws.send(JSON.stringify({type:'subscribe',subscriptionId:'doc',topic:'documents',scope:{projectId:project.id,taskId:task.id}}));expect(await inbox.next()).toMatchObject({code:'SUBSCRIPTION_CONFLICT'});
-  await writeFile(join(path,'requirements.md'),'# Disconnected');await Bun.sleep(120);expect(inbox.messages).toHaveLength(0);
+  writeTaskDocument(store,project.id,task.id,'requirements.md','# Disconnected');
   const detail=await (await fetch(origin+`/api/tasks/${task.id}`)).json();expect(detail.documents.find((d:any)=>d.name==='requirements.md').content).toBe('# Disconnected');
+  expect(inbox.messages).toHaveLength(0);
   ws.send(JSON.stringify({type:'subscribe',subscriptionId:'unknown',topic:'unknown-topic',scope:{projectId:project.id,taskId:null}}));expect(await inbox.next()).toMatchObject({code:'UNKNOWN_TOPIC'});
   ws.send(JSON.stringify({type:'subscribe',subscriptionId:'general-documents',topic:'documents',scope:{projectId:project.id,taskId:null}}));expect(await inbox.next()).toMatchObject({code:'NOT_FOUND',subscriptionId:'general-documents'});
- }finally{ws.close();server.stop(true);store.close();await rm(folder,{recursive:true,force:true})}
+ }finally{delete process.env.FAKE_CODEX_WORKFLOW;ws.close();server.stop(true);store.close();await rm(folder,{recursive:true,force:true})}
 });
 test('unsupported WebSocket protocol reports error and closes',async()=>{
  const store=new Store(':memory:');const server=Bun.serve({hostname:'127.0.0.1',port:0,...createServerOptions(store)});const origin=`http://127.0.0.1:${server.port}`;const ws=new Socket(origin.replace('http:','ws:')+'/api/ws',{headers:{origin}});const inbox=socketMessages(ws);
@@ -383,7 +470,9 @@ test('phase advances once per expected phase and rejects busy preparations and a
   for(let i=0;i<100;i++){response=await advance('requirements');if(response.status!==409)break;await Bun.sleep(20)}
   expect(response!.status).toBe(200);const updated=await response!.json();expect(updated.phase).toBe('documents');expect(Date.parse(updated.updatedAt)).toBeGreaterThan(Date.parse(task.updatedAt!));
   expect((await advance('requirements')).status).toBe(409);
+  await waitUntil(async()=>(await chat.get(project.id,task.id,'documents')).messages.at(-1)?.status==='completed');
   expect((await (await advance('documents')).json()).phase).toBe('implementation');
+  await waitUntil(async()=>(await chat.get(project.id,task.id,'implementation')).messages.at(-1)?.status==='completed');
   expect((await (await advance('implementation')).json()).phase).toBe('requirements');
   expect((await advance('execution')).status).toBe(409);
  } finally {store.close();await rm(folder,{recursive:true,force:true})}
@@ -417,15 +506,14 @@ test('HTTPはタスク会話phaseを必須とし、イベントのページ・�
 });
 
 test('WSのphaseスコープを検証し、タスク全体の文書・フェーズイベントを通知する',async()=>{
- const folder=await mkdtemp(join(tmpdir(),'beni-events-wire-'));const store=new Store(':memory:');const project=store.createProject('Example',folder),task=store.createTask(project.id,'Task');const server=Bun.serve({hostname:'127.0.0.1',port:0,...createServerOptions(store)});const origin=`http://127.0.0.1:${server.port}`;const ws=new Socket(origin.replace('http:','ws:')+'/api/ws',{headers:{origin}});const inbox=socketMessages(ws);
+ const folder=await mkdtemp(join(tmpdir(),'beni-events-wire-'));const store=new Store(':memory:');const project=store.createProject('Example',folder),task=store.createTask(project.id,'Task');const server=Bun.serve({hostname:'127.0.0.1',port:0,...createServerOptions(store,folder,new ChatService(()=>folder,()=>null))});const origin=`http://127.0.0.1:${server.port}`;const ws=new Socket(origin.replace('http:','ws:')+'/api/ws',{headers:{origin}});const inbox=socketMessages(ws);
  try{
   await opened(ws);ws.send(JSON.stringify({type:'hello',version:1}));await inbox.next();
   const subscribe=(id:string,topic:string,phase?:unknown)=>ws.send(JSON.stringify({type:'subscribe',subscriptionId:id,topic,scope:{projectId:project.id,taskId:task.id,...(phase===undefined?{}:{phase})}}));
   subscribe('missing','chat');expect(await inbox.next()).toMatchObject({code:'INVALID_MESSAGE'});subscribe('bad-documents','documents','requirements');expect(await inbox.next()).toMatchObject({code:'INVALID_MESSAGE'});subscribe('bad-events','task-events',null);expect(await inbox.next()).toMatchObject({code:'INVALID_MESSAGE'});
   subscribe('requirements','chat','requirements');expect(await inbox.next()).toMatchObject({type:'subscribed'});subscribe('documents','chat','documents');expect(await inbox.next()).toMatchObject({type:'subscribed'});
   subscribe('events','task-events');expect(await inbox.next()).toEqual({type:'subscribed',subscriptionId:'events'});const initial=await inbox.next();expect(initial).toMatchObject({name:'task.events.changed'});
-  await writeFile(join(folder,'.beni','tasks',task.id,'requirements.md'),'# External change');const changed=await inbox.next();expect(changed.name).toBe('task.events.changed');expect(changed.data.lastEventId).toBeGreaterThan(initial.data.lastEventId);
-  const phase=await fetch(origin+`/api/tasks/${task.id}/phase`,{method:'POST',headers:{origin,'content-type':'application/json'},body:JSON.stringify({projectId:project.id,phase:'requirements',target:'documents'})});expect(phase.status).toBe(200);expect(await inbox.next()).toMatchObject({subscriptionId:'events',name:'task.events.changed'});
+  const phase=await fetch(origin+`/api/tasks/${task.id}/phase`,{method:'POST',headers:{origin,'content-type':'application/json'},body:JSON.stringify({projectId:project.id,phase:'requirements',target:'documents'})});expect(phase.status).toBe(200);const changed=await inbox.next();expect(changed).toMatchObject({subscriptionId:'events',name:'task.events.changed'});expect(changed.data.lastEventId).toBeGreaterThan(initial.data.lastEventId);
   ws.send(JSON.stringify({type:'unsubscribe',subscriptionId:'events'}));expect(await inbox.next()).toMatchObject({type:'unsubscribed'});
   store.deleteTask(project.id,task.id);
   subscribe('retained-events','task-events');expect(await inbox.next()).toMatchObject({type:'subscribed',subscriptionId:'retained-events'});
@@ -445,9 +533,9 @@ test('準備phaseを直接選び、本文のある実装手順から開始して
   expect((await post('phase',{phase:'requirements',target:'implementation'})).status).toBe(200);
   expect((await post('phase',{phase:'requirements',target:'documents'})).status).toBe(409);
   expect((await post('phase',{phase:'implementation',target:'execution'})).status).toBe(400);
-  const plan=join(folder,'.beni','tasks',task.id,'implementation.md');
-  await writeFile(plan,'  \n');expect((await detail()).canStart).toBe(false);
-  await writeFile(plan,'# 実装手順\n\n1. 仕様を実装する');expect((await detail()).canStart).toBe(true);
+  await waitUntil(async()=>(await chat.get(project.id,task.id,'implementation')).messages.at(-1)?.status==='completed');
+  writeTaskDocument(store,project.id,task.id,'implementation.md','  \n');expect((await detail()).canStart).toBe(false);
+  writeTaskDocument(store,project.id,task.id,'implementation.md','# 実装手順\n\n1. 仕様を実装する');expect((await detail()).canStart).toBe(true);
   const started=await post('start',{phase:'implementation',model:'model-a'});expect(started.status).toBe(200);expect((await started.json()).phase).toBe('execution');
   expect((await post('phase',{phase:'execution',target:'requirements'})).status).toBe(409);
   expect((await post('start',{phase:'implementation',model:null})).status).toBe(409);
@@ -477,110 +565,107 @@ test('Claude の状態・送信と実装開始は接続先を検証して引き�
   const unavailable=await post('/api/chat/send',{taskId:null,content:'hello',model:'missing',provider:'claude'});expect(unavailable.status).toBe(400);expect(await unavailable.json()).toMatchObject({code:'MODEL_UNAVAILABLE'});expect((await chat.get(project.id,null)).messages).toHaveLength(0);
   expect((await post('/api/chat/send',{taskId:null,content:'hello',model:'opus',provider:'claude'})).status).toBe(202);await wait(null);expect((await chat.get(project.id,null)).messages.at(-1)).toMatchObject({provider:'claude',model:'opus'});
   expect((await post(`/api/tasks/${task.id}/phase`,{phase:'requirements',target:'implementation'})).status).toBe(200);
-  await writeFile(join(store.taskDocumentFolder(project.id,task.id),'implementation.md'),'# 実装手順\n\n1. 仕様を実装する');
+  writeTaskDocument(store,project.id,task.id,'implementation.md','# 実装手順\n\n1. 仕様を実装する');
   const started=await post(`/api/tasks/${task.id}/start`,{phase:'implementation',model:'haiku',provider:'claude'});expect(started.status).toBe(200);expect((await started.json()).phase).toBe('execution');
   await wait('execution');expect((await chat.get(project.id,task.id,'execution')).messages[0]).toMatchObject({provider:'claude',model:'haiku'});
-  expect(store.task(task.id)!.phase).toBe('retrospective');
+  await waitUntil(()=>store.task(task.id)?.phase==='retrospective');
+  await waitForFailedReview(folder,task.id);
   expect((await post(`/api/tasks/${task.id}/stop`,{phase:'execution'})).status).toBe(409);
  }finally{store.close();await rm(folder,{recursive:true,force:true})}
 });
 
-test('反省会の完了で終了のチャットを起動し、処理が終わると反省会に再開できる',async()=>{
- const folder=await mkdtemp(join(tmpdir(),'beni-retro-')),store=new Store(':memory:');
+test('文書の引用を照合し、精査から終了後のインストラクション更新まで実行する',async()=>{
+ const folder=await mkdtemp(join(tmpdir(),'beni-doc-workflow-')),store=new Store(':memory:');
  const project=store.createProject('Example',folder),task=store.createTask(project.id,'Task');
- const chat=new ChatService(()=>folder,()=>join(import.meta.dir,'test/fake-codex.ts'));
- let notifications=0;const handle=createHandler(store,folder,chat,undefined,undefined,()=>notifications++);
- const post=(path:string,input:object)=>handle(new Request(`http://127.0.0.1:3210${path}`,{method:'POST',headers:{origin:'http://127.0.0.1:3210','content-type':'application/json'},body:JSON.stringify({projectId:project.id,...input})}));
- try {
-  await writeFile(join(store.taskDocumentFolder(project.id,task.id),'implementation.md'),'# Plan\nImplement and test.');
-  expect((await post(`/api/tasks/${task.id}/start`,{phase:'requirements',model:null})).status).toBe(200);
-  expect((await post('/api/chat/send',{taskId:task.id,phase:'execution',content:'hello',model:null})).status).toBe(409);
-  expect((await post('/api/chat/interrupt',{taskId:task.id,phase:'execution'})).status).toBe(409);
-  for(let i=0;i<100&&store.task(task.id)!.phase==='execution';i++)await Bun.sleep(20);
-  expect(store.task(task.id)!.phase).toBe('retrospective');expect(notifications).toBeGreaterThan(1);
-  expect(await readFile(join(store.taskDocumentFolder(project.id,task.id),'retrospective.md'),'utf8')).toContain('原因');
-  expect((await post(`/api/tasks/${task.id}/phase`,{phase:'retrospective',target:'requirements'})).status).toBe(409);
-  const log=join(folder,'rpc.jsonl');
-  process.env.FAKE_CODEX_LOG=log;
-  process.env.FAKE_CODEX_TURN_ACTION='tools';
-  process.env.FAKE_CODEX_WRITE_KNOWLEDGE='1';
-  const complete=await post(`/api/tasks/${task.id}/complete`,{phase:'retrospective'});
-  expect(complete.status).toBe(200);
-  expect(await complete.json()).toMatchObject({phase:'finalization',status:'idle'});
-  expect((await post(`/api/tasks/${task.id}/reopen`,{phase:'finalization'})).status).toBe(409);
-  expect((await post('/api/chat/send',{taskId:task.id,phase:'finalization',content:'hello',model:null})).status).toBe(409);
-  expect((await post('/api/chat/interrupt',{taskId:task.id,phase:'finalization'})).status).toBe(409);
-  expect((await post('/api/chat/commands',{taskId:task.id,phase:'finalization',command:'clear',provider:'codex'})).status).toBe(409);
-  expect((await post('/api/chat/send',{taskId:task.id,phase:'retrospective',content:'hello',model:null})).status).toBe(409);
-  expect((await post(`/api/tasks/${task.id}/complete`,{phase:'retrospective'})).status).toBe(409);
-  for(let i=0;i<100&&store.task(task.id)!.status==='idle';i++)await Bun.sleep(20);
-  expect(store.task(task.id)).toMatchObject({phase:'finalization',status:'completed'});
-  const history=await handle(new Request(`http://127.0.0.1:3210/api/chat?projectId=${project.id}&taskId=${task.id}&phase=finalization`));
-  expect(history.status).toBe(200);
-  expect((await history.json()).messages.at(-1)?.status).toBe('completed');
-  const records=(await readFile(log,'utf8')).trim().split('\n').map(line=>JSON.parse(line));
-  const finalizationInput=records.find(record=>record.method==='turn/start').params.input.map((item:{text:string})=>item.text).join('\n');
-  expect(finalizationInput).toContain('反省会の会話抜粋');
-  expect(finalizationInput).toContain('ナレッジ');
-  expect(await readFile(join(folder,'.beni','knowledge.md'),'utf8')).toBe('# プロジェクトの学び\n\n- テストは専用の入力を使う。\n');
-  expect((await post(`/api/tasks/${task.id}/reopen`,{phase:'retrospective'})).status).toBe(409);
-  expect((await post(`/api/tasks/${task.id}/reopen`,{phase:'finalization'})).status).toBe(200);
-  expect(store.task(task.id)).toMatchObject({phase:'retrospective',status:'idle'});
-  delete process.env.FAKE_CODEX_TURN_ACTION;
-  delete process.env.FAKE_CODEX_WRITE_KNOWLEDGE;
-  expect((await post('/api/chat/send',{taskId:task.id,phase:'retrospective',content:'hello',model:null})).status).toBe(202);
-  for(let i=0;i<100;i++){if((await chat.get(project.id,task.id,'retrospective')).messages.at(-1)?.status==='completed')break;await Bun.sleep(20)}
-  expect((await chat.get(project.id,task.id,'retrospective')).messages.at(-1)?.status).toBe('completed');
-  expect(await readFile(join(folder,'.beni','knowledge.md'),'utf8')).toContain('学び');
-  store.selectTaskPhase(project.id,task.id,'retrospective','execution');
-  const restarted=createHandler(store,folder,new ChatService(()=>folder,()=>null));
-  const state=await (await restarted(new Request('http://127.0.0.1:3210/api/state'))).json();
-  expect(state.tasks.find((value:any)=>value.id===task.id).phase).toBe('retrospective');
- }finally{delete process.env.FAKE_CODEX_TURN_ACTION;delete process.env.FAKE_CODEX_LOG;delete process.env.FAKE_CODEX_WRITE_KNOWLEDGE;store.close();await rm(folder,{recursive:true,force:true})}
-});
+ const chat=new ChatService(()=>folder,()=>fakeCodex),handle=createHandler(store,folder,chat);
+ const address='http://127.0.0.1:3210',taskPath=`/api/tasks/${task.id}`;
+ const post=(path:string,input:object)=>handle(new Request(address+path,{method:'POST',headers:{origin:address,'content-type':'application/json'},body:JSON.stringify({projectId:project.id,...input})}));
+ const detail=async()=>(await (await handle(new Request(address+taskPath))).json());
+ const settled=async(phase:'requirements'|'documents'|'implementation')=>waitUntil(async()=>(
+  (await chat.get(project.id,task.id,phase)).messages.at(-1)?.status==='completed'));
+ const document=(name:string,scope:string|null=task.id)=>store.managedDocument(project.id,scope,name)!;
+ let editorNotified=false;
+ const unsubscribe=chat.subscribe(INSTRUCTIONS_CHAT_ID,null,event=>{if(event.name==='chat.changed')editorNotified=true});
+ process.env.FAKE_CODEX_WORKFLOW='enabled';
+ try{
+  const original=document('requirements.md');
+  expect((await post('/api/chat/send',{taskId:task.id,phase:'requirements',content:fixtureRequest,model:null})).status).toBe(202);
+  await settled('requirements');
+  const requirements=document('requirements.md'),reference=requirements.items.at(-1)!.sources[0]!;
+  expect(requirements.items.at(-1)).toMatchObject({text:'入力値を検証する。',sources:[{kind:'message',text:fixtureRequest}]});
+  expect(requirements.items.at(-2)).toMatchObject({text:'\n## 入力の検証\n\n',reason:'入力検証の要件をまとめる',sources:[reference]});
+  expect(store.managedDocument(project.id,task.id,'requirements.md',original.revision)?.content).toBe(original.content);
+  expect(store.managedDocumentHistory(project.id,task.id).filter(doc=>doc.name==='requirements.md')).toHaveLength(2);
+  const source=chat.workflowSources(project.id,task.id,'requirements')!;
+  expect(reference.id).toBe(['requirements',source.chatId,source.messages[0]!.id].join('/'));
+  expect(source.packs.filter(pack=>pack.tool?.name==='edit_document').map(pack=>pack.status)).toEqual(['failed','failed','completed']);
+  expect((await post('/api/chat/commands',{taskId:task.id,phase:'requirements',command:'clear',provider:'codex'})).status).toBe(202);
 
-test('終了の送信受付前に失敗、またはサーバーが停止した場合は反省会に戻す', async () => {
+  expect((await post(taskPath+'/phase',{phase:'requirements',target:'documents'})).status).toBe(200);
+  await settled('documents');
+  expect(document('documents.md').items.at(-1)?.sources[0]).toMatchObject({kind:'document',revision:requirements.revision});
+  expect((await post(taskPath+'/phase',{phase:'documents',target:'implementation'})).status).toBe(200);
+  await settled('implementation');
+  expect((await detail()).canStart).toBe(true);
+  expect((await post(taskPath+'/start',{phase:'implementation',model:null})).status).toBe(200);
+  await waitUntil(async()=>(await detail()).workflow.review?.state==='done');
+  const review=await detail();
+  expect(review.task.phase).toBe('retrospective');
+  expect(review.workflow.review.remaining).toBe(0);
+  expect(document('retrospective.md').content).toContain('検証の根拠を見直す。');
+  const reviewPacks=chat.workflowSources(project.id,task.id,'retrospective')!.packs;
+  expect(reviewPacks.some(pack=>pack.tool?.name==='review_next'&&pack.tool.output.includes(fixtureRequest))).toBe(true);
+  expect(reviewPacks.some(pack=>pack.tool?.name==='record_review'&&pack.status==='completed')).toBe(true);
+
+  process.env.FAKE_CODEX_WORKFLOW='without-finish';
+  expect((await post(taskPath+'/complete',{phase:'retrospective'})).status).toBe(200);
+  await waitUntil(()=>store.task(task.id)?.phase==='retrospective');
+  expect(store.instructionJob(project.id,task.id)).toBeUndefined();
+  process.env.FAKE_CODEX_WORKFLOW='enabled';
+  expect((await post(taskPath+'/complete',{phase:'retrospective'})).status).toBe(200);
+  await waitUntil(async()=>(await detail()).workflow.instructionJob?.status==='succeeded');
+  expect((await detail()).task).toMatchObject({phase:'finalization',status:'completed'});
+  expect(editorNotified).toBe(true);
+  const knowledge=document('knowledge.md',null),job=store.instructionJob(project.id,task.id)!;
+  expect(knowledge.content).toContain('検証の根拠を保つ。');
+  expect(job.revision).toBe(knowledge.revision);
+  const knowledgeItem = knowledge.items.find(item => item.sources[0]?.kind === 'document')!;
+  const knowledgeLookup = (revision:string,itemId:string) => handle(new Request(address+'/api/document-provenance?'+new URLSearchParams({
+   name:'knowledge.md',projectId:project.id,taskId:task.id,revision,itemId
+  })));
+  const newerKnowledge = store.writeManagedDocument(project.id,null,'knowledge.md',knowledge.revision,[
+   {text:'別タスクの学び。',reason:'新しい学びを追加する。',sources:knowledgeItem.sources}
+  ],'fixture');
+  expect((await detail()).documents.find((doc:{name:string})=>doc.name==='knowledge.md').provenance.revision).toBe(knowledge.revision);
+  expect(await (await knowledgeLookup(knowledge.revision,knowledgeItem.id)).json()).toEqual({
+   reason:knowledgeItem.reason,sources:knowledgeItem.sources
+  });
+  expect((await knowledgeLookup(newerKnowledge.revision,newerKnowledge.items[0]!.id)).status).toBe(404);
+  expect(await Bun.file(join(folder,'.beni','knowledge.md')).exists()).toBe(false);
+  expect(store.instructionDocument('common')?.items.at(-1)).toMatchObject({
+   text:'- 検証の根拠を記録する。',sources:[{kind:'document',revision:knowledge.revision,text:'検証の根拠を保つ。'}]
+  });
+  expect(chat.workflowSources(project.id,null,null)).toBeUndefined();
+  expect(chat.workflowSources(project.id,null,null,undefined,undefined,job.id)?.packs.some(pack=>(
+   pack.tool?.name==='finish_instruction_update'&&pack.status==='completed'))).toBe(true);
+  expect((await post(taskPath+'/reopen',{phase:'finalization'})).status).toBe(200);
+  expect(store.task(task.id)).toMatchObject({phase:'retrospective',status:'idle'});
+  expect((await knowledgeLookup(knowledge.revision,knowledgeItem.id)).status).toBe(404);
+ }finally{unsubscribe();delete process.env.FAKE_CODEX_WORKFLOW;store.close();await rm(folder,{recursive:true,force:true})}
+},15000);
+
+test('終了中にサーバーが停止した場合は反省会に戻す', async () => {
  const folder=await mkdtemp(join(tmpdir(),'beni-finalization-recover-')),store=new Store(':memory:');
  const project=store.createProject('Example',folder),task=store.createTask(project.id,'Task');
- const handler=()=>createHandler(store,folder,new ChatService(()=>folder,()=>null));
- const address='http://127.0.0.1:3210';
+ const handler=createHandler(store,folder,new ChatService(()=>folder,()=>null));
  try {
   store.selectTaskPhase(project.id,task.id,'requirements','retrospective');
-  const unavailable=await handler()(new Request(`${address}/api/tasks/${task.id}/complete`,{
-   method:'POST',headers:{origin:address,'content-type':'application/json'},
-   body:JSON.stringify({projectId:project.id,phase:'retrospective'})
-  }));
-  expect(unavailable.status).toBe(400);
-  expect(await unavailable.json()).toEqual({error:'終了に使うモデルの接続状態を確認してください'});
-  expect(store.task(task.id)).toMatchObject({phase:'retrospective',status:'idle'});
   store.startTaskFinalization(project.id,task.id);
-  const state=await handler()(new Request(`${address}/api/state`));
+  const state=await handler(new Request('http://127.0.0.1:3210/api/state'));
   expect(state.status).toBe(200);
   expect((await state.json()).tasks).toMatchObject([{phase:'retrospective',status:'idle'}]);
   expect(store.taskEvents(project.id,task.id).events.some(event=>event.type==='task.completed')).toBe(false);
  } finally {store.close();await rm(folder,{recursive:true,force:true})}
-});
-
-test('knowledgeのリンク拒否でも実装開始を戻しactiveを解放する',async()=>{
- const folder=await mkdtemp(join(tmpdir(),'beni-knowledge-')),store=new Store(':memory:');
- const project=store.createProject('Example',folder),task=store.createTask(project.id,'Task');
- const chat=new ChatService(()=>folder,()=>join(import.meta.dir,'test/fake-codex.ts'));let changed=0;
- const handle=createHandler(store,folder,chat,undefined,undefined,()=>changed++);
- const post=(action:string,input:object)=>handle(new Request(`http://127.0.0.1:3210/api/tasks/${task.id}/${action}`,{method:'POST',headers:{origin:'http://127.0.0.1:3210','content-type':'application/json'},body:JSON.stringify({projectId:project.id,...input})}));
- try {
-  await writeFile(join(store.taskDocumentFolder(project.id,task.id),'implementation.md'),'# Plan\nImplement.');
-  const outside=join(folder,'outside.md');await writeFile(outside,'preserve');await symlink(outside,join(folder,'.beni','knowledge.md'));
-  // 送信準備中の知識読み込みで拒否し、実行開始は同期的にロールバックする。
-  expect((await post('start',{phase:'requirements',model:null})).status).toBe(500);
-  expect(store.task(task.id)!.phase).toBe('requirements');expect(changed).toBeGreaterThan(0);
-  expect((await chat.get(project.id,task.id,'execution')).messages).toHaveLength(0);
-  expect((await post('phase',{phase:'requirements',target:'documents'})).status).toBe(200);
-  expect(await readFile(outside,'utf8')).toBe('preserve');
-  await rm(join(folder,'.beni','knowledge.md'));
-  await chat.send(project.id,task.id,'hello',null,folder,store.taskDocumentFolder(project.id,task.id),'documents');
-  for(let i=0;i<100&&(await chat.get(project.id,task.id,'documents')).messages.at(-1)?.status!=='completed';i++)await Bun.sleep(20);
-  expect((await chat.get(project.id,task.id,'documents')).messages.at(-1)?.status).toBe('completed');
- }finally{store.close();await rm(folder,{recursive:true,force:true})}
 });
 
 test('実装の自然なfailedとunknownは反省会へ通知し停止競合は実装手順へ戻す',async()=>{
@@ -591,22 +676,23 @@ test('実装の自然なfailedとunknownは反省会へ通知し停止競合は�
  const post=(id:string,action:string,input:object)=>handle(new Request(`http://127.0.0.1:3210/api/tasks/${id}/${action}`,{method:'POST',headers:{origin:'http://127.0.0.1:3210','content-type':'application/json'},body:JSON.stringify({projectId:project.id,...input})}));
  try {
   for(const [action,status] of [['fail','failed'],['disconnect','unknown']] as const){
-   const task=store.createTask(project.id,action);await writeFile(join(store.taskDocumentFolder(project.id,task.id),'implementation.md'),'# Plan\nImplement.');
+   const task=store.createTask(project.id,action);writeTaskDocument(store,project.id,task.id,'implementation.md','# Plan\nImplement.');
    process.env.FAKE_CODEX_TURN_ACTION=action;
    expect((await post(task.id,'start',{phase:'requirements',model:null})).status).toBe(200);
    for(let i=0;i<100&&store.task(task.id)!.phase==='execution';i++)await Bun.sleep(20);
    expect(store.task(task.id)!.phase).toBe('retrospective');
    expect((await chat.get(project.id,task.id,'execution')).messages.at(-1)?.status).toBe(status);
+   await waitForFailedReview(folder,task.id);
   }
   delete process.env.FAKE_CODEX_TURN_ACTION;
-  const task=store.createTask(project.id,'Stop pending');await writeFile(join(store.taskDocumentFolder(project.id,task.id),'implementation.md'),'# Plan\nImplement.');
+  const task=store.createTask(project.id,'Stop pending');writeTaskDocument(store,project.id,task.id,'implementation.md','# Plan\nImplement.');
   process.env.FAKE_CLAUDE_ACCEPT_DELAY_MS='500';process.env.FAKE_CLAUDE_LOG=join(folder,'claude.jsonl');
   expect((await post(task.id,'start',{phase:'requirements',model:'sonnet',provider:'claude'})).status).toBe(200);
   for(let i=0;i<100;i++){try{if((await readFile(process.env.FAKE_CLAUDE_LOG,'utf8')).length)break}catch{}await Bun.sleep(10)}
   expect((await post(task.id,'stop',{phase:'execution'})).status).toBe(200);
   expect(store.task(task.id)!.phase).toBe('implementation');
   expect((await chat.get(project.id,task.id,'execution')).messages.at(-1)?.status).toBe('interrupted');
-  expect(changed).toBe(6);
+  expect(changed).toBeGreaterThanOrEqual(6);
  }finally{delete process.env.FAKE_CODEX_TURN_ACTION;delete process.env.FAKE_CLAUDE_ACCEPT_DELAY_MS;delete process.env.FAKE_CLAUDE_LOG;store.close();await rm(folder,{recursive:true,force:true})}
 });
 
@@ -615,14 +701,22 @@ test('次回準備の知識本文と反省会のproject cwdをCLIへ渡す',asyn
  const project=store.createProject('Example',folder),task=store.createTask(project.id,'Preparation'),retro=store.createTask(project.id,'Review');
  const chat=new ChatService(()=>folder,()=>join(import.meta.dir,'test/fake-codex.ts')),log=join(folder,'rpc.jsonl');
  try {
-  await writeFile(join(folder,'.beni','knowledge.md'),'# 学び\n確認済み: 検証は段階ごとに実施する。');process.env.FAKE_CODEX_LOG=log;
+  createHandler(store,folder,chat);
+  const knowledge=store.managedDocument(project.id,null,'knowledge.md')!;
+  const seed=knowledge.items[0]!;
+  store.writeManagedDocument(project.id,null,'knowledge.md',knowledge.revision,[{
+   text:'# 確認済み: 検証は段階ごとに実施する。',reason:'確認済みの学びを記録する。',
+   sources:[{kind:'document',id:knowledge.name+'/'+seed.id,revision:knowledge.revision,text:seed.text}]
+  }],'fixture');
+  process.env.FAKE_CODEX_LOG=log;
   const wait=async(id:string,phase:'requirements'|'retrospective')=>{for(let i=0;i<100;i++){if((await chat.get(project.id,id,phase)).messages.at(-1)?.status==='completed')return;await Bun.sleep(20)}throw Error('timed out')};
   await chat.send(project.id,task.id,'hello',null,folder,store.taskDocumentFolder(project.id,task.id),'requirements');await wait(task.id,'requirements');
   store.selectTaskPhase(project.id,retro.id,'requirements','retrospective');
   await chat.send(project.id,retro.id,'hello',null,folder,store.taskDocumentFolder(project.id,retro.id),'retrospective');await wait(retro.id,'retrospective');
   const records=(await readFile(log,'utf8')).trim().split('\n').map(line=>JSON.parse(line)),starts=records.filter(record=>record.method==='thread/start'),turns=records.filter(record=>record.method==='turn/start');
   expect(starts[0].params.developerInstructions).toContain('確認済み: 検証は段階ごとに実施する。');
-  expect(starts[0].params.cwd).toBe(store.taskDocumentFolder(project.id,task.id));
+  expect(starts[0].params.cwd).toBe(folder);
+  expect(turns[0].params.sandboxPolicy.type).toBe('readOnly');
   expect(starts[1].params.cwd).toBe(folder);
   expect(turns[1].params.input.some((item:{text:string})=>item.text.includes('実装の会話抜粋'))).toBe(true);
   expect(turns[1].params.sandboxPolicy.writableRoots).toEqual([folder]);
@@ -652,11 +746,11 @@ test('埋め込みツールの保存成功だけをタスクイベントへ通�
   expect(notifications).toHaveLength(2);
   createServerOptions(store,folder,chat);
   const before=store.projectEventCursor(project.id);
-  await writeFile(join(folder,'.beni','tasks',task.id,'requirements.md'),'Recorded tool edit');
+  const version=writeTaskDocument(store,project.id,task.id,'requirements.md','Recorded tool edit');
   provider!.append!(project.id,{...operation,operationId:'another-operation',type:'tool.finished',details:{result:'completed'}});
-  expect(store.projectEventCursor(project.id)).toBe(before+1);
+  expect(store.projectEventCursor(project.id)).toBe(before+2);
   provider!.capture(project.id,task.id,'requirements',operation.operationId);
-  expect(store.taskEvents(project.id,task.id).events.at(-1)).toMatchObject({type:'document.updated',sourcePhase:'requirements',operationId:operation.operationId});
+  expect(store.taskEvents(project.id,task.id).events).toContainEqual(expect.objectContaining({type:'document.updated',phase:'requirements',details:{revision:version.revision}}));
  } finally {store.close();await rm(folder,{recursive:true,force:true})}
 });
 

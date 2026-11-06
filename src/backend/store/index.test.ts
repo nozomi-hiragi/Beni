@@ -5,6 +5,8 @@ import { cpSync, linkSync, symlinkSync, mkdtempSync, mkdirSync, readFileSync, wr
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { defaultInstructions } from '../instructions';
+import { taskDocuments } from '../documents';
+import { newMetadata, writeJson } from '../data';
 import { generateId, validProjectId, validTaskId } from '../../shared/ids';
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'beni-store-'));
@@ -16,6 +18,14 @@ function fixture() {
     path: join(root, 'beni.sqlite')
   };
 }
+function legacyTask(folder: string, name: string) {
+  const value = newMetadata('task', name);
+  const path = taskDocuments(folder, value.id, {requirements: `# ${name}\n`}, true);
+  writeJson(join(path, 'task.json'), {...value, phase: 'requirements', status: 'idle'});
+  return value;
+}
+const evidencedText = (text: string) => [{text, reason: '合意した修正', sources: [{kind: 'message' as const, id: 'message', text}]}];
+
 test('canonical metadata persists tasks and recovers documents idempotently', () => {
   const f = fixture();
   try {
@@ -25,7 +35,8 @@ test('canonical metadata persists tasks and recovers documents idempotently', ()
     expect(validProjectId(p.id)).toBe(true);
     expect(validTaskId(t.id)).toBe(true);
     expect(validProjectId(t.id)).toBe(false);
-    expect(readFileSync(join(f.folder, '.beni', 'tasks', t.id, 'requirements.md'), 'utf8')).toBe('# Task\n');
+    expect(store.managedDocument(p.id, t.id, 'requirements.md')?.content).toBe('# Task\n');
+    expect(existsSync(join(f.folder, '.beni', 'tasks', t.id, 'requirements.md'))).toBe(false);
     store.close();
     const orphan = join(f.folder, '.beni', 'tasks', '12');
     mkdirSync(orphan);
@@ -152,7 +163,7 @@ test('task rows expose canonical creation dates including unknown dates', () => 
 test('document activity survives restart and ignores initial unknown dates and timestamp-only changes', async () => {
   const f = fixture(); let store = new Store(f.path);
   try {
-    const project = store.createProject('Demo', f.folder), task = store.createTask(project.id, 'Task');
+    const project = store.createProject('Demo', f.folder), task = legacyTask(f.folder, 'Task');
     const path = join(f.folder, '.beni', 'tasks', task.id), file = join(path, 'task.json');
     const original = JSON.parse(readFileSync(file, 'utf8'));
     original.createdAt = null; original.updatedAt = null; delete original.documentBaseline;
@@ -183,7 +194,7 @@ test('document activity survives restart and ignores initial unknown dates and t
     await Bun.sleep(5); rmSync(join(path, 'requirements.md'));
     expect(store.tasks()[0]!.updatedAt! > stable!).toBe(true);
     const removed = store.task(task.id)!.updatedAt;
-    store.taskDocumentFolder(project.id, task.id);
+    expect(store.managedDocument(project.id, task.id, 'requirements.md')?.content).toBe('# Task\n');
     expect(store.task(task.id)!.updatedAt).toBe(removed);
     mkdirSync(join(f.root, 'other'));
     const other = store.createProject('Other', join(f.root, 'other'));
@@ -229,7 +240,7 @@ test('task deletion rolls back filesystem failures before commit', async () => {
   const p=store.createProject('Demo',f.folder),t=store.createTask(p.id,'Target'),root=join(f.folder,'.beni');mkdirSync(join(root,'chat'));writeFileSync(join(root,'chat',`${t.id}.json`),'history');
   fault=spyOn(fs,'renameSync').mockImplementation((from,to)=>{if(String(to).endsWith('/committed.json'))throw Error('simulated filesystem failure');return original(from,to)});
   expect(()=>store.deleteTask(p.id,t.id)).toThrow('simulated filesystem failure');fault.mockRestore();fault=undefined;
-  expect(store.task(t.id)?.name).toBe('Target');expect(readFileSync(join(root,'tasks',t.id,'requirements.md'),'utf8')).toBe('# Target\n');expect(readFileSync(join(root,'chat',`${t.id}.json`),'utf8')).toBe('history');
+  expect(store.task(t.id)?.name).toBe('Target');expect(store.managedDocument(p.id,t.id,'requirements.md')?.content).toBe('# Target\n');expect(readFileSync(join(root,'chat',`${t.id}.json`),'utf8')).toBe('history');
   store.deleteTask(p.id,t.id);expect(store.tasks()).toEqual([]);
  }finally{fault?.mockRestore();store.close();rmSync(f.root,{recursive:true,force:true})}
 });
@@ -245,7 +256,7 @@ test('recovery discards an initial journal write interrupted before any source w
 test('task history retains created, updated, renamed and deleted document versions across restart', () => {
   const f = fixture(); let store = new Store(f.path);
   try {
-    const p = store.createProject('Demo', f.folder), task = store.createTask(p.id, 'Task');
+    const p = store.createProject('Demo', f.folder), task = legacyTask(f.folder, 'Task');
     const folder = join(f.folder, '.beni', 'tasks', task.id);
     const initial = store.taskEvents(p.id, task.id);
     expect(initial.events.map(event => event.type)).toEqual(['task.created', 'document.created', 'document.created', 'document.created']);
@@ -274,7 +285,7 @@ test('history pagination fixes through and validates unknown cursors and referen
     const p = store.createProject('Demo', f.folder), task = store.createTask(p.id, 'Task');
     const first = store.taskEvents(p.id, task.id, 0, undefined, 1);
     expect(first).toMatchObject({lastEventId: 1, through: 4, hasMore: true});
-    writeFileSync(join(f.folder, '.beni', 'tasks', task.id, 'extra.md'), 'later');
+    store.writeManagedDocument(p.id, task.id, 'extra.md', null, evidencedText('later'), 'author');
     const next = store.taskEvents(p.id, task.id, first.lastEventId, first.through, 100);
     expect(next.events.map(event => event.id)).toEqual([2, 3, 4]);
     expect(next).toMatchObject({lastEventId: 4, through: 4, hasMore: false});
@@ -291,7 +302,7 @@ test('history pagination fixes through and validates unknown cursors and referen
 test('ambiguous document moves stay separate events and phase transitions preserve history', () => {
   const f = fixture(), store = new Store(f.path);
   try {
-    const p = store.createProject('Demo', f.folder), task = store.createTask(p.id, 'Task'), folder = join(f.folder, '.beni', 'tasks', task.id);
+    const p = store.createProject('Demo', f.folder), task = legacyTask(f.folder, 'Task'), folder = join(f.folder, '.beni', 'tasks', task.id);
     writeFileSync(join(folder, 'one.md'), 'same'); writeFileSync(join(folder, 'two.md'), 'same');
     const before = store.taskEvents(p.id, task.id).lastEventId;
     renameSync(join(folder, 'one.md'), join(folder, 'three.md')); renameSync(join(folder, 'two.md'), join(folder, 'four.md'));
@@ -315,8 +326,9 @@ test('history rejects linked databases and unsafe current documents without touc
   for (const target of ['database', 'document', 'hardlink']) {
     const f = fixture(), store = new Store(f.path);
     try {
-      const p = store.createProject('Demo', f.folder), task = store.createTask(p.id, 'Task');
-      const file = target === 'database' ? join(f.folder, '.beni', 'events.sqlite') : join(f.folder, '.beni', 'tasks', task.id, 'requirements.md');
+      const p = store.createProject('Demo', f.folder), task = legacyTask(f.folder, 'Task');
+      store.taskEvents(p.id, task.id);
+      const file = target === 'database' ? join(f.folder, '.beni', 'project.sqlite') : join(f.folder, '.beni', 'tasks', task.id, 'requirements.md');
       const external = join(f.root, 'external'); writeFileSync(external, 'outside');
       rmSync(file);
       if (target === 'hardlink') linkSync(external, file); else symlinkSync(external, file);
@@ -379,15 +391,16 @@ test('SQLite history rolls back failed commits and retries without event gaps', 
   const f = fixture(), store = new Store(f.path);
   try {
     const p = store.createProject('Demo', f.folder), task = store.createTask(p.id, 'Task'), folder = join(f.folder, '.beni', 'tasks', task.id);
-    const before = store.taskEvents(p.id, task.id), database = new Database(join(f.folder, '.beni', 'events.sqlite'));
+    const before = store.taskEvents(p.id, task.id), database = new Database(join(f.folder, '.beni', 'project.sqlite'));
     database.exec("CREATE TRIGGER fail_event BEFORE INSERT ON file_changes BEGIN SELECT RAISE(ABORT, 'simulated history commit failure'); END");
-    writeFileSync(join(folder, 'extra.md'), 'new version');
-    expect(() => store.captureTaskHistory(p.id, task.id, 'documents')).toThrow('simulated history commit failure');
+    const write = () => store.writeManagedDocument(p.id, task.id, 'extra.md', null, evidencedText('new version'), 'author');
+    expect(write).toThrow('simulated history commit failure');
+    expect(store.managedDocument(p.id, task.id, 'extra.md')).toBeUndefined();
     expect(database.query('SELECT MAX(id) AS id FROM events').get()).toEqual({id: before.through});
     expect(database.query('SELECT COUNT(*) AS count FROM file_changes').get()).toEqual({count: 3});
     database.exec('DROP TRIGGER fail_event'); database.close();
-    store.captureTaskHistory(p.id, task.id, 'documents');
-    expect(store.taskEvents(p.id, task.id, before.through).events).toMatchObject([{id: before.through + 1, type: 'document.created', path: 'extra.md', sourcePhase: 'documents'}]);
+    const written = write();
+    expect(store.taskEvents(p.id, task.id, before.through).events).toMatchObject([{id: before.through + 1, type: 'document.created', path: 'extra.md', details: {revision: written.revision}}]);
     expect(existsSync(join(folder, '.history'))).toBe(false);
   } finally { store.close(); rmSync(f.root, {recursive: true, force: true}); }
 });
@@ -396,7 +409,6 @@ test('project cursors advance over other tasks and retained history survives tas
   const f = fixture(); let store = new Store(f.path);
   try {
     const p = store.createProject('Demo', f.folder), task = store.createTask(p.id, 'Task');
-    const file = join(f.folder, '.beni', 'tasks', task.id, 'requirements.md');
     const first = store.taskEvents(p.id, task.id);
     const original = first.events.find(event => event.path === 'requirements.md')!;
     const other = store.createTask(p.id, 'Other');
@@ -405,7 +417,8 @@ test('project cursors advance over other tasks and retained history survives tas
     let cursor = empty.nextCursor;
     while (cursor < empty.through) cursor = store.taskEvents(p.id, task.id, cursor, empty.through, 1).nextCursor;
     expect(cursor).toBe(empty.through);
-    writeFileSync(file, 'final edit\r\n');
+    const head = store.managedDocument(p.id, task.id, 'requirements.md')!;
+    store.writeManagedDocument(p.id, task.id, 'requirements.md', head.revision, evidencedText('final edit\r\n'), 'author');
     store.deleteTask(p.id, task.id);
     const deleted = store.taskEvents(p.id, task.id, first.through);
     expect(deleted.events.map(event => event.type)).toEqual(['document.updated', 'task.deleted']);
@@ -442,7 +455,7 @@ test('終了済みタスクの再開時はフェーズと再開イベントを�
     store.setTaskCompleted(p.id, task.id, true, 'finalization');
     const completed = store.task(task.id);
     const before = store.taskEvents(p.id, task.id);
-    const db = new Database(join(f.folder, '.beni', 'events.sqlite'));
+    const db = new Database(join(f.folder, '.beni', 'project.sqlite'));
     try {
       db.exec("CREATE TRIGGER fail_reopen BEFORE INSERT ON events WHEN NEW.type='task.reopened' BEGIN SELECT RAISE(ABORT, 'simulated reopen failure'); END");
       expect(() => store.setTaskCompleted(p.id, task.id, false, 'finalization')).toThrow('simulated reopen failure');
@@ -460,7 +473,7 @@ test('task deletion refuses lost history and rolls back its deletion event on fi
   const f = fixture(), store = new Store(f.path), fs = await import('node:fs'), original = fs.renameSync;
   let fault: ReturnType<typeof spyOn> | undefined;
   try {
-    const p = store.createProject('Demo', f.folder), task = store.createTask(p.id, 'Task');
+    const p = store.createProject('Demo', f.folder), task = legacyTask(f.folder, 'Task');
     const path = join(f.folder, '.beni', 'tasks', task.id, 'requirements.md');
     writeFileSync(path, 'x'.repeat(1024 * 1024 + 1));
     expect(() => store.deleteTask(p.id, task.id)).toThrow('Tracked document exceeds 1 MiB');
@@ -483,7 +496,7 @@ test('failed task creation leaves neither a task nor committed history', () => {
   const f = fixture(), store = new Store(f.path);
   try {
     const p = store.createProject('Demo', f.folder), task = store.createTask(p.id, 'Existing');
-    const before = store.projectEvents(p.id), database = new Database(join(f.folder, '.beni', 'events.sqlite'));
+    const before = store.projectEvents(p.id), database = new Database(join(f.folder, '.beni', 'project.sqlite'));
     database.exec("CREATE TRIGGER fail_creation BEFORE INSERT ON file_changes BEGIN SELECT RAISE(ABORT, 'simulated creation failure'); END");
     expect(() => store.createTask(p.id, 'Failed')).toThrow('simulated creation failure');
     database.exec('DROP TRIGGER fail_creation'); database.close();
@@ -496,7 +509,7 @@ test('task metadata rolls back when its operation history cannot be recorded', (
   const f = fixture(), store = new Store(f.path);
   try {
     const p = store.createProject('Demo', f.folder), task = store.createTask(p.id, 'Task');
-    const database = new Database(join(f.folder, '.beni', 'events.sqlite'));
+    const database = new Database(join(f.folder, '.beni', 'project.sqlite'));
     database.exec("CREATE TRIGGER fail_operation BEFORE INSERT ON events WHEN NEW.type IN ('task.renamed','phase.changed','task.completed','task.reopened') BEGIN SELECT RAISE(ABORT, 'simulated operation failure'); END");
     expect(() => store.renameTask(p.id, task.id, 'Failed')).toThrow('simulated operation failure');
     expect(store.task(task.id)?.name).toBe('Task');
@@ -518,13 +531,12 @@ test('task metadata rolls back when its operation history cannot be recorded', (
 test('instructions seed missing keys and preserve saved templates across restart', () => {
  const f=fixture();
  try {
-  let store=new Store(f.path);
-  expect(store.instructions().map(item=>item.key)).toEqual(['common','requirements','documents','implementation','execution','retrospective','finalization','editor']);
-  store.close();
   const db=new Database(f.path);
-  db.query('UPDATE instructions SET content=? WHERE key=?').run('# Saved {{project_directory}}','common');
-  db.query('DELETE FROM instructions WHERE key=?').run('documents'); db.close();
-  store=new Store(f.path);
+  db.exec('CREATE TABLE instructions(key TEXT PRIMARY KEY, content TEXT NOT NULL)');
+  db.query('INSERT INTO instructions(key,content) VALUES (?,?)').run('common','# Saved {{project_directory}}');
+  db.close();
+  const store=new Store(f.path);
+  expect(store.instructions().map(item=>item.key)).toEqual(['common','requirements','documents','implementation','execution','retrospective','finalization','editor']);
   expect(store.instructions()).toHaveLength(8);
   expect(store.instructions()[0]!.content).toBe('# Saved {{project_directory}}');
   expect(store.instructions().find(item=>item.key==='documents')!.content).toContain('仕様整理');
@@ -541,11 +553,10 @@ test('既知の旧反省会本文だけを更新し、カスタム本文は保�
    .replace('反省会、終了。変更は UI','反省会。変更は UI')
    .replace('既存の文書と決定を保つ。','既存の文書と決定を保つ。\nナレッジには確認済みで再利用できる教訓だけを追記し、仮説を区別して既存内容を保つ。')
    .replace('Beniから入力に添付される実装の発言と結果の抜粋を読み取り専用の文脈として確認する。不足する場合だけ関連するイベントや差分を追加で調べる。保存用 JSON や CLI ログを丸読みしない。','実装の会話と終端メッセージの状態を {{execution_chat_path}} から読み取り専用の文脈として確認する。');
-  const store=new Store(f.path);
-  store.close();
   const db=new Database(f.path);
-  db.query('UPDATE instructions SET content=? WHERE key=?').run(legacy,'retrospective');
-  db.query('UPDATE instructions SET content=? WHERE key=?').run('# Custom prompt','execution');
+  db.exec('CREATE TABLE instructions(key TEXT PRIMARY KEY, content TEXT NOT NULL)');
+  db.query('INSERT INTO instructions(key,content) VALUES (?,?)').run('retrospective',legacy);
+  db.query('INSERT INTO instructions(key,content) VALUES (?,?)').run('execution','# Custom prompt');
   db.close();
   const migrated=new Store(f.path);
   expect(migrated.instructions().find(item=>item.key==='retrospective')!.content).toBe(current);
@@ -560,4 +571,84 @@ test('instruction replacement validates variables and never re-evaluates inserte
  expect(()=>renderInstruction('{{unknown}}',{})).toThrow('未知のインストラクション変数: unknown');
  expect(()=>renderInstruction('{{task_id}}',{})).toThrow('インストラクション変数が不足しています: task_id');
  expect(composeInstructions(defaultInstructions,null,{project_directory:'/project',working_directory:'/project'})).not.toContain('requirements.md');
+});
+
+test('旧タスク文書を一括移行し、移行後も元のファイルを保持する', () => {
+  const f = fixture();
+  let store = new Store(f.path);
+  try {
+    const project = store.createProject('Demo', f.folder);
+    const task = legacyTask(f.folder, 'Legacy');
+    const folder = store.taskDocumentFolder(project.id, task.id);
+    const requirements = join(folder, 'requirements.md');
+    const extra = join(folder, 'extra.md');
+    writeFileSync(requirements, '旧本文\r\n');
+    writeFileSync(extra, Buffer.from([0xff]));
+    expect(() => store.managedDocuments(project.id, task.id)).toThrow('not valid UTF-8');
+    writeFileSync(requirements, '移行を再試行\r\n');
+    writeFileSync(extra, '追加資料');
+    const documents = store.managedDocuments(project.id, task.id);
+    expect(documents.map(doc => doc.name)).toEqual(['requirements.md', 'documents.md', 'extra.md', 'implementation.md']);
+    expect(documents[0]?.content).toBe('移行を再試行\r\n');
+    expect(documents[0]?.items[0]).toMatchObject({
+      reason: '既存の文書を初期版として取り込んだ。',
+      sources: [{kind: 'legacy', id: 'requirements.md', text: '移行を再試行'}]
+    });
+    expect(store.managedDocument(project.id, null, 'knowledge.md')?.items[0]?.sources)
+      .toEqual([{kind: 'template', id: 'knowledge.md', text: '# プロジェクトの学び'}]);
+    const version = store.writeManagedDocument(project.id, task.id, 'requirements.md', documents[0]!.revision, evidencedText('DBの更新'), 'send-1');
+    expect(store.replayManagedDocument(project.id, task.id, 'requirements.md', 'send-1')).toEqual(version);
+    expect(readFileSync(requirements, 'utf8')).toBe('移行を再試行\r\n');
+    writeFileSync(requirements, '旧ファイルの更新');
+    store.close();
+    store = new Store(f.path);
+    expect(store.managedDocument(project.id, task.id, 'requirements.md')).toEqual(version);
+    expect(store.managedDocument(project.id, task.id, 'requirements.md', documents[0]!.revision)).toEqual(documents[0]);
+  } finally {
+    store.close();
+    rmSync(f.root, {recursive: true, force: true});
+  }
+});
+
+test('インストラクション更新ジョブは永続化され、全更新と成功をまとめて確定する', () => {
+  const f = fixture();
+  let store = new Store(f.path);
+  try {
+    const project = store.createProject('Demo', f.folder);
+    const task = store.createTask(project.id, 'Task');
+    const request = {id: 'job-1', projectId: project.id, taskId: task.id, revision: 'knowledge-version', provider: 'codex' as const, model: null};
+    store.enqueueInstructionJob(request);
+    store.close();
+    store = new Store(f.path);
+    expect(store.pendingInstructionJob()).toEqual({...request, status: 'pending'});
+    const common = store.instructionDocument('common')!;
+    const editor = store.instructionDocument('editor')!;
+    const nextCommon = {key: 'common', base: common.revision, items: evidencedText('新しい共通指示')};
+    expect(() => store.commitInstructionJob(request.id, [nextCommon, {key: 'editor', base: editor.revision, items: []}], '指示を統合する')).toThrow();
+    expect(store.instructionDocument('common')).toEqual(common);
+    expect(store.instructionJob(project.id, task.id)).toEqual({...request, status: 'pending'});
+    store.finishInstructionJob(request.id, '模擬失敗');
+    expect(store.instructionJob(project.id, task.id)?.status).toBe('failed');
+    expect(store.retryInstructionJob(project.id, task.id)).toEqual({...request, status: 'pending'});
+    const followUp = {...request, id: 'job-2'};
+    store.enqueueInstructionJob(followUp);
+    expect(() => store.commitInstructionJob(request.id, [nextCommon])).toThrow('no longer pending');
+    expect(store.enqueueInstructionJob(request).status).toBe('superseded');
+    expect(store.commitInstructionJob(followUp.id, [nextCommon], '学びを共通指示へ反映した')).toMatchObject({
+      status: 'succeeded', reason: '学びを共通指示へ反映した'
+    });
+    const updated = store.instructionDocument('common');
+    expect(updated?.content).toBe('新しい共通指示');
+    const noChange = {...request, id: 'job-3'};
+    store.enqueueInstructionJob(noChange);
+    store.commitInstructionJob(noChange.id, [], '既存の指示に含まれるため更新なし');
+    store.close();
+    store = new Store(f.path);
+    expect(store.instructionJob(project.id, task.id)).toEqual({...noChange, status: 'succeeded', reason: '既存の指示に含まれるため更新なし'});
+    expect(store.instructionDocument('common')).toEqual(updated);
+    expect(store.pendingInstructionJob()).toBeUndefined();
+  } finally {
+    store.close();
+    rmSync(f.root, {recursive: true, force: true});
+  }
 });

@@ -36,3 +36,10 @@ export function eventToolArguments(name:string,value:unknown):Record<string,any>
  return args;
 }
 export const toolResult=(value:unknown,success=true):EmbeddedToolResult=>({contentItems:[{type:'inputText',text:JSON.stringify(value)}],success});
+
+export function boundedEmbeddedToolResult(value:unknown):EmbeddedToolResult {
+ const result=toolResult(value);
+ const text=result.contentItems[0]?.text;
+ if(text===undefined||Buffer.byteLength(text,'utf8')>1048576)throw Error('Unavailable output');
+ return result;
+}

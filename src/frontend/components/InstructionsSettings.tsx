@@ -1,6 +1,7 @@
-import { createSignal, createUniqueId, For, onCleanup, onMount, Show, type JSX } from 'solid-js';
-import { api } from '../api';
+import { batch, createMemo, createSignal, createUniqueId, For, onCleanup, onMount, Show, type JSX } from 'solid-js';
+import { api, loadDocumentProvenance } from '../api';
 import { communication } from '../communication';
+import type { DocumentProvenance } from '../types';
 import MarkdownPreview from './MarkdownPreview';
 import ChatPanel from './ChatPanel';
 import ResizeHandle from './ResizeHandle';
@@ -30,8 +31,20 @@ const embeddedTools = [
 ];
 export default function InstructionsSettings() {
  const [instructions, setInstructions] = createSignal<{key:string;content:string}[]>([]);
+ const [provenance, setProvenance] = createSignal<Record<string, DocumentProvenance>>({});
  const [instructionFocus, setInstructionFocus] = createSignal<string|null>(null);
  const [selected, setSelected] = createSignal<TaskPhase>('requirements');
+ function InstructionPreview(props: { instructionKey: string; variableLabels?: Record<string, string> }) {
+  const documentProvenance = createMemo(() => provenance()[props.instructionKey]);
+  const loadProvenance = createMemo(() => {
+   const name = props.instructionKey;
+   const revision = documentProvenance()?.revision;
+   return revision === undefined ? undefined : (itemId: string) => loadDocumentProvenance(name, revision, itemId);
+  });
+  return <MarkdownPreview variableLabels={props.variableLabels}
+   content={instructions().find(item => item.key === props.instructionKey)?.content ?? ''}
+   provenance={documentProvenance()} loadProvenance={loadProvenance()}/>;
+ }
  const [leftRatio, setLeftRatio] = createSignal(50);
  const [selectedGroup, setSelectedGroup] = createSignal('instructions');
  const [chatRatio, setChatRatio] = createSignal(65);
@@ -60,12 +73,16 @@ export default function InstructionsSettings() {
   const reload = async () => {
    const request = ++sequence;
    try {
-    const data=await api<{instructions?:unknown;editorState?:{pending:boolean;busy:boolean}}>('/api/instructions');
+    const data=await api<{instructions?:unknown;provenance?:Record<string,DocumentProvenance>;editorState?:{pending:boolean;busy:boolean}}>('/api/instructions');
     if (!active || request !== sequence) return;
     if (!Array.isArray(data?.instructions) || !data.instructions.length || data.instructions.some(item=>!item || typeof item.key!=='string' || typeof item.content!=='string')) throw Error('Invalid instructions');
-    setInstructions(data.instructions);
-    setEditorState(data.editorState ?? {pending:false,busy:false});
-    setError('');
+    const items = data.instructions;
+    batch(() => {
+     setInstructions(items);
+     setProvenance(data.provenance ?? {});
+     setEditorState(data.editorState ?? {pending:false,busy:false});
+     setError('');
+    });
    }
    catch { if (active && request === sequence) setError('インストラクションを読み込めませんでした'); }
    finally { if (active && request === sequence) setLoading(false); }
@@ -113,7 +130,7 @@ export default function InstructionsSettings() {
   <Show when={!loading() && !error()}>
    <Show when={selectedGroup()==='editor'} fallback={<>
    <h3 class="mt-4 text-sm font-bold">全共通</h3>
-   <FocusPrompt label={labels.common} selected={instructionFocus()==='common'} onSelect={()=>setInstructionFocus('common')}><MarkdownPreview variableLabels={variableLabels} content={instructions().find(item=>item.key==='common')?.content??''}/></FocusPrompt>
+   <FocusPrompt label={labels.common} selected={instructionFocus()==='common'} onSelect={()=>setInstructionFocus('common')}><InstructionPreview variableLabels={variableLabels} instructionKey="common"/></FocusPrompt>
    <div role="tablist" aria-label="フェーズ別インストラクション" class="tabs tabs-border mt-6 flex-nowrap overflow-x-auto">
     <For each={phases}>{(phase, index)=><button
      type="button"
@@ -138,11 +155,11 @@ export default function InstructionsSettings() {
     >{labels[phase]}</button>}</For>
    </div>
    <div role="tabpanel" id={`${tabId}-panel`} aria-labelledby={`${tabId}-${selected()}`} tabIndex={0}>
-    <FocusPrompt label={labels[selected()]} selected={instructionFocus()===selected()} onSelect={()=>setInstructionFocus(selected())}><MarkdownPreview variableLabels={variableLabels} content={instructions().find(item=>item.key===selected())?.content??''}/></FocusPrompt>
+    <FocusPrompt label={labels[selected()]} selected={instructionFocus()===selected()} onSelect={()=>setInstructionFocus(selected())}><InstructionPreview variableLabels={variableLabels} instructionKey={selected()}/></FocusPrompt>
    </div>
    </>}>
     <h3 class="mt-4 text-sm font-bold">編集相談用プロンプト</h3>
-    <FocusPrompt label={labels.editor} selected={instructionFocus()==='editor'} onSelect={()=>setInstructionFocus('editor')}><MarkdownPreview content={instructions().find(item=>item.key==='editor')?.content??''}/></FocusPrompt>
+    <FocusPrompt label={labels.editor} selected={instructionFocus()==='editor'} onSelect={()=>setInstructionFocus('editor')}><InstructionPreview instructionKey="editor"/></FocusPrompt>
    </Show>
   </Show>
   </div>
@@ -154,7 +171,10 @@ function FocusPrompt(props: {label:string; selected:boolean; onSelect:()=>void; 
  return <div class="p-2">
   <div role="region" aria-label={`${props.label}のフォーカス対象`} aria-current={props.selected ? 'true' : 'false'} tabIndex={0}
    class={`w-full rounded-lg p-[.125rem] ${props.selected ? 'aura text-primary motion-reduce:animate-none' : ''}`}
-   onClick={event=>{if (!(event.target as HTMLElement).closest('a,button,input,select,textarea')) props.onSelect();}}
+   onClick={event=>{
+    const target = event.target as Element;
+    if (event.currentTarget.contains(target) && !target.closest('a,button,input,select,textarea')) props.onSelect();
+   }}
    onKeyDown={event=>{if(event.target===event.currentTarget && (event.key==='Enter'||event.key===' ')){event.preventDefault();props.onSelect();}}}>
    <div class="relative rounded-lg bg-base-100 p-2 text-base-content">{props.children}</div>
   </div>

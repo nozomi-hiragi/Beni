@@ -7,9 +7,12 @@ const preparationPhases = ['requirements', 'documents', 'implementation'] as con
 const historyPhases = ['execution', 'retrospective', 'finalization'] as const;
 type HistoryPhase = typeof historyPhases[number];
 
-export const phaseDocuments = [...preparationPhases, 'retrospective' as const].map(phase => ({ phase, name: `${phase}.md`, label: phaseLabels[phase] }));
+export const phaseDocuments = [
+  ...[...preparationPhases, 'retrospective' as const].map(phase => ({ phase, name: `${phase}.md`, label: phaseLabels[phase] })),
+  { phase: 'finalization' as const, name: 'knowledge.md', label: 'ナレッジ' },
+];
 
-export default function PhaseIndicator(props: { phase: string; viewPhase?: string; onViewPhaseChange?: (phase: HistoryPhase) => void; onChange: (target: string) => void; advancing?: boolean; canStart?: boolean; completed?: boolean; busy?: boolean; modelSelect?: JSX.Element }) {
+export default function PhaseIndicator(props: { phase: string; viewPhase?: string; onViewPhaseChange?: (phase: HistoryPhase) => void; onChange: (target: string) => void; advancing?: boolean; canStart?: boolean; canComplete?: boolean; completed?: boolean; busy?: boolean; modelSelect?: JSX.Element }) {
   const selectedPhase = () => props.viewPhase ?? props.phase;
   const finalizing = () => props.phase === 'finalization';
   const retrospective = () => props.phase === 'retrospective';
@@ -30,7 +33,7 @@ export default function PhaseIndicator(props: { phase: string; viewPhase?: strin
     <Switch>
       <Match when={finalizing() || retrospective()}>
         <Show when={props.completed || retrospective()}>
-          <button type="button" class="btn btn-primary btn-sm" disabled={props.advancing || (retrospective() && props.busy)} onClick={() => props.onChange(props.completed ? 'reopen' : 'complete')}>{props.completed ? '再開' : 'タスク完了'}</button>
+          <button type="button" class="btn btn-primary btn-sm" disabled={props.advancing || (retrospective() && (props.busy || (!props.completed && props.canComplete === false)))} onClick={() => props.onChange(props.completed ? 'reopen' : 'complete')}>{props.completed ? '再開' : 'タスク完了'}</button>
         </Show>
       </Match>
       <Match when={execution()}>

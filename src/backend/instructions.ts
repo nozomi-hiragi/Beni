@@ -21,7 +21,7 @@ const preparation = `
 export const defaultInstructions: Instruction[] = [
  {key:'common', content:`# 共通インストラクション
 - プロジェクト参照ディレクトリ: {{project_directory}}。作業ディレクトリ: {{working_directory}}。
-- Beni が管理する task.json、プロジェクトの events.sqlite、チャットメタデータ、セッション、イベントカーソルを直接変更しない。記録された文書の版は埋め込みツールで読む。
+- Beni が管理する task.json、プロジェクトのSQLite、チャットメタデータ、セッション、イベントカーソルを直接変更しない。記録された文書の版は埋め込みツールで読む。
 - 文書と現在の会話で判断できる場合、履歴調査はしない。必要な場合も関連するイベントや差分に絞り、保存用 JSON や CLI ログを丸読みしない。
 - 必要な情報を得られる最小限のツールだけを使い、出力も必要な箇所に絞る。変更の確認など理由があるときだけ同じ文書や範囲を読み直す。
 - ユーザーの変更なしに既存の決定を上書きしない。本当に未解決の要件は確認する。
@@ -72,12 +72,33 @@ export function renderInstruction(template: string, values: Record<string, strin
   return value;
  });
 }
-export function composeInstructions(instructions: Instruction[], phase: TaskPhase | null, values: Record<string, string | undefined>): string {
- return (phase === null ? ['common'] : ['common', phase]).map(key => {
+const managedReplacements: [string,string][] = [
+ ['作業・書き込みディレクトリ: {{working_directory}}。タスク文書: {{task_directory}}。','作業ディレクトリ: {{working_directory}}。タスク文書は埋め込みツールで参照する。'],
+ ['既存の Markdown を読んでから変更し、requirements.md にユーザーの決定、制約、未解決事項を保つ。','要件定義の文書を読み、ユーザーの決定、制約、未解決事項を保つ。'],
+ ['documents.md は仕様整理の索引とし、## 資料 と ## 仕様 を分け、追加文書への相対 Markdown リンクを置く。追加文書はどちらか一方に分類する。','documents.md を索引にし、## 資料 と ## 仕様 に分けて同じタスクの文書名へ相対リンクを置く。'],
+ ['implementation.md に実装手順と検証を書く。追加文書名は英語の kebab-case .md とする。','実装手順の文書に手順と検証を書く。'],
+ ['保存先: {{knowledge_path}}。内容: {{knowledge_content}}','内容: {{knowledge_content}}'],
+ ['documents.md の ## 仕様 にリンクされた仕様だけを','仕様に分類された文書だけを'],
+ ['タスク内の ## 資料 に保ち','タスクの資料に保ち'],
+ ['retrospective.md に記す','反省会の文書に記す'],
+ ['{{task_directory}}/retrospective.md','（埋め込みツールで参照）'],
+ ['既存のナレッジ {{knowledge_path}} と照合し','既存のプロジェクトナレッジと照合し'],
+ ['追加すべき学びがなければファイルを変更しない。','追加すべき学びがなければ変更を記録しない。'],
+ ['書き込み先は {{knowledge_path}} に限る。','ナレッジへの反映は埋め込みツールを使う。']
+];
+const managedDocumentInstructions = `## Beni の文書操作
+タスク文書とプロジェクトナレッジの読み書きには、この会話で提示された埋め込みツールを使う。
+インストラクションに現れる従来のファイル名は文書の役割を表す。対応する Markdown ファイルを検索・作成・更新せず、管理データベースも直接操作しない。
+リポジトリに置く成果物は、現在のフェーズで認められる作業範囲に従う。`;
+export function composeInstructions(instructions: Instruction[], phase: TaskPhase | null, values: Record<string, string | undefined>, managed=false): string {
+ const rendered=(phase === null ? ['common'] : ['common', phase]).map(key => {
   const instruction = instructions.find(item => item.key === key);
   if (!instruction) throw Error(`インストラクションがありません: ${key}`);
-  return renderInstruction(instruction.content, values);
+  let content=instruction.content.replace('プロジェクトの events.sqlite、','プロジェクトのSQLite、');
+  if(managed)for(const [oldText,newText] of managedReplacements)content=content.replaceAll(oldText,newText);
+  return renderInstruction(content, values);
  }).join('\n\n');
+ return managed?rendered+'\n\n'+managedDocumentInstructions:rendered;
 }
 
 export function validateInstruction(key:unknown, content:unknown):asserts content is string {

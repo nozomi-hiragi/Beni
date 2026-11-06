@@ -1,15 +1,15 @@
 import { createHash } from 'node:crypto';
-import { defaultInstructions, validateInstruction, type Instruction } from '../instructions';
-import { taskDocuments, taskDocumentSnapshot, documentContentsKey, retrospectiveDocument } from '../documents';
+import { defaultInstructions, isInstructionKey, validateInstruction, type Instruction } from '../instructions';
+import { initialImplementationPlan, taskDocumentSnapshot, documentContentsKey, projectKnowledge } from '../documents';
 import { tmpdir } from 'node:os';
-import { mkdtempSync } from 'node:fs';
 import { Database } from 'bun:sqlite';
-import { existsSync, lstatSync, mkdirSync, readdirSync, renameSync, rmSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { validProjectId, validTaskId } from '../../shared/ids';
 import { cleanDeletedTask, directory, metadata, newMetadata, projectRoot, recoverTasks, pathExists, readJson, writeJson, validateChatDirectory, type TaskMetadata } from '../data';
 import { taskPhases, type TaskPhase } from '../../shared/task-phase';
-import { captureProjectTaskHistory, projectEvents, projectEvent, getProjectFileChange, getProjectFileVersion, projectTaskVersion, appendProjectEvent, projectTaskDeleted, type ProjectEventInput, type ProjectEventsOptions } from '../project-events';
+import { captureManagedTaskHistory, captureProjectTaskHistory, recordManagedDocumentHistory, readTrackedDocument, withDatabase, projectEvents, projectEvent, getProjectFileChange, getProjectFileVersion, projectTaskVersion, appendProjectEvent, projectTaskDeleted, type ProjectEventInput, type ProjectEventsOptions } from '../project-events';
+import { DocumentTable, type DocumentItemInput, type DocumentSeed, type DocumentVersion } from '../document-table';
 export { taskPhases } from '../../shared/task-phase';
 export type Project = {
   id: string;
@@ -26,6 +26,38 @@ const legacyInstructionHashes: Partial<Record<Instruction['key'], readonly strin
   retrospective: ['197564ac50f478ce0e916049c0edf5b75d5ed9486d7652b6f85af503e887449e', 'eadacb92d68c1df5e3b3b74c9bb6c5489ce5e85c0dd5924bfd746f7acdc8f984'],
   finalization: ['715cb6f374fc043f43fd3f37e50dd1dba1129ecc792e66d2eb6927ef72c05735'],
 };
+const instructionScope = 'instructions';
+const knowledgeScope = 'knowledge';
+const managedName = /^[a-z][a-z0-9-]{0,251}\.md$/;
+const retrospectiveSeed = '# 反省会\n\n## 未達・意図との差\n\n## 原因\n\n## 次回への改善\n';
+const documentTemplate = {kind: 'template', reason: 'Beni の初期テンプレートから作成した。'} as const;
+const legacyDocument = {kind: 'legacy', reason: '既存の文書を初期版として取り込んだ。'} as const;
+const taskSeeds = (name: string) => [
+  {name: 'requirements.md', content: `# ${name}\n`, seed: {kind: 'template', reason: '登録されたタスク名を最初の見出しに使った。', sourceText: name} as const},
+  {name: 'documents.md', content: '# 仕様整理\n\n## 資料\n\n## 仕様\n', seed: documentTemplate},
+  {name: 'implementation.md', content: initialImplementationPlan, seed: documentTemplate}
+];
+export type InstructionJobInput = {
+  id: string;
+  projectId: string;
+  taskId: string;
+  revision: string;
+  provider: 'codex' | 'claude';
+  model: string | null;
+};
+export type InstructionJob = InstructionJobInput & {
+  status: 'pending' | 'succeeded' | 'failed' | 'superseded';
+  error?: string;
+  reason?: string;
+};
+type InstructionJobChange = {key: string; base: string | null; items: DocumentItemInput[]};
+const instructionJobColumns = 'id, project_id AS projectId, task_id AS taskId, revision, provider, model, status, error, reason';
+type InstructionJobRow = Omit<InstructionJob, 'error' | 'reason'> & {error: string | null; reason: string | null};
+function instructionJobValue(row: InstructionJobRow | null): InstructionJob | undefined {
+  if (!row) return undefined;
+  const {error, reason, ...job} = row;
+  return {...job, ...(error === null ? {} : {error}), ...(reason === null ? {} : {reason})};
+}
 export type TaskRow = {
   id: string;
   project_id: string;
@@ -50,6 +82,7 @@ function recoverProjectTasks(folder: string, projectId: string) {
 }
 export class Store {
   private readonly db: Database;
+  private readonly instructionTable: DocumentTable;
   private memoryDirectory?:string;
   get dataDirectory(){return this.databasePath===':memory:'?(this.memoryDirectory??=mkdtempSync(join(tmpdir(),'beni-app-'))):dirname(resolve(this.databasePath))}
   constructor(private databasePath: string) {
@@ -67,31 +100,111 @@ export class Store {
       throw Error('Legacy data is unsupported.');
     }
     this.db.exec('CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY,name TEXT NOT NULL,folder TEXT NOT NULL UNIQUE)');
-    this.db.exec('CREATE TABLE IF NOT EXISTS instructions(key TEXT PRIMARY KEY,content TEXT NOT NULL)');
+    this.db.exec(`PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;
+      CREATE TABLE IF NOT EXISTS instructions(key TEXT PRIMARY KEY,content TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS instruction_jobs (
+        ordinal INTEGER PRIMARY KEY, id TEXT NOT NULL UNIQUE, project_id TEXT NOT NULL, task_id TEXT NOT NULL,
+        revision TEXT NOT NULL, provider TEXT NOT NULL, model TEXT, status TEXT NOT NULL, error TEXT, reason TEXT);
+      CREATE INDEX IF NOT EXISTS instruction_jobs_task ON instruction_jobs(project_id,task_id,ordinal);
+      CREATE INDEX IF NOT EXISTS instruction_jobs_pending ON instruction_jobs(status,ordinal);`);
+    this.instructionTable = new DocumentTable(this.db);
     this.db.transaction(() => {
-      const insert = this.db.query('INSERT OR IGNORE INTO instructions(key,content) VALUES (?,?)');
+      const jobColumns = this.db.query<{name: string}, []>('PRAGMA table_info(instruction_jobs)').all();
+      if (!jobColumns.some(column => column.name === 'reason')) this.db.exec('ALTER TABLE instruction_jobs ADD COLUMN reason TEXT');
+      const legacy = this.db.query('SELECT content FROM instructions WHERE key=?');
       for (const instruction of defaultInstructions) {
-        insert.run(instruction.key, instruction.content);
-        const legacyHashes = legacyInstructionHashes[instruction.key];
-        if (legacyHashes) {
-          const old = this.db.query('SELECT content FROM instructions WHERE key=?').get(instruction.key) as {content: string} | null;
-          if (old && legacyHashes.includes(createHash('sha256').update(old.content).digest('hex'))) {
-            this.db.query('UPDATE instructions SET content=? WHERE key=?').run(instruction.content, instruction.key);
-          }
-        }
+        if (this.instructionTable.get(instructionScope, instruction.key)) continue;
+        const old = legacy.get(instruction.key) as {content: string} | null;
+        const isLegacyDefault = old && legacyInstructionHashes[instruction.key]?.includes(createHash('sha256').update(old.content).digest('hex'));
+        if (old && !isLegacyDefault) this.instructionTable.seed(instructionScope, instruction.key, old.content, legacyDocument);
+        else this.instructionTable.seed(instructionScope, instruction.key, instruction.content, documentTemplate);
       }
-    })();
+    }).immediate();
   }
   instructions(): Instruction[] {
-    const rows = this.db.query('SELECT key,content FROM instructions').all() as Instruction[];
-    return defaultInstructions.map(({key}) => rows.find(row => row.key === key)!);
+    const contents = new Map(this.instructionTable.list(instructionScope).map(({name, content}) => [name, content]));
+    return defaultInstructions.map(({key}) => ({key, content: contents.get(key)!}));
   }
-  updateInstruction(key:unknown,content:unknown,expected:unknown) {
-    validateInstruction(key,content);
-    if(typeof expected!=='string')throw Error('expected_content が必要です');
-    const result=this.db.query('UPDATE instructions SET content=? WHERE key=? AND content=?').run(content,key as string,expected);
-    if(result.changes!==1)throw Error('インストラクションが変更されています。最新の本文を確認してください');
-    return {key,content};
+  instructionDocument(key: string, revision?: string): DocumentVersion | undefined {
+    if (!isInstructionKey(key)) throw Error('未知のインストラクションキー');
+    return this.instructionTable.get(instructionScope, key, revision);
+  }
+  writeInstructionDocument(key: string, base: string | null, items: DocumentItemInput[], actor: string): DocumentVersion {
+    return this.db.transaction(() => {
+      if (!isInstructionKey(key)) throw Error('未知のインストラクションキー');
+      const version = this.instructionTable.update(instructionScope, key, base, items, actor);
+      validateInstruction(key, version.content);
+      return version;
+    }).immediate();
+  }
+  updateInstruction(key: unknown, content: unknown, expected: unknown) {
+    validateInstruction(key, content);
+    if (typeof expected !== 'string') throw Error('expected_content が必要です');
+    const name = key as Instruction['key'];
+    return this.db.transaction(() => {
+      const current = this.instructionDocument(name)!;
+      if (current.content !== expected) throw Error('インストラクションが変更されています。最新の本文を確認してください');
+      if (content !== expected) {
+        this.writeInstructionDocument(name, current.revision, [{
+          text: content, reason: 'ユーザーが承認したインストラクションの編集',
+          sources: [{kind: 'instruction', id: name, revision: current.revision, text: current.content.trim().slice(0, 1024) || content.trim().slice(0, 1024)}]
+        }], 'instruction-editor');
+      }
+      return {key: name, content};
+    }).immediate();
+  }
+  enqueueInstructionJob(job: InstructionJobInput) {
+    if (!validProjectId(job.projectId) || !validTaskId(job.taskId) ||
+        typeof job.id !== 'string' || !job.id || job.id.length > 512 ||
+        typeof job.revision !== 'string' || !job.revision || job.revision.length > 512 ||
+        (job.provider !== 'codex' && job.provider !== 'claude') ||
+        (job.model !== null && (typeof job.model !== 'string' || job.model.length > 512))) throw Error('Invalid instruction job');
+    return this.db.transaction(() => {
+      const previous = this.instructionJobById(job.id);
+      if (previous) {
+        if (previous.projectId !== job.projectId || previous.taskId !== job.taskId || previous.revision !== job.revision ||
+            previous.provider !== job.provider || previous.model !== job.model) throw Error('Conflicting instruction job');
+        return previous;
+      }
+      this.db.query("UPDATE instruction_jobs SET status='superseded' WHERE project_id=? AND task_id=? AND status='pending'").run(job.projectId, job.taskId);
+      this.db.query("INSERT INTO instruction_jobs(id,project_id,task_id,revision,provider,model,status) VALUES (?,?,?,?,?,?,'pending')").run(
+        job.id, job.projectId, job.taskId, job.revision, job.provider, job.model);
+      return this.instructionJobById(job.id)!;
+    }).immediate();
+  }
+  pendingInstructionJob() {
+    return instructionJobValue(this.db.query(`SELECT ${instructionJobColumns} FROM instruction_jobs WHERE status='pending' ORDER BY ordinal LIMIT 1`).get() as InstructionJobRow | null);
+  }
+  private instructionJobById(id: string) {
+    return instructionJobValue(this.db.query(`SELECT ${instructionJobColumns} FROM instruction_jobs WHERE id=?`).get(id) as InstructionJobRow | null);
+  }
+  instructionJob(projectId: string, taskId: string) {
+    if (!validProjectId(projectId) || !validTaskId(taskId)) throw Error('Invalid instruction job scope');
+    return instructionJobValue(this.db.query(`SELECT ${instructionJobColumns} FROM instruction_jobs WHERE project_id=? AND task_id=? ORDER BY ordinal DESC LIMIT 1`).get(projectId, taskId) as InstructionJobRow | null);
+  }
+  finishInstructionJob(id: string, error?: string) {
+    if (error === undefined) return this.commitInstructionJob(id, []);
+    if (typeof error !== 'string' || !error.trim() || error.length > 4096) throw Error('Invalid instruction job error');
+    this.db.query("UPDATE instruction_jobs SET status='failed', error=? WHERE id=? AND status='pending'").run(error, id);
+    return this.instructionJobById(id);
+  }
+  retryInstructionJob(projectId: string, taskId: string) {
+    return this.db.transaction(() => {
+      const job = this.instructionJob(projectId, taskId);
+      if (job?.status !== 'failed') throw Error('再試行できるインストラクション更新がありません');
+      this.db.query("UPDATE instruction_jobs SET status='pending', error=NULL WHERE id=?").run(job.id);
+      return this.instructionJobById(job.id)!;
+    }).immediate();
+  }
+  commitInstructionJob(id: string, changes: InstructionJobChange[], reason?: string) {
+    if (reason !== undefined && (typeof reason !== 'string' || !reason.trim() || reason.length > 4096)) throw Error('Invalid instruction job reason');
+    if (new Set(changes.map(change => change.key)).size !== changes.length) throw Error('Duplicate instruction change');
+    return this.db.transaction(() => {
+      if (this.instructionJobById(id)?.status !== 'pending') throw Error('Instruction job is no longer pending');
+      for (const {key, base, items} of changes) this.writeInstructionDocument(key, base, items, id);
+      this.db.query("UPDATE instruction_jobs SET status='succeeded', error=NULL, reason=? WHERE id=?").run(reason ?? null, id);
+      return this.instructionJobById(id)!;
+    }).immediate();
   }
   close() {
     this.db.close();
@@ -153,13 +266,14 @@ export class Store {
     return matches[0] ?? null;
   }
   // 文書の内容を比較する。初回は基準だけを保存し、移行・復元日時を活動にしない。
-  private reconcileDocuments(project: Project, taskId: string, initialize = false): TaskMetadata {
+  private reconcileDocuments(project: Project, taskId: string): TaskMetadata {
     const root = directory(join(projectRoot(project.folder), 'tasks')), path = directory(join(root, taskId));
     const file = join(path, 'task.json');
     const value = metadata(file, 'task') as TaskMetadata;
     if (value.id !== taskId) throw Error('Task directory ID mismatch');
+    if (withDatabase(project.folder, db => !!db.query('SELECT 1 FROM managed_document_scopes WHERE scope=?').get(taskId))) return value;
     const baseline = taskDocumentSnapshot(path);
-    const previous = initialize ? undefined : value.documentBaseline;
+    const previous = value.documentBaseline;
     if (previous !== undefined && (!previous || typeof previous !== 'object' || Array.isArray(previous) || Object.entries(previous).some(([name, entry]) => !/^[a-z][a-z0-9-]*\.md$/.test(name) || !entry || !/^[a-f0-9]{64}$/.test(entry.hash) || !Number.isFinite(entry.modifiedAt)))) throw Error('Invalid document baseline');
     const changed = Object.keys(baseline).filter(name => previous && previous[name]?.hash !== baseline[name]!.hash);
     const removed = previous && Object.keys(previous).some(name => !(name in baseline));
@@ -190,18 +304,92 @@ export class Store {
     if (value.id !== taskId) throw Error('Task directory ID mismatch');
     return {project, file, value};
   }
+  private prepareManagedDocuments(db: Database, project: Project, task: {file: string; value: TaskMetadata} | null) {
+    const scope = task?.value.id ?? knowledgeScope;
+    const table = new DocumentTable(db);
+    if (db.query('SELECT 1 FROM managed_document_scopes WHERE scope=?').get(scope)) return {scope, table};
+
+    const documents = new Map<string, {content: string; seed: DocumentSeed}>();
+    if (task) {
+      for (const {name, content, seed} of taskSeeds(task.value.name)) documents.set(name, {content, seed});
+      if (task.value.phase === 'retrospective' || task.value.phase === 'finalization') {
+        documents.set('retrospective.md', {content: retrospectiveSeed, seed: documentTemplate});
+      }
+      const directory = dirname(task.file);
+      for (const name of readdirSync(directory).filter(name => managedName.test(name)).sort()) {
+        documents.set(name, {content: readTrackedDocument(join(directory, name)).toString('utf8'), seed: legacyDocument});
+      }
+      captureManagedTaskHistory(db, task.value.id, task.value.phase);
+    } else {
+      const path = projectKnowledge(project.folder, false);
+      documents.set('knowledge.md', pathExists(path)
+        ? {content: readTrackedDocument(path).toString('utf8'), seed: legacyDocument}
+        : {content: '# プロジェクトの学び\n', seed: documentTemplate});
+    }
+    for (const [name, {content, seed}] of documents) {
+      const version = table.seed(scope, name, content, seed);
+      recordManagedDocumentHistory(db, task?.value.id ?? null, (task?.value.phase as TaskPhase | undefined) ?? null, version, true);
+    }
+    db.query('INSERT INTO managed_document_scopes(scope) VALUES (?)').run(scope);
+    return {scope, table};
+  }
+  private withManagedDocuments<T>(projectId: string, taskId: string | null, operation: (db: Database, table: DocumentTable, scope: string, task: {file: string; value: TaskMetadata} | null) => T) {
+    const project = this.scopedProject(projectId);
+    return withDatabase(project.folder, db => db.transaction(() => {
+      const task = taskId === null ? null : this.scopedTask(projectId, taskId);
+      const {table, scope} = this.prepareManagedDocuments(db, project, task);
+      return operation(db, table, scope, task);
+    }).immediate());
+  }
+  managedDocuments(projectId: string, taskId: string | null): DocumentVersion[] {
+    return this.withManagedDocuments(projectId, taskId, (_db, table, scope) => {
+      const documents = table.list(scope);
+      const requirements = documents.findIndex(document => document.name === 'requirements.md');
+      if (requirements > 0) documents.unshift(...documents.splice(requirements, 1));
+      return documents;
+    });
+  }
+  managedDocument(projectId: string, taskId: string | null, name: string, revision?: string): DocumentVersion | undefined {
+    this.validateManagedName(taskId, name);
+    return this.withManagedDocuments(projectId, taskId, (_db, table, scope) => table.get(scope, name, revision));
+  }
+  replayManagedDocument(projectId: string, taskId: string | null, name: string, actor: string) {
+    this.validateManagedName(taskId, name);
+    return this.withManagedDocuments(projectId, taskId, (_db, table, scope) => table.replay(scope, name, actor));
+  }
+  managedDocumentHistory(projectId: string, taskId: string | null): DocumentVersion[] {
+    return this.withManagedDocuments(projectId, taskId, (_db, table, scope) => table.history(scope));
+  }
+  private validateManagedName(taskId: string | null, name: string) {
+    if (typeof name !== 'string' || (taskId === null ? name !== 'knowledge.md' : !managedName.test(name))) throw Error('Invalid managed document name');
+  }
+  writeManagedDocument(projectId: string, taskId: string | null, name: string, base: string | null, items: DocumentItemInput[], actor: string): DocumentVersion {
+    this.validateManagedName(taskId, name);
+    let previousMetadata: {file: string; value: TaskMetadata} | undefined;
+    try {
+      return this.withManagedDocuments(projectId, taskId, (db, table, scope, task) => {
+        const version = table.update(scope, name, base, items, actor);
+        recordManagedDocumentHistory(db, taskId, (task?.value.phase as TaskPhase | undefined) ?? null, version);
+        if (task) {
+          const {file, value} = task;
+          writeJson(file, {...value, updatedAt: new Date(Math.max(Date.parse(value.updatedAt ?? '') || 0, version.updatedAt)).toISOString()});
+          previousMetadata = task;
+        }
+        return version;
+      });
+    } catch (error) {
+      if (previousMetadata) writeJson(previousMetadata.file, previousMetadata.value);
+      throw error;
+    }
+  }
   reconcileTaskDocuments(projectId: string, taskId: string) {
     const {project, value: before} = this.scopedTask(projectId, taskId);
     const after = this.reconcileDocuments(project, taskId);
-    return before.documentBaseline !== undefined && documentContentsKey(before.documentBaseline) !== documentContentsKey(after.documentBaseline!);
+    return before.documentBaseline !== undefined && after.documentBaseline !== undefined &&
+      documentContentsKey(before.documentBaseline) !== documentContentsKey(after.documentBaseline);
   }
   taskDocumentFolder(projectId: string, taskId: string) {
-    const {project, value: task} = this.scopedTask(projectId, taskId);
-    this.reconcileDocuments(project, taskId);
-    const path = taskDocuments(project.folder, taskId, {requirements: '# ' + task.name + '\n'});
-    // 読み込み時の既定文書の補完は活動に数えない。
-    this.reconcileDocuments(project, taskId, true);
-    return path;
+    return dirname(this.scopedTask(projectId, taskId).file);
   }
   touchTask(projectId: string, taskId: string) {
     const {file, value} = this.scopedTask(projectId, taskId);
@@ -276,7 +464,6 @@ export class Store {
     const {project, file, value} = this.scopedTask(projectId, taskId);
     if (!taskPhases.includes(target)) throw Error('invalid phase');
     if (value.phase !== expectedPhase || value.status==='completed' || target==='finalization' || value.phase==='finalization') throw Error('phase conflict');
-    if(target==='retrospective')retrospectiveDocument(join(file,'..'));
     if(value.phase===target)return {id:value.id,project_id:projectId,name:value.name,phase:value.phase,status:value.status,createdAt:value.createdAt,updatedAt:value.updatedAt};
     return this.saveTaskTransition(project, file, value, target, value.status);
   }
@@ -307,7 +494,16 @@ export class Store {
     value.updatedAt = new Date(Math.max(Date.now(), (Date.parse(value.updatedAt ?? '') || 0) + 1)).toISOString();
     writeJson(file, value);
     try {
-      if (phase !== previousPhase) captureProjectTaskHistory(project.folder, taskId, phase, previousPhase, undefined, event);
+      if (phase === 'retrospective' && previousPhase !== phase) {
+        withDatabase(project.folder, db => db.transaction(() => {
+          const {table, scope} = this.prepareManagedDocuments(db, project, {file, value: before});
+          captureManagedTaskHistory(db, taskId, phase, previousPhase, undefined, event);
+          if (!table.get(scope, 'retrospective.md')) {
+            const version = table.seed(scope, 'retrospective.md', retrospectiveSeed, documentTemplate);
+            recordManagedDocumentHistory(db, taskId, phase, version);
+          }
+        }).immediate());
+      } else if (phase !== previousPhase) captureProjectTaskHistory(project.folder, taskId, phase, previousPhase, undefined, event);
       else if (event) appendProjectEvent(project.folder, {type: event, taskId, phase});
     }
     catch (error) { writeJson(file, before); throw error; }
@@ -377,17 +573,23 @@ export class Store {
     const root = directory(join(projectRoot(project.folder), 'tasks')),
       path = join(root, value.id);
     if (existsSync(path)) throw Error('Task ID collision');
+    const staged = initialize ? path : mkdtempSync(join(root, '.creating-'));
+    let created = false;
     try {
-      if (initialize) initialize(task);else taskDocuments(project.folder, task.id, {
-        requirements: `# ${task.name}\n`
-      }, true);
-      directory(path);
-      writeJson(join(path, 'task.json'), value);
-      this.reconcileDocuments(project, value.id);
+      if (initialize) {
+        initialize(task);
+        directory(path);
+      }
+      writeJson(join(staged, 'task.json'), value);
+      if (staged !== path) {
+        if (pathExists(path)) throw Error('Task ID collision');
+        renameSync(staged, path);
+      }
+      created = true;
+      const file = join(path, 'task.json');
+      withDatabase(project.folder, db => db.transaction(() => this.prepareManagedDocuments(db, project, {file, value})).immediate());
     } catch (error) {
-      if (existsSync(path)) rmSync(path, {
-        recursive: true
-      });
+      rmSync(created ? path : staged, {recursive: true, force: true});
       throw error;
     }
     return task;

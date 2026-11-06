@@ -17,6 +17,7 @@
   - [プロジェクト設定・作成](screens/project-settings.md)
   - [設定画面](screens/settings.md)
 - 機能
+  - [要求・根拠を追跡できる文書管理](traceable-documents-design.md)
   - [インストラクション管理](features/instructions.md)
   - [LLM チャット連携](features/llm-chat.md)
   - [タスク検索](features/task-search.md)

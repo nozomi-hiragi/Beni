@@ -1,12 +1,12 @@
 import { Database } from 'bun:sqlite';
 import { createHash } from 'node:crypto';
-import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readdirSync } from 'node:fs';
+import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readdirSync, renameSync, unlinkSync } from 'node:fs';
 import { join, posix } from 'node:path';
 import { pathExists, projectRoot } from './data';
 import { validTaskId } from '../shared/ids';
 import { isTaskPhase, type TaskPhase } from '../shared/task-phase';
 
-export type ProjectEventDetails = {toolName?: string; targetPaths?: string[]; result?: string; exitCode?: number; name?: string; previousName?: string};
+export type ProjectEventDetails = {toolName?: string; targetPaths?: string[]; result?: string; exitCode?: number; name?: string; previousName?: string; revision?: string};
 export type ProjectEvent = {
   id: number; type: string; at: string; taskId: string | null; phase: TaskPhase | null; sourcePhase: TaskPhase | null;
   operationId: string | null; chatId: string | null; sendId: string | null; packId: string | null; toolCallId: string | null;
@@ -42,8 +42,33 @@ function checkDatabaseFile(path: string) {
   const stat = lstatSync(path);
   if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) throw Error('Invalid event database file');
 }
-function withDatabase<T>(folder: string, operation: (db: Database) => T): T {
-  const root = projectRoot(folder), path = join(root, 'events.sqlite');
+export function withDatabase<T>(folder: string, operation: (db: Database) => T): T {
+  const root = projectRoot(folder), path = join(root, 'project.sqlite'), legacy = join(root, 'events.sqlite');
+  for (const suffix of ['', '-journal', '-wal', '-shm']) { checkDatabaseFile(path + suffix); checkDatabaseFile(legacy + suffix); }
+  if (pathExists(path) && pathExists(legacy)) throw Error('Both project event databases exist');
+  if (!pathExists(path) && pathExists(legacy)) {
+    if (['-journal', '-wal', '-shm'].some(suffix => pathExists(path + suffix))) throw Error('Project database sidecar already exists');
+    const before = lstatSync(legacy), db = new Database(legacy, {create: false, strict: true});
+    try {
+      const opened = lstatSync(legacy);
+      if (opened.ino !== before.ino || opened.dev !== before.dev) throw Error('Event database changed while opening');
+      db.exec('PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000');
+      db.query('PRAGMA schema_version').get();
+      const checkpoint = db.query('PRAGMA wal_checkpoint(TRUNCATE)').get() as {busy: number; log: number; checkpointed: number};
+      if (checkpoint.busy !== 0 || checkpoint.log !== checkpoint.checkpointed) throw Error('Could not checkpoint legacy event database');
+      const journal = db.query('PRAGMA journal_mode=DELETE').get() as {journal_mode: string};
+      if (journal.journal_mode.toLowerCase() !== 'delete') throw Error('Could not disable legacy event database journal');
+    } finally { db.close(); }
+    for (const suffix of ['-journal', '-wal', '-shm']) {
+      checkDatabaseFile(legacy + suffix);
+      if (!pathExists(legacy + suffix)) continue;
+      const sidecar = lstatSync(legacy + suffix);
+      if ((suffix === '-wal' && sidecar.size === 0) || suffix === '-shm') unlinkSync(legacy + suffix);
+      else throw Error(`Legacy event database sidecar remains after recovery: ${suffix}`);
+    }
+    if (pathExists(path)) throw Error('Both project event databases exist');
+    renameSync(legacy, path);
+  }
   for (const suffix of ['', '-journal', '-wal', '-shm']) checkDatabaseFile(path + suffix);
   if (!pathExists(path)) {
     try { closeSync(openSync(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600)); }
@@ -60,6 +85,7 @@ function withDatabase<T>(folder: string, operation: (db: Database) => T): T {
         operation_id TEXT, chat_id TEXT, send_id TEXT, pack_id TEXT, tool_call_id TEXT, details TEXT NOT NULL, from_phase TEXT, to_phase TEXT);
       CREATE UNIQUE INDEX IF NOT EXISTS event_operation_type ON events(operation_id,type) WHERE operation_id IS NOT NULL AND type IN ('operation.started','operation.finished','execution.started','execution.finished','tool.started','tool.finished');
       CREATE INDEX IF NOT EXISTS event_task ON events(task_id,id);
+      CREATE TABLE IF NOT EXISTS managed_document_scopes (scope TEXT PRIMARY KEY);
       CREATE TABLE IF NOT EXISTS file_changes (
         event_id INTEGER PRIMARY KEY REFERENCES events(id), path TEXT NOT NULL, previous_path TEXT,
         previous_change_id INTEGER REFERENCES file_changes(event_id), patch BLOB NOT NULL, after_hash TEXT, change_count INTEGER NOT NULL);
@@ -68,7 +94,7 @@ function withDatabase<T>(folder: string, operation: (db: Database) => T): T {
     return operation(db);
   } finally { db.close(); }
 }
-function readDocument(path: string) {
+export function readTrackedDocument(path: string) {
   const before = lstatSync(path);
   if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1) throw Error('Invalid tracked document');
   if (before.size > MAX_DOCUMENT_BYTES) throw Error('Tracked document exceeds 1 MiB');
@@ -137,9 +163,10 @@ function applyPatch(content: Buffer, patch: Uint8Array, reverse = false): Buffer
 }
 function checkedDetails(input: ProjectEventInput): ProjectEventDetails {
   const details = input.details ?? {}, keys = Object.keys(details);
-  const allowed = ['toolName', 'targetPaths', 'result', 'exitCode', ...(input.type.startsWith('task.') ? ['name', 'previousName'] : [])];
+  const allowed = ['toolName', 'targetPaths', 'result', 'exitCode', ...(input.type.startsWith('task.') ? ['name', 'previousName'] : []), ...(input.type.startsWith('document.') ? ['revision'] : [])];
   if (keys.some(key => !allowed.includes(key))) throw Error('Unsupported event details');
   for (const key of ['toolName', 'result', 'name', 'previousName'] as const) if (details[key] !== undefined && (typeof details[key] !== 'string' || details[key]!.length > 512 || /[\x00-\x1f]/.test(details[key]!))) throw Error('Invalid event details');
+  if (details.revision !== undefined && !reference(details.revision)) throw Error('Invalid document revision');
   if (details.result !== undefined && !['completed', 'failed', 'interrupted', 'unknown', 'success', 'cancelled'].includes(details.result)) throw Error('Invalid execution result');
   if (details.exitCode !== undefined && !Number.isSafeInteger(details.exitCode)) throw Error('Invalid exit code');
   if (details.targetPaths !== undefined && (!Array.isArray(details.targetPaths) || details.targetPaths.length > 100 || details.targetPaths.some(path => typeof path !== 'string' || !relativePath(path)))) throw Error('Invalid target paths');
@@ -245,6 +272,34 @@ function recordFile(db: Database, input: Omit<ProjectEventInput, 'type'>, type: 
   return eventValue(db, db.query('SELECT * FROM events WHERE id=?').get(event.id) as EventRow);
 }
 
+export function recordManagedDocumentHistory(db: Database, taskId: string | null, phase: TaskPhase | null, document: {name: string; content: string; revision: string}, migration = false) {
+  if (!documentName(document.name)) throw Error('Invalid document name');
+  const path = (taskId === null ? '.beni/' : taskPrefix(taskId)) + document.name;
+  const latest = db.query('SELECT * FROM file_changes WHERE path=? OR previous_path=? ORDER BY event_id DESC LIMIT 1').get(path, path) as ChangeRow | null;
+  const before = latest?.path === path && latest.after_hash ? latest : null;
+  const content = Buffer.from(document.content);
+  if (migration && before?.after_hash === hash(content)) return;
+  return recordFile(db, {taskId, phase, details: {revision: document.revision}}, before ? 'document.updated' : 'document.created', path, before, content);
+}
+
+function recordTaskPhase(db: Database, input: {taskId: string; phase: TaskPhase; sourcePhase?: TaskPhase | null; operationId?: string}, taskEvent?: 'task.completed' | 'task.reopened') {
+  const events: ProjectEvent[] = [];
+  const last = db.query("SELECT COALESCE(to_phase,phase) AS phase FROM events WHERE task_id=? AND type IN ('task.created','phase.changed') AND COALESCE(to_phase,phase) IS NOT NULL ORDER BY id DESC LIMIT 1").get(input.taskId) as {phase: TaskPhase} | null;
+  if (!last) events.push(insertEvent(db, {...input, type: 'task.created'}));
+  else if (last.phase !== input.phase) events.push(insertEvent(db, {...input, type: 'phase.changed', from: last.phase, to: input.phase}));
+  if (taskEvent) events.push(insertEvent(db, {...input, type: taskEvent}));
+  return events;
+}
+
+export function captureManagedTaskHistory(db: Database, taskId: string, phase: string, sourcePhase?: TaskPhase | null, operationId?: string, taskEvent?: 'task.completed' | 'task.reopened') {
+  if (!isTaskPhase(phase)) throw Error('Invalid history phase');
+  if (db.query("SELECT id FROM events WHERE type='task.deleted' AND task_id=? LIMIT 1").get(taskId)) throw Error('Task history is deleted');
+  const events = recordTaskPhase(db, {taskId, phase, sourcePhase, operationId}, taskEvent);
+  const prefix = taskPrefix(taskId);
+  const snapshot = Object.fromEntries([...latestTaskChanges(db, taskId)].map(([path, row]) => [path.slice(prefix.length), row.after_hash!]));
+  return {phase, snapshot, events};
+}
+
 export function appendProjectEvent(folder: string, input: ProjectEventInput) {
   return withDatabase(folder, db => db.transaction(() => insertEvent(db, input))());
 }
@@ -252,6 +307,7 @@ export function captureProjectTaskHistory(folder: string, taskId: string, phase:
   if (!isTaskPhase(phase) || sourcePhase !== null && !isTaskPhase(sourcePhase)) throw Error('Invalid history phase');
   const prefix = taskPrefix(taskId);
   return withDatabase(folder, db => db.transaction(() => {
+    if (db.query('SELECT 1 FROM managed_document_scopes WHERE scope=?').get(taskId)) return captureManagedTaskHistory(db, taskId, phase, sourcePhase, operationId, taskEvent);
     if (db.query("SELECT id FROM events WHERE type='task.deleted' AND task_id=? LIMIT 1").get(taskId)) throw Error('Task history is deleted');
     const tasks = join(projectRoot(folder), 'tasks'), task = join(tasks, taskId);
     for (const path of [tasks, task]) {
@@ -266,13 +322,13 @@ export function captureProjectTaskHistory(folder: string, taskId: string, phase:
       const path = prefix + name;
       if (!allowNew && !known.has(path) && !['requirements.md', 'documents.md', 'implementation.md', 'retrospective.md'].includes(name)) { candidates.push(name); continue; }
       eligible.add(path);
-      current.set(path, readDocument(join(task, name)));
+      current.set(path, readTrackedDocument(join(task, name)));
     }
     const missingHashes = new Set([...previous].filter(([path]) => !current.has(path)).map(([, row]) => row.after_hash));
     // 後のフェーズで新規資料を追跡し始めず、既追跡文書のリネームだけを継続する。
     if (missingHashes.size) for (const name of candidates) {
       let content: Buffer;
-      try { content = readDocument(join(task, name)); } catch { continue; }
+      try { content = readTrackedDocument(join(task, name)); } catch { continue; }
       if (missingHashes.has(hash(content))) current.set(prefix + name, content);
     }
     const events: ProjectEvent[] = [], input = {taskId, phase, sourcePhase, operationId};

@@ -1,7 +1,7 @@
 import { availableModels, chooseModel, loadModels, modelIsAvailable, modelLabel, modelScope, modelValue, providerReady, rejectModel, selectedModel as cachedModel } from './model-cache';
 import { batch, createEffect, createMemo, createSignal, For, onCleanup, onMount, Show, untrack } from 'solid-js';
 import { createStore, reconcile } from 'solid-js/store';
-import { api, ApiError } from './api';
+import { api, ApiError, loadDocumentProvenance } from './api';
 import { isTaskPhase, type TaskPhase } from '../shared/task-phase';
 import { communication } from './communication';
 import ChatPanel from './components/ChatPanel';
@@ -23,6 +23,8 @@ export interface WorkspaceProps {
 
 const documentId = (document: Document) => document.path ?? JSON.stringify([document.name, document.version]);
 type DocumentTabs = { known: string[]; open: string[]; selected?: string };
+const reviewLabels = { pending: '待機中', running: '実行中', done: '完了', failed: '失敗' };
+const instructionJobLabels = { pending: '処理中', succeeded: '完了', failed: '失敗', superseded: '後続の更新依頼に置き換え済み' };
 
 export default function Workspace(props: WorkspaceProps) {
   const [chatBusy, setChatBusy] = createSignal(false);
@@ -50,6 +52,10 @@ export default function Workspace(props: WorkspaceProps) {
     const phase = detail()?.task.phase;
     return isTaskPhase(phase) ? phase : undefined;
   });
+  const review = () => detail()?.workflow?.review;
+  const instructionJob = () => detail()?.workflow?.instructionJob;
+  const reviewInProgress = () => actualPhase() === 'retrospective' && (review()?.state === 'pending' || review()?.state === 'running');
+  const canComplete = () => detail()?.workflow === undefined || review()?.state === 'done';
   createEffect(() => { activeTask(); setViewPhase(actualPhase()); });
   const chatPhase = () => {
     const phase = actualPhase(), selected = viewPhase();
@@ -75,6 +81,7 @@ export default function Workspace(props: WorkspaceProps) {
   const documentTabs = new Map<string, DocumentTabs>();
   let documentOwner: string | undefined;
   let alive = true;
+  let refreshTaskDetail: (() => Promise<void>) | undefined;
   let taskTreeToggle: HTMLButtonElement | undefined;
   let documentTreeToggle: HTMLButtonElement | undefined;
 
@@ -107,6 +114,14 @@ export default function Workspace(props: WorkspaceProps) {
   const documentName = (name: string) => phaseDocuments.find(item => item.name === name)?.label ?? name;
   const documentLabel = (document: Document) => documents().filter(item => item.name === document.name).length > 1 ? `${documentName(document.name)} · v${document.version}` : documentName(document.name);
   const currentDocument = createMemo(() => documents().find(document => documentId(document) === activeDocument()));
+  const loadCurrentDocumentProvenance = createMemo(() => {
+    const document = currentDocument();
+    const task = detail()?.task;
+    if (!document?.provenance || !task) return undefined;
+    const { revision } = document.provenance;
+    const scope = { projectId: task.projectId, taskId: task.id };
+    return (itemId: string) => loadDocumentProvenance(document.name, revision, itemId, scope);
+  });
 
   // URL changes select tabs without remounting this workspace or creating history.
   createEffect(() => {
@@ -154,7 +169,9 @@ export default function Workspace(props: WorkspaceProps) {
     const newest = values.filter(document => document.name === initialName).reduce<Document | undefined>(
       (latest, document) => !latest || document.version > latest.version ? document : latest, undefined,
     );
-    const selected = previous?.selected && open.includes(previous.selected) ? previous.selected : previous ? open[open.length - 1] : newest && documentId(newest);
+    const knowledgeReady = newest?.name === 'knowledge.md' && actualPhase() === 'finalization' && !previous?.known.includes(documentId(newest));
+    const selected = knowledgeReady ? documentId(newest)
+      : previous?.selected && open.includes(previous.selected) ? previous.selected : previous ? open[open.length - 1] : newest && documentId(newest);
     saveDocumentTabs(taskId, open, selected, available);
   }
 
@@ -212,9 +229,25 @@ export default function Workspace(props: WorkspaceProps) {
         }
       } while (reload && active); fetching = false;
     };
+    refreshTaskDetail = load;
     void load();
-    onCleanup(() => { active = false; sequence++; unsubscribe?.(); unsubscribeEvents?.(); });
+    onCleanup(() => { active = false; sequence++; refreshTaskDetail = undefined; unsubscribe?.(); unsubscribeEvents?.(); });
   });
+
+  async function retryWorkflow(action: 'retry-review' | 'retry-instructions') {
+    const task = detail()?.task;
+    if (!task || task.id !== activeTask() || advancing()) return;
+    setAdvancing(true);
+    setPhaseError('');
+    try {
+      await api(`/api/tasks/${task.id}/${action}`, { projectId: task.projectId });
+    } catch (error) {
+      if (alive && task.id === activeTask()) setPhaseError(error instanceof Error ? error.message : '再試行を開始できませんでした');
+    } finally {
+      if (alive && task.id === activeTask()) await refreshTaskDetail?.();
+      if (alive) setAdvancing(false);
+    }
+  }
 
   async function renameTask(id: string, name: string) {
     const project = projectId();
@@ -287,13 +320,13 @@ export default function Workspace(props: WorkspaceProps) {
             <Show when={loadError()}><div role="alert" class="alert alert-error text-sm">{loadError()}</div></Show>
             <Show when={loading() && !detail()}><p class="p-4 text-sm text-base-content/60">読み込み中...</p></Show>
             <Show when={detail() && detail()?.task.id === activeTask()}>
-              <PhaseIndicator phase={detail()!.task.phase} viewPhase={chatPhase()} onViewPhaseChange={setViewPhase} advancing={advancing()} canStart={!!detail()?.canStart && implementationAvailable()} completed={detail()?.task.status === 'completed'} busy={chatBusy()} modelSelect={<select class="select select-bordered select-sm w-auto" style={{ 'field-sizing': 'content' }} aria-label="実装担当モデル" value={implementationModel() ? modelValue(implementationModel()!) : ''} disabled={advancing() || !availableModels().length} onChange={event => { const model = availableModels().find(item => modelValue(item) === event.currentTarget.value); if (model) chooseModel(implementationScope(), model); }}>
+              <PhaseIndicator phase={detail()!.task.phase} viewPhase={chatPhase()} onViewPhaseChange={setViewPhase} advancing={advancing()} canStart={!!detail()?.canStart && implementationAvailable()} canComplete={canComplete()} completed={detail()?.task.status === 'completed'} busy={chatBusy()} modelSelect={<select class="select select-bordered select-sm w-auto" style={{ 'field-sizing': 'content' }} aria-label="実装担当モデル" value={implementationModel() ? modelValue(implementationModel()!) : ''} disabled={advancing() || !availableModels().length} onChange={event => { const model = availableModels().find(item => modelValue(item) === event.currentTarget.value); if (model) chooseModel(implementationScope(), model); }}>
                 <Show when={implementationModel() && !implementationAvailable()}><option value={modelValue(implementationModel()!)} disabled>⚠️ {modelLabel(implementationModel()!.name, implementationModel()!.provider)}</option></Show>
                 <Show when={!implementationModel()}><option value="">未確認</option></Show>
                 <For each={availableModels().filter(item => implementationAvailable() || modelValue(item) !== (implementationModel() ? modelValue(implementationModel()!) : ''))}>{item => <option value={modelValue(item)} selected={modelValue(item) === (implementationModel() ? modelValue(implementationModel()!) : '')} disabled={!providerReady(item.provider)}>{modelLabel(item.name, item.provider)}</option>}</For>
               </select>} onChange={async target => {
                 const current = detail(), requestedModel = implementationModel();
-                if (!current || advancing() || (target === 'start' && !implementationAvailable())) return;
+                if (!current || advancing() || (target === 'start' && !implementationAvailable()) || (target === 'complete' && !canComplete())) return;
                 setAdvancing(true); setPhaseError('');
                 try {
                   const result = await api<Task>(`/api/tasks/${current.task.id}/${['start', 'stop', 'complete', 'reopen'].includes(target) ? target : 'phase'}`, { projectId: current.task.projectId, phase: current.task.phase, ...(target === 'start' ? { model: requestedModel?.id, provider: requestedModel?.provider ?? 'codex' } : ['stop', 'complete', 'reopen'].includes(target) ? {} : { target }) });
@@ -320,7 +353,25 @@ export default function Workspace(props: WorkspaceProps) {
                 finally { setAdvancing(false); }
               }} />
               <Show when={phaseError()}><p role="alert" class="p-2 text-sm text-error">{phaseError()}</p></Show>
-              <Show when={isTaskPhase(detail()?.task.phase)}><ChatPanel onTaskRename={applyRenamedTask} readOnly={chatPhase() === 'execution' || actualPhase() === 'finalization' || detail()?.task.status === 'completed'} onBusyChange={setChatBusy} onModelUnavailable={(model, provider) => { if (detail()?.task.phase === 'execution') rejectModel(implementationScope(), model, provider); }} projectId={detail()!.task.projectId} taskId={activeTask()} phase={chatPhase()} /></Show>
+              <Show when={actualPhase() === 'retrospective' && review()}>{state =>
+                <div class="flex flex-wrap items-center gap-2 border-b border-base-300 px-3 py-2 text-sm">
+                  <p role="status">反省会の自動精査 · {reviewLabels[state().state]}<Show when={state().state !== 'done'}> · 残り {state().remaining} 件</Show></p>
+                  <Show when={state().state === 'failed'}>
+                    <Show when={state().error}><p class="text-error">{state().error}</p></Show>
+                    <button type="button" class="btn btn-sm" disabled={advancing() || chatBusy()} onClick={() => void retryWorkflow('retry-review')}>自動精査を再試行</button>
+                  </Show>
+                </div>
+              }</Show>
+              <Show when={actualPhase() === 'finalization' && detail()?.task.status === 'completed' && instructionJob()}>{job =>
+                <div class="flex flex-wrap items-center gap-2 border-b border-base-300 px-3 py-2 text-sm">
+                  <p role="status">インストラクションの更新 · {instructionJobLabels[job().status]}</p>
+                  <Show when={job().status === 'failed'}>
+                    <Show when={job().error}><p class="text-error">{job().error}</p></Show>
+                    <button type="button" class="btn btn-sm" disabled={advancing()} onClick={() => void retryWorkflow('retry-instructions')}>インストラクションの更新を再試行</button>
+                  </Show>
+                </div>
+              }</Show>
+              <Show when={isTaskPhase(detail()?.task.phase)}><ChatPanel onTaskRename={applyRenamedTask} readOnly={chatPhase() === 'execution' || actualPhase() === 'finalization' || detail()?.task.status === 'completed' || reviewInProgress()} onBusyChange={setChatBusy} onModelUnavailable={(model, provider) => { if (detail()?.task.phase === 'execution') rejectModel(implementationScope(), model, provider); }} projectId={detail()!.task.projectId} taskId={activeTask()} phase={chatPhase()} /></Show>
             </Show>
           </Show>
         </div>
@@ -335,7 +386,7 @@ export default function Workspace(props: WorkspaceProps) {
       <TabBar label="文書" tabs={openDocuments().map(id => { const document = documents().find(item => documentId(item) === id); return { id, label: document ? documentLabel(document) : id }; })} activeId={activeDocument()} onSelect={openDocument} onClose={closeDocument} left={toggle('文書ツリーを開閉', documentTreeOpen(), 'document-tree', () => setDocumentTreeOpen(value => !value), element => { documentTreeToggle = element; })} />
       <div class="relative flex min-h-0 flex-1 flex-col">
         <Show when={documentTreeOpen()}><TreeView id="document-tree" label="文書" nodes={documents().map(document => ({ id: documentId(document), label: documentLabel(document) }))} onSelect={id => { openDocument(id); setDocumentTreeOpen(false); }} /></Show>
-        <Show when={currentDocument()}>{document => <MarkdownPreview content={document().content} documents={documents().map(item => item.name)} onDocument={name => {
+        <Show when={currentDocument()}>{document => <MarkdownPreview content={document().content} provenance={document().provenance} loadProvenance={loadCurrentDocumentProvenance()} documents={documents().map(item => item.name)} onDocument={name => {
           const target = documents().find(item => item.name === name);
           if (target) openDocument(documentId(target));
         }} />}</Show>

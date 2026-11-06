@@ -559,13 +559,13 @@ test('操作通知の再送を重複せず、終了未観測と失敗を成功�
 });
 
 test('DB instruction templates reach both providers and invalid variables reject before dispatch',async()=>{
- const {Store}=await import('./store/index');const {Database}=await import('bun:sqlite');const {createHandler}=await import('./server');
+ const {Store}=await import('./store/index');const {createHandler}=await import('./server');
  const root=await mkdtemp(join(tmpdir(),'beni-instructions-')),path=join(root,'app.sqlite');
- const store=new Store(path),db=new Database(path),p=store.createProject('Example',root);
+ const store=new Store(path),p=store.createProject('Example',root);
  const codexLog=join(root,'codex.jsonl'),claudeLog=join(root,'claude.jsonl');
  process.env.FAKE_CODEX_LOG=codexLog;process.env.FAKE_CLAUDE_LOG=claudeLog;
  try {
-  db.query('UPDATE instructions SET content=? WHERE key=?').run('Saved common {{project_directory}}','common');
+  store.updateInstruction('common','Saved common {{project_directory}}',store.instructions().find(item=>item.key==='common')!.content);
   const chat=new ChatService(()=>root,()=>fake,()=>join(import.meta.dir,'test/fake-claude.ts'));
   const handler=createHandler(store,root,chat);
   const response=await handler(new Request('http://127.0.0.1:3210/api/instructions'));
@@ -578,16 +578,16 @@ test('DB instruction templates reach both providers and invalid variables reject
   await waitFor(async()=>(await chat.get(p.id,null)).messages[3].status==='completed');
   expect(JSON.parse((await readFile(claudeLog,'utf8')).trim()).args).toContain('Saved common '+root);
   const task=store.createTask(p.id,'Task');
-  db.query('UPDATE instructions SET content=? WHERE key=?').run('Saved phase {{task_id}} at {{task_directory}}','requirements');
+  store.updateInstruction('requirements','Saved phase {{task_id}} at {{task_directory}}',store.instructions().find(item=>item.key==='requirements')!.content);
   const taskDirectory=store.taskDocumentFolder(p.id,task.id);
   await chat.send(p.id,task.id,'hello','model-a',root,taskDirectory,'requirements');
   await waitFor(async()=>(await chat.get(p.id,task.id,'requirements')).messages[1].status==='completed');
   const taskEvents=(await readFile(codexLog,'utf8')).trim().split('\n').map(line=>JSON.parse(line));
-  expect(taskEvents.filter(event=>event.method==='thread/start').at(-1).params.developerInstructions).toBe('Saved common '+root+'\n\nSaved phase '+task.id+' at '+taskDirectory);
-  db.query('UPDATE instructions SET content=? WHERE key=?').run('{{unknown}}','common');
+  expect(taskEvents.filter(event=>event.method==='thread/start').at(-1).params.developerInstructions).toContain('Saved common '+root+'\n\nSaved phase '+task.id+' at Beni のタスク文書');
+  chat.setInstructions(()=>store.instructions().map(item=>item.key==='common'?{...item,content:'{{unknown}}'}:item));
   await expect(chat.send(p.id,null,'hello','model-a',root)).rejects.toThrow('未知のインストラクション変数: unknown');
   expect((await chat.get(p.id,null)).messages).toHaveLength(4);
- } finally {delete process.env.FAKE_CODEX_LOG;delete process.env.FAKE_CLAUDE_LOG;db.close();store.close();await rm(root,{recursive:true,force:true})}
+ } finally {delete process.env.FAKE_CODEX_LOG;delete process.env.FAKE_CLAUDE_LOG;store.close();await rm(root,{recursive:true,force:true})}
 });
 
 test('instruction editor uses isolated readonly scope, validates updates and persists history',async()=>{

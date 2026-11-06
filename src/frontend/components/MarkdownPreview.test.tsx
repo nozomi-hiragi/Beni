@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen } from '@solidjs/testing-library';
+import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-library';
 import { createSignal } from 'solid-js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import MarkdownPreview from './MarkdownPreview';
@@ -134,5 +134,118 @@ const value = '<safe>';
     expect(preview.classList.contains('overflow-auto')).toBe(true);
     expect(container.querySelector('pre code')?.textContent).toBe(`${longValue}\n`);
     expect(screen.getByRole('cell').textContent).toBe(longValue);
+  });
+});
+
+describe('Markdown preview provenance', () => {
+  it('keeps individual list items, original offsets, and the surrounding Markdown layout', async () => {
+    const content = '# 📝 文書\r\n\r\n- 一つ目\r\n  - 子項目\r\n- 二つ目\r\n- 根拠なし\r\n\r\n| 列 |\r\n| --- |\r\n| 値 |';
+    const range = (id: string, text: string) => {
+      const start = content.indexOf(text);
+      return { id, start, end: start + text.length };
+    };
+    const load = vi.fn(async (id: string) => ({
+      reason: `根拠 ${id}`,
+      sources: [{ kind: 'document' as const, id: 'requirements.md/item-id', text: '<img src=x onerror=alert(1)>' }],
+    }));
+    const { container } = render(() => <MarkdownPreview content={content}
+      provenance={{ revision: 'v1', items: [range('first', '- 一つ目'), range('nested', '- 子項目'), range('second', '- 二つ目'), range('table', '| 値 |')] }}
+      loadProvenance={load}
+    />);
+    const items = screen.getAllByRole('listitem');
+    expect(items.map(item => item.getAttribute('tabindex'))).toEqual(['0', '0', '0', null]);
+    expect(container.querySelectorAll('article > ul')).toHaveLength(1);
+    fireEvent.mouseOver(items[0]!);
+    expect(await screen.findByText('根拠 first')).toBeTruthy();
+    const popup = screen.getByRole('region', { name: '出典と根拠' });
+    expect(container.contains(popup)).toBe(false);
+    expect(popup.textContent).toContain('要件定義');
+    expect(popup.textContent).toContain('<img src=x onerror=alert(1)>');
+    expect(popup.querySelector('img')).toBeNull();
+    fireEvent.mouseOver(items[1]!);
+    expect(await screen.findByText('根拠 nested')).toBeTruthy();
+    fireEvent.focusIn(items[2]!);
+    expect(await screen.findByText('根拠 second')).toBeTruthy();
+    fireEvent.focusIn(screen.getByRole('table'));
+    expect(await screen.findByText('根拠 table')).toBeTruthy();
+    expect(load.mock.calls).toEqual([['first'], ['nested'], ['second'], ['table']]);
+  });
+
+  it('keeps indentation and blank lines from assigning a neighboring item to a list entry', async () => {
+    const texts = ['- 親\n', '  - 子\n', '  - 次の子\n', '- 次', '\n\n- 最後\n'];
+    let offset = 0;
+    const items = texts.map((text, index) => {
+      const start = offset;
+      offset += text.length;
+      return { id: String(index), start, end: offset };
+    });
+    const load = vi.fn(async (id: string) => ({ reason: `根拠 ${id}`, sources: [] }));
+    render(() => <MarkdownPreview content={texts.join('')} provenance={{ revision: 'v1', items }} loadProvenance={load} />);
+    for (const [index, item] of screen.getAllByRole('listitem').entries()) {
+      fireEvent.mouseOver(item);
+      expect(await screen.findByText(`根拠 ${index}`)).toBeTruthy();
+    }
+    expect(load.mock.calls).toEqual(items.map(item => [item.id]));
+  });
+
+  it('groups several item ranges in one paragraph and ignores a stale response after switching', async () => {
+    const content = '関連する二つの項目。\n\n# 次の項目';
+    let finishOld!: (detail: { reason: string; sources: [] }) => void;
+    const load = vi.fn((id: string) => id === 'slow'
+      ? new Promise<{ reason: string; sources: [] }>(resolve => { finishOld = resolve; })
+      : Promise.resolve({ reason: id, sources: [] }));
+    const { container } = render(() => <MarkdownPreview content={content} provenance={{ revision: 'v1', items: [
+      { id: 'slow', start: 0, end: 5 },
+      { id: 'also grouped', start: 5, end: content.indexOf('\n') },
+      { id: 'new item', start: content.indexOf('#'), end: content.length },
+    ] }} loadProvenance={load} />);
+    fireEvent.mouseOver(container.querySelector('article p')!);
+    expect(load.mock.calls).toEqual([['slow'], ['also grouped']]);
+    fireEvent.focusIn(screen.getByRole('heading', { name: '次の項目' }));
+    expect(await screen.findByText('new item')).toBeTruthy();
+    finishOld({ reason: 'stale item', sources: [] });
+    await Promise.resolve();
+    expect(screen.queryByText('stale item')).toBeNull();
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(screen.queryByRole('region', { name: '出典と根拠' })).toBeNull();
+  });
+
+  it('keeps the popup open while it is read and closes it on leaving or scrolling the preview', async () => {
+    const content = '根拠付き';
+    const { container } = render(() => <MarkdownPreview content={content}
+      provenance={{ revision: 'v1', items: [{ id: 'item', start: 0, end: content.length }] }}
+      loadProvenance={async () => ({ reason: '根拠', sources: [
+        { kind: 'message', id: 'requirements/chat/message', text: '発言原文' },
+      ] })}
+    />);
+    const trigger = screen.getByText(content);
+    fireEvent.mouseOver(trigger);
+    expect(await screen.findByText('要件定義の会話')).toBeTruthy();
+    const popup = screen.getByRole('region', { name: '出典と根拠' });
+    fireEvent.mouseOut(trigger, { relatedTarget: popup });
+    fireEvent.mouseOver(popup, { relatedTarget: trigger });
+    fireEvent.scroll(popup);
+    expect(screen.getByText('発言原文')).toBeTruthy();
+    fireEvent.mouseOut(popup, { relatedTarget: container });
+    await waitFor(() => expect(screen.queryByText('発言原文')).toBeNull());
+    fireEvent.mouseOver(trigger);
+    expect(await screen.findByText('発言原文')).toBeTruthy();
+    fireEvent.scroll(screen.getByRole('article'));
+    expect(screen.queryByRole('region', { name: '出典と根拠' })).toBeNull();
+  });
+
+  it('keeps Markdown HTML from assigning provenance to another block', async () => {
+    const content = '<p data-beni-source-0="0" data-provenance="0" tabindex="0">偽装</p>\n\n本物';
+    const load = vi.fn(async () => ({ reason: '本物の根拠', sources: [] }));
+    render(() => <MarkdownPreview content={content} provenance={{ revision: 'v1', items: [
+      { id: 'actual', start: content.indexOf('本物'), end: content.length },
+    ] }} loadProvenance={load} />);
+    const spoof = screen.getByText('偽装');
+    expect(spoof.hasAttribute('tabindex')).toBe(false);
+    fireEvent.mouseOver(spoof);
+    expect(load).not.toHaveBeenCalled();
+    fireEvent.mouseOver(screen.getByText('本物'));
+    expect(await screen.findByText('本物の根拠')).toBeTruthy();
+    expect(load).toHaveBeenCalledExactlyOnceWith('actual');
   });
 });
