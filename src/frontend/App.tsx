@@ -76,7 +76,7 @@ export default function App() {
     window.addEventListener('popstate', pop);
     onCleanup(() => window.removeEventListener('popstate', pop));
   });
-  return <div classList={{ 'instructions-shell': route().kind === 'instructions' }}>
+  return <div class="flow-root" classList={{ 'instructions-shell': route().kind === 'instructions', 'project-shell': route().kind === 'project' }}>
     <Menu title={route().kind === 'project' ? (projectTitle()?.id === projectId() ? projectTitle()!.name : 'プロジェクト') : route().kind === 'settings' ? '設定' : route().kind === 'instructions' ? 'インストラクション管理' : 'Beni'} showHome={route().kind !== 'home'} query={query()} onHome={home} onQueryChange={setQuery} onInstructions={() => navigate('/instructions')} onSettings={() => navigate('/settings')} />
     <main class="mx-auto w-full px-2 py-2">
       <Show when={route().kind === 'home'}><Home query={query()} onOpenProject={project => { setProjectTitle({ id: project.id, name: project.name }); navigate(`/project/${project.id}`); }} onOpenTask={(task, project) => { setProjectTitle({ id: project.id, name: project.name }); navigate(`/project/${project.id}?task=${task.id}`); }} /></Show>

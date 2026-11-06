@@ -6,6 +6,7 @@ import { isTaskPhase, type TaskPhase } from '../shared/task-phase';
 import { communication } from './communication';
 import ChatPanel from './components/ChatPanel';
 import MarkdownPreview from './components/MarkdownPreview';
+import PromptTableMarkdownPreview from './components/PromptTableMarkdownPreview';
 import PhaseIndicator, { phaseDocuments } from './components/PhaseIndicator';
 import TabBar from './components/TabBar';
 import TreeView from './components/TreeView';
@@ -114,13 +115,16 @@ export default function Workspace(props: WorkspaceProps) {
   const documentName = (name: string) => phaseDocuments.find(item => item.name === name)?.label ?? name;
   const documentLabel = (document: Document) => documents().filter(item => item.name === document.name).length > 1 ? `${documentName(document.name)} · v${document.version}` : documentName(document.name);
   const currentDocument = createMemo(() => documents().find(document => documentId(document) === activeDocument()));
-  const loadCurrentDocumentProvenance = createMemo(() => {
+  const currentDocumentSource = createMemo(() => {
     const document = currentDocument();
     const task = detail()?.task;
     if (!document?.provenance || !task) return undefined;
     const { revision } = document.provenance;
     const scope = { projectId: task.projectId, taskId: task.id };
-    return (itemId: string) => loadDocumentProvenance(document.name, revision, itemId, scope);
+    return {
+      provenance: document.provenance,
+      loadProvenance: (itemId: string) => loadDocumentProvenance(document.name, revision, itemId, scope),
+    };
   });
 
   // URL changes select tabs without remounting this workspace or creating history.
@@ -306,11 +310,11 @@ export default function Workspace(props: WorkspaceProps) {
   }
 
   const toggle = (label: string, expanded: boolean, controls: string, onClick: () => void, setRef: (element: HTMLButtonElement) => void) =>
-    <button ref={setRef} type="button" class="btn btn-ghost btn-square btn-sm m-1" aria-label={label} aria-expanded={expanded} aria-controls={controls} onClick={onClick}>☰</button>;
+    <button ref={setRef} type="button" class="btn btn-ghost btn-square btn-sm m-1" aria-label={label} aria-expanded={expanded} aria-controls={controls} onClick={onClick}><span aria-hidden="true">☰</span></button>;
 
-  return <section ref={workspace} class="workspace mx-auto grid h-auto min-h-[34rem] min-w-0 gap-4 px-2 py-2 lg:h-[calc(100vh-7rem)] lg:min-h-0" style={{ "--left-ratio": `${leftRatio()}fr`, "--right-ratio": `${100 - leftRatio()}fr` }}>
+  return <section ref={workspace} class="workspace mx-auto grid h-auto min-h-[34rem] min-w-0 gap-4 px-2 py-2" style={{ "--left-ratio": `${leftRatio()}fr`, "--right-ratio": `${100 - leftRatio()}fr` }}>
     <div ref={leftPanels} class="workspace-left grid min-h-0 min-w-0 gap-4" classList={{ "workspace-left-terminal": projectId() !== undefined }} style={{ "--chat-ratio": `${chatRatio()}fr`, "--terminal-ratio": `${100 - chatRatio()}fr` }}>
-      <section class="card flex min-h-[20rem] min-w-0 flex-col overflow-hidden border border-base-300 bg-base-100 shadow-sm lg:min-h-0" aria-label="タスクチャット">
+      <section class="card card-border border-base-300 bg-base-100 shadow-sm min-h-[20rem] min-w-0 overflow-hidden lg:min-h-0" aria-label="タスクチャット">
         <TabBar onDelete={deleteTask} onRename={renameTask} label="チャット" tabs={[{ id: 'general', label: 'General', closable: false }, ...openTasks().map(id => ({ id: String(id), label: taskName(id), renameable: true, deletable: true }))]} activeId={activeTask() === undefined ? 'general' : String(activeTask())} onSelect={id => id === 'general' ? (setActiveTask(undefined), props.onTaskChange?.(undefined)) : openTask(id)} onClose={id => { if (id !== 'general') closeTask(id); }} left={toggle('タスクツリーを開閉', taskTreeOpen(), 'task-tree', () => setTaskTreeOpen(value => !value), element => { taskTreeToggle = element; })} />
         <div class="relative flex min-h-0 flex-1 flex-col overflow-auto">
           <Show when={taskTreeOpen()}><TreeView id="task-tree" label="タスク" nodes={[{ id: 'general', label: 'General' }, ...taskOptions().map(task => ({ id: String(task.id), label: taskLabel(task) })), ...(props.taskId !== undefined && !deletedTasks.has(props.taskId) && !taskOptions().some(task => task.id === props.taskId) ? [{ id: String(props.taskId), label: taskName(props.taskId) }] : [])]} onSelect={id => { if (id === 'general') { setActiveTask(undefined); props.onTaskChange?.(undefined); } else openTask(id); setTaskTreeOpen(false); }} /></Show>
@@ -320,7 +324,7 @@ export default function Workspace(props: WorkspaceProps) {
             <Show when={loadError()}><div role="alert" class="alert alert-error text-sm">{loadError()}</div></Show>
             <Show when={loading() && !detail()}><p class="p-4 text-sm text-base-content/60">読み込み中...</p></Show>
             <Show when={detail() && detail()?.task.id === activeTask()}>
-              <PhaseIndicator phase={detail()!.task.phase} viewPhase={chatPhase()} onViewPhaseChange={setViewPhase} advancing={advancing()} canStart={!!detail()?.canStart && implementationAvailable()} canComplete={canComplete()} completed={detail()?.task.status === 'completed'} busy={chatBusy()} modelSelect={<select class="select select-bordered select-sm w-auto" style={{ 'field-sizing': 'content' }} aria-label="実装担当モデル" value={implementationModel() ? modelValue(implementationModel()!) : ''} disabled={advancing() || !availableModels().length} onChange={event => { const model = availableModels().find(item => modelValue(item) === event.currentTarget.value); if (model) chooseModel(implementationScope(), model); }}>
+              <PhaseIndicator phase={detail()!.task.phase} viewPhase={chatPhase()} onViewPhaseChange={setViewPhase} advancing={advancing()} canStart={!!detail()?.canStart && implementationAvailable()} canComplete={canComplete()} completed={detail()?.task.status === 'completed'} busy={chatBusy()} modelSelect={<select class="select select-bordered select-sm w-auto min-w-0" style={{ 'field-sizing': 'content' }} aria-label="実装担当モデル" value={implementationModel() ? modelValue(implementationModel()!) : ''} disabled={advancing() || !availableModels().length} onChange={event => { const model = availableModels().find(item => modelValue(item) === event.currentTarget.value); if (model) chooseModel(implementationScope(), model); }}>
                 <Show when={implementationModel() && !implementationAvailable()}><option value={modelValue(implementationModel()!)} disabled>⚠️ {modelLabel(implementationModel()!.name, implementationModel()!.provider)}</option></Show>
                 <Show when={!implementationModel()}><option value="">未確認</option></Show>
                 <For each={availableModels().filter(item => implementationAvailable() || modelValue(item) !== (implementationModel() ? modelValue(implementationModel()!) : ''))}>{item => <option value={modelValue(item)} selected={modelValue(item) === (implementationModel() ? modelValue(implementationModel()!) : '')} disabled={!providerReady(item.provider)}>{modelLabel(item.name, item.provider)}</option>}</For>
@@ -382,14 +386,23 @@ export default function Workspace(props: WorkspaceProps) {
       </Show>
     </div>
     <ResizeHandle orientation="vertical" label="チャットと文書プレビューの幅を調整" container={() => workspace} value={leftRatio()} onChange={setLeftRatio} />
-    <section class="card flex min-h-[20rem] min-w-0 flex-col lg:min-h-0 overflow-hidden border border-base-300 bg-base-100 shadow-sm" aria-label="文書プレビュー">
+    <section class="card card-border border-base-300 bg-base-100 shadow-sm min-h-[20rem] min-w-0 lg:min-h-0 overflow-hidden" aria-label="文書プレビュー">
       <TabBar label="文書" tabs={openDocuments().map(id => { const document = documents().find(item => documentId(item) === id); return { id, label: document ? documentLabel(document) : id }; })} activeId={activeDocument()} onSelect={openDocument} onClose={closeDocument} left={toggle('文書ツリーを開閉', documentTreeOpen(), 'document-tree', () => setDocumentTreeOpen(value => !value), element => { documentTreeToggle = element; })} />
       <div class="relative flex min-h-0 flex-1 flex-col">
         <Show when={documentTreeOpen()}><TreeView id="document-tree" label="文書" nodes={documents().map(document => ({ id: documentId(document), label: documentLabel(document) }))} onSelect={id => { openDocument(id); setDocumentTreeOpen(false); }} /></Show>
-        <Show when={currentDocument()}>{document => <MarkdownPreview content={document().content} provenance={document().provenance} loadProvenance={loadCurrentDocumentProvenance()} documents={documents().map(item => item.name)} onDocument={name => {
-          const target = documents().find(item => item.name === name);
-          if (target) openDocument(documentId(target));
-        }} />}</Show>
+        <Show when={currentDocument()}>{document => {
+          const preview = {
+            get content() { return document().content; },
+            get documents() { return documents().map(item => item.name); },
+            onDocument(name: string) {
+              const target = documents().find(item => item.name === name);
+              if (target) openDocument(documentId(target));
+            },
+          };
+          return <Show when={currentDocumentSource()} fallback={<MarkdownPreview {...preview} />}>
+            {source => <PromptTableMarkdownPreview {...preview} {...source()} />}
+          </Show>;
+        }}</Show>
       </div>
     </section>
   </section>;

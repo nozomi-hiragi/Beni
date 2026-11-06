@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-library';
+import { cleanup, fireEvent, render, screen } from '@solidjs/testing-library';
 import { createSignal } from 'solid-js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import MarkdownPreview from './MarkdownPreview';
+import PromptTableMarkdownPreview from './PromptTableMarkdownPreview';
 
 afterEach(cleanup);
 
@@ -148,7 +149,7 @@ describe('Markdown preview provenance', () => {
       reason: `根拠 ${id}`,
       sources: [{ kind: 'document' as const, id: 'requirements.md/item-id', text: '<img src=x onerror=alert(1)>' }],
     }));
-    const { container } = render(() => <MarkdownPreview content={content}
+    const { container } = render(() => <PromptTableMarkdownPreview content={content}
       provenance={{ revision: 'v1', items: [range('first', '- 一つ目'), range('nested', '- 子項目'), range('second', '- 二つ目'), range('table', '| 値 |')] }}
       loadProvenance={load}
     />);
@@ -180,7 +181,7 @@ describe('Markdown preview provenance', () => {
       return { id: String(index), start, end: offset };
     });
     const load = vi.fn(async (id: string) => ({ reason: `根拠 ${id}`, sources: [] }));
-    render(() => <MarkdownPreview content={texts.join('')} provenance={{ revision: 'v1', items }} loadProvenance={load} />);
+    render(() => <PromptTableMarkdownPreview content={texts.join('')} provenance={{ revision: 'v1', items }} loadProvenance={load} />);
     for (const [index, item] of screen.getAllByRole('listitem').entries()) {
       fireEvent.mouseOver(item);
       expect(await screen.findByText(`根拠 ${index}`)).toBeTruthy();
@@ -194,7 +195,7 @@ describe('Markdown preview provenance', () => {
     const load = vi.fn((id: string) => id === 'slow'
       ? new Promise<{ reason: string; sources: [] }>(resolve => { finishOld = resolve; })
       : Promise.resolve({ reason: id, sources: [] }));
-    const { container } = render(() => <MarkdownPreview content={content} provenance={{ revision: 'v1', items: [
+    const { container } = render(() => <PromptTableMarkdownPreview content={content} provenance={{ revision: 'v1', items: [
       { id: 'slow', start: 0, end: 5 },
       { id: 'also grouped', start: 5, end: content.indexOf('\n') },
       { id: 'new item', start: content.indexOf('#'), end: content.length },
@@ -210,24 +211,31 @@ describe('Markdown preview provenance', () => {
     expect(screen.queryByRole('region', { name: '出典と根拠' })).toBeNull();
   });
 
-  it('keeps the popup open while it is read and closes it on leaving or scrolling the preview', async () => {
+  it('follows the hovered block and closes on leaving it or scrolling the preview', async () => {
     const content = '根拠付き';
-    const { container } = render(() => <MarkdownPreview content={content}
+    const load = vi.fn(async () => ({ reason: '根拠', sources: [
+      { kind: 'message' as const, id: 'requirements/chat/message', text: '発言原文' },
+    ] }));
+    render(() => <PromptTableMarkdownPreview content={content}
       provenance={{ revision: 'v1', items: [{ id: 'item', start: 0, end: content.length }] }}
-      loadProvenance={async () => ({ reason: '根拠', sources: [
-        { kind: 'message', id: 'requirements/chat/message', text: '発言原文' },
-      ] })}
+      loadProvenance={load}
     />);
     const trigger = screen.getByText(content);
-    fireEvent.mouseOver(trigger);
+    fireEvent.mouseOver(trigger, { clientX: 60, clientY: 60 });
     expect(await screen.findByText('要件定義の会話')).toBeTruthy();
     const popup = screen.getByRole('region', { name: '出典と根拠' });
+    expect(popup.style.left).toBe('76px');
+    fireEvent.mouseMove(trigger, { clientX: 90, clientY: 90 });
+    expect(popup.style.left).toBe('106px');
+    fireEvent.mouseMove(trigger, { clientX: window.innerWidth - 1, clientY: window.innerHeight - 1 });
+    expect(parseFloat(popup.style.left) + 384).toBe(window.innerWidth - 17);
+    expect(popup.style.bottom).toBe('17px');
+    expect(load).toHaveBeenCalledExactlyOnceWith('item');
+    fireEvent.focusIn(trigger);
     fireEvent.mouseOut(trigger, { relatedTarget: popup });
+    expect(screen.queryByRole('region', { name: '出典と根拠' })).toBeNull();
     fireEvent.mouseOver(popup, { relatedTarget: trigger });
-    fireEvent.scroll(popup);
-    expect(screen.getByText('発言原文')).toBeTruthy();
-    fireEvent.mouseOut(popup, { relatedTarget: container });
-    await waitFor(() => expect(screen.queryByText('発言原文')).toBeNull());
+    expect(screen.queryByText('発言原文')).toBeNull();
     fireEvent.mouseOver(trigger);
     expect(await screen.findByText('発言原文')).toBeTruthy();
     fireEvent.scroll(screen.getByRole('article'));
@@ -237,7 +245,7 @@ describe('Markdown preview provenance', () => {
   it('keeps Markdown HTML from assigning provenance to another block', async () => {
     const content = '<p data-beni-source-0="0" data-provenance="0" tabindex="0">偽装</p>\n\n本物';
     const load = vi.fn(async () => ({ reason: '本物の根拠', sources: [] }));
-    render(() => <MarkdownPreview content={content} provenance={{ revision: 'v1', items: [
+    render(() => <PromptTableMarkdownPreview content={content} provenance={{ revision: 'v1', items: [
       { id: 'actual', start: content.indexOf('本物'), end: content.length },
     ] }} loadProvenance={load} />);
     const spoof = screen.getByText('偽装');

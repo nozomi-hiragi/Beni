@@ -8,7 +8,7 @@ import type { TerminalSession, TopicEvent } from '../../shared/communication';
 import TabBar from './TabBar';
 
 type Control = { owner: boolean; connected: boolean; token: string | null };
-const disconnected = (): Control => ({owner:false,connected:false,token:null});
+const disconnected = (): Control => ({ owner: false, connected: false, token: null });
 const message = (error: unknown) => error instanceof Error ? error.message : 'ターミナルを操作できませんでした';
 const statusLabel = (status: TerminalSession['status']) => status === 'running' ? '実行中' : status === 'exited' ? '終了済み' : 'エラー';
 
@@ -43,7 +43,7 @@ export default function TerminalPanel(props: { projectId: string }) {
       } catch (reason) { if (active && revision === request) setError(message(reason)); }
     };
     void load();
-    const stop = communication.subscribe('terminal', {projectId,taskId:null}, {
+    const stop = communication.subscribe('terminal', { projectId, taskId: null }, {
       subscribed: () => { void load(); },
       event: event => { if (active && event.name === 'terminal.changed') { revision++; adopt(event.data.sessions); setError(''); } },
       error: value => { if (active) setError(value); },
@@ -66,7 +66,7 @@ export default function TerminalPanel(props: { projectId: string }) {
         const found = values.find(session => session.requestId === requestId);
         if (found) { setSelected(found.id); setPending(undefined); return; }
       }
-      const session = await api<TerminalSession>('/api/terminals', {projectId,requestId});
+      const session = await api<TerminalSession>('/api/terminals', { projectId, requestId });
       if (!alive || epoch !== operation) return;
       setSessions(previous => [...previous.filter(item => item.id !== session.id), session]);
       setSelected(session.id); setPending(undefined);
@@ -83,18 +83,18 @@ export default function TerminalPanel(props: { projectId: string }) {
     const projectId = props.projectId, operation = epoch;
     setClosing(id); setError('');
     try {
-      await api(`/api/terminals/${encodeURIComponent(id)}/close`, {projectId,controlToken:control.token});
+      await api(`/api/terminals/${encodeURIComponent(id)}/close`, { projectId, controlToken: control.token });
       if (alive && epoch === operation) adopt(sessions().filter(session => session.id !== id));
     } catch (reason) { if (alive && epoch === operation) setError(message(reason)); }
     finally { if (alive && epoch === operation) setClosing(undefined); }
   }
 
-  return <section class="card flex h-80 min-h-64 min-w-0 flex-col lg:h-full lg:min-h-0 overflow-hidden border border-base-300 bg-base-100 shadow-sm" aria-label="ターミナル">
-    <TabBar label="ターミナル" tabs={sessions().map((session, index) => ({id:session.id,label:`ターミナル ${index + 1} · ${statusLabel(session.status)}`}))} activeId={selected()} onSelect={setSelected} onClose={id => { void close(id); }} right={<button type="button" class="btn btn-ghost btn-sm m-1" aria-label={pending() ? '作成結果を確認' : 'ターミナルを追加'} disabled={creating()} onClick={() => { void add(); }}>{creating() ? '確認中…' : pending() ? '作成結果を確認' : '＋'}</button>} />
+  return <section class="card card-border border-base-300 bg-base-100 shadow-sm h-80 min-h-64 min-w-0 lg:h-full lg:min-h-0 overflow-hidden" aria-label="ターミナル">
+    <TabBar label="ターミナル" tabs={sessions().map((session, index) => ({ id: session.id, label: `ターミナル ${index + 1} · ${statusLabel(session.status)}` }))} activeId={selected()} onSelect={setSelected} onClose={id => { void close(id); }} right={<button type="button" class="btn btn-ghost btn-sm m-1" aria-label={pending() ? '作成結果を確認' : 'ターミナルを追加'} disabled={creating()} onClick={() => { void add(); }}>{creating() ? '確認中…' : pending() ? '作成結果を確認' : <span aria-hidden="true">＋</span>}</button>} />
     <Show when={error()}><p role="alert" class="px-3 py-1 text-xs text-error">{error()}</p></Show>
     <Show when={closing()}><p class="px-3 py-1 text-xs">終了しています…</p></Show>
-    <Show when={!sessions().length}><p class="p-4 text-sm text-base-content/60">＋ でプロジェクトのシェルを起動します。</p></Show>
-    <For each={sessions().map(session => session.id)}>{id => <TerminalView projectId={props.projectId} session={sessions().find(session => session.id === id)!} active={selected() === id} onControl={control => controls.set(id,control)} />}</For>
+    <Show when={!sessions().length}><p class="p-4 text-sm text-base-content/60">ターミナル</p></Show>
+    <For each={sessions().map(session => session.id)}>{id => <TerminalView projectId={props.projectId} session={sessions().find(session => session.id === id)!} active={selected() === id} onControl={control => controls.set(id, control)} />}</For>
   </section>;
 }
 
@@ -125,9 +125,9 @@ function TerminalView(props: { projectId: string; session: TerminalSession; acti
     rendering = true;
     operation(() => { rendering = false; pump(); });
   }
-  const scope = () => ({projectId:props.projectId,taskId:null,terminalId:props.session.id});
+  const scope = () => ({ projectId: props.projectId, taskId: null, terminalId: props.session.id });
   const enabled = () => connected() && synced() && owner() && status() === 'running' && !error();
-  const updateControl = () => props.onControl({owner:owner(),connected:connected(),token});
+  const updateControl = () => props.onControl({ owner: owner(), connected: connected(), token });
   function disable(reason: string) {
     syncVersion++; setConnected(false); setSynced(false); setOwner(false); token = null; setError(reason); updateControl();
   }
@@ -135,8 +135,8 @@ function TerminalView(props: { projectId: string; session: TerminalSession; acti
     if (!terminal || !fit || !props.active || !enabled()) return;
     const size = fit.proposeDimensions();
     if (!size) return;
-    const cols = Math.max(20,Math.min(240,size.cols)), rows = Math.max(5,Math.min(80,size.rows));
-    if (cols !== terminal.cols || rows !== terminal.rows) communication.terminal(scope(), {type:'terminal.resize',generation,cols,rows});
+    const cols = Math.max(20, Math.min(240, size.cols)), rows = Math.max(5, Math.min(80, size.rows));
+    if (cols !== terminal.cols || rows !== terminal.rows) communication.terminal(scope(), { type: 'terminal.resize', generation, cols, rows });
   }
   function write(data: string, done?: () => void) {
     if (!terminal) return;
@@ -153,7 +153,7 @@ function TerminalView(props: { projectId: string; session: TerminalSession; acti
       resize();
     } else if (event.name === 'terminal.sync.begin') {
       syncing = true; setSynced(false); sequence = event.data.sequence; syncVersion++;
-      display(next => { terminal!.reset(); terminal!.resize(event.data.cols,event.data.rows); next(); });
+      display(next => { terminal!.reset(); terminal!.resize(event.data.cols, event.data.rows); next(); });
     } else if (event.name === 'terminal.sync.chunk') {
       if (syncing) write(event.data.data);
     } else if (event.name === 'terminal.sync.end') {
@@ -166,25 +166,25 @@ function TerminalView(props: { projectId: string; session: TerminalSession; acti
       if (syncing || event.data.sequence !== sequence + 1) { disable('出力の順序を確認できませんでした。再接続してください。'); return; }
       sequence = event.data.sequence;
       if (event.name === 'terminal.output') write(event.data.data);
-      else { const {cols,rows} = event.data; display(next => { terminal!.resize(cols,rows); next(); }); }
+      else { const { cols, rows } = event.data; display(next => { terminal!.resize(cols, rows); next(); }); }
     }
   }
   function connect() {
     stop?.(); disable('');
-    stop = communication.subscribe('terminal',scope(), {
+    stop = communication.subscribe('terminal', scope(), {
       subscribed: () => { setConnected(true); setSynced(false); setError(''); updateControl(); },
       event,
       error: disable,
     });
   }
   onMount(() => {
-    terminal = new Terminal({cols:props.session.cols,rows:props.session.rows,scrollback:200,disableStdin:true,fontSize:12,theme:{background:'#15181e',foreground:'#e5e7eb'}});
+    terminal = new Terminal({ cols: props.session.cols, rows: props.session.rows, scrollback: 200, disableStdin: true, fontSize: 12, theme: { background: '#15181e', foreground: '#e5e7eb' } });
     fit = new FitAddon(); terminal.loadAddon(fit); terminal.open(host);
     const input = terminal.onData(data => {
       if (!enabled()) return;
       setInputError('');
       if (new TextEncoder().encode(data).byteLength > 4096) { setInputError('入力は一度に 4096 バイト以内にしてください。この入力は送信していません。'); return; }
-      if (!communication.terminal(scope(),{type:'terminal.input',generation,data})) disable('入力を送信できませんでした。再接続してください。');
+      if (!communication.terminal(scope(), { type: 'terminal.input', generation, data })) disable('入力を送信できませんでした。再接続してください。');
     });
     const observer = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(resize); observer?.observe(host);
     connect();
@@ -192,10 +192,10 @@ function TerminalView(props: { projectId: string; session: TerminalSession; acti
   });
   createEffect(() => { if (terminal) terminal.options.disableStdin = !enabled(); });
   createEffect(() => { if (props.active) queueMicrotask(resize); });
-  return <div class="flex min-h-0 flex-1 flex-col bg-[#15181e] text-gray-200" classList={{hidden:!props.active}} aria-hidden={!props.active}>
+  return <div class="flex min-h-0 flex-1 flex-col bg-[#15181e] text-gray-200" classList={{ hidden: !props.active }} aria-hidden={!props.active}>
     <div class="flex shrink-0 items-center gap-2 px-3 py-1 text-xs" role="status">
       <span>{connected() ? synced() ? '接続中' : '同期中…' : '再接続中…'} · {statusLabel(status())}{status() === 'exited' && exitCode() !== null ? ` (${exitCode()})` : ''} · {owner() ? '操作権あり' : '閲覧専用'}</span>
-      <Show when={connected() && !owner()}><button type="button" class="btn btn-xs" onClick={() => communication.terminal(scope(),{type:'terminal.takeover',generation})}>乗っ取る</button></Show>
+      <Show when={connected() && !owner()}><button type="button" class="btn btn-xs" onClick={() => communication.terminal(scope(), { type: 'terminal.takeover', generation })}>乗っ取る</button></Show>
       <Show when={inputError()}><span class="text-red-300">{inputError()}</span></Show>
       <Show when={error()}><span class="text-red-300">{error()}</span><button type="button" class="btn btn-xs" onClick={connect}>再接続</button></Show>
     </div>

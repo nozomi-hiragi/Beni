@@ -18,31 +18,34 @@ export default function PhaseIndicator(props: { phase: string; viewPhase?: strin
   const retrospective = () => props.phase === 'retrospective';
   const execution = () => props.phase === 'execution';
   const canViewHistory = (phase: HistoryPhase) => props.onViewPhaseChange && (finalizing() || (retrospective() && phase !== 'finalization'));
-  return <div class="flex flex-wrap items-center gap-1 border-b border-base-300 px-3 py-2" aria-label="タスクのフェーズ">
-    <For each={preparationPhases}>{phase => <>
-      <button type="button" class="btn btn-ghost btn-sm" classList={{"btn-active": selectedPhase() === phase}} aria-current={selectedPhase() === phase ? 'step' : undefined} disabled={props.advancing || props.busy || execution() || retrospective() || finalizing()} onClick={() => props.onChange(phase)}>{phaseLabels[phase]}</button>
-      <span aria-hidden="true">›</span>
-    </>}</For>
-    <For each={historyPhases}>{(phase, index) => <>
-      <Show when={index() > 0}><span aria-hidden="true">›</span></Show>
-      <Show when={canViewHistory(phase)} fallback={<span class="inline-flex h-8 items-center rounded px-3 text-sm text-base-content" classList={{"bg-base-300 font-semibold": selectedPhase() === phase}} aria-current={selectedPhase() === phase ? 'step' : undefined}>{phaseLabels[phase]}</span>}>
-        <button type="button" class="btn btn-ghost btn-sm" classList={{"btn-active": selectedPhase() === phase}} aria-current={selectedPhase() === phase ? 'step' : undefined} disabled={props.advancing || (!finalizing() && props.busy)} onClick={() => props.onViewPhaseChange?.(phase)}>{phaseLabels[phase]}</button>
-      </Show>
-    </>}</For>
-    <span class="flex-1" />
-    <Switch>
-      <Match when={finalizing() || retrospective()}>
-        <Show when={props.completed || retrospective()}>
-          <button type="button" class="btn btn-primary btn-sm" disabled={props.advancing || (retrospective() && (props.busy || (!props.completed && props.canComplete === false)))} onClick={() => props.onChange(props.completed ? 'reopen' : 'complete')}>{props.completed ? '再開' : 'タスク完了'}</button>
-        </Show>
-      </Match>
-      <Match when={execution()}>
-        <button type="button" class="btn btn-primary btn-sm" disabled={props.advancing} onClick={() => props.onChange('stop')}>停止</button>
-      </Match>
-      <Match when={true}>
-        {props.modelSelect}
-        <button type="button" class="btn btn-primary btn-sm" disabled={props.advancing || props.busy || !props.canStart} onClick={() => props.onChange('start')}>開始</button>
-      </Match>
-    </Switch>
+  return <div class="flex items-center gap-1 border-b border-base-300 px-3 py-2">
+    <div class="breadcrumbs min-w-0 flex-1 overflow-x-auto py-1">
+      <ol aria-label="タスクのフェーズ">
+        <For each={preparationPhases}>{phase => <li>
+          <button type="button" class="btn btn-ghost btn-sm" classList={{"btn-active": selectedPhase() === phase}} aria-current={selectedPhase() === phase ? 'step' : undefined} disabled={props.advancing || props.busy || execution() || retrospective() || finalizing()} onClick={() => props.onChange(phase)}>{phaseLabels[phase]}</button>
+        </li>}</For>
+        <For each={historyPhases}>{phase => <li>
+          <Show when={canViewHistory(phase)} fallback={<span class="inline-flex h-8 cursor-default items-center rounded px-3 text-sm text-base-content hover:no-underline" classList={{"bg-base-300 font-semibold": selectedPhase() === phase}} aria-current={selectedPhase() === phase ? 'step' : undefined}>{phaseLabels[phase]}</span>}>
+            <button type="button" class="btn btn-ghost btn-sm" classList={{"btn-active": selectedPhase() === phase}} aria-current={selectedPhase() === phase ? 'step' : undefined} disabled={props.advancing || (!finalizing() && props.busy)} onClick={() => props.onViewPhaseChange?.(phase)}>{phaseLabels[phase]}</button>
+          </Show>
+        </li>}</For>
+      </ol>
+    </div>
+    <div class="flex max-w-3/4 shrink-0 items-center gap-1">
+      <Switch>
+        <Match when={finalizing() || retrospective()}>
+          <Show when={props.completed || retrospective()}>
+            <button type="button" class="btn btn-primary btn-sm shrink-0" disabled={props.advancing || (retrospective() && (props.busy || (!props.completed && props.canComplete === false)))} onClick={() => props.onChange(props.completed ? 'reopen' : 'complete')}>{props.completed ? '再開' : 'タスク完了'}</button>
+          </Show>
+        </Match>
+        <Match when={execution()}>
+          <button type="button" class="btn btn-primary btn-sm shrink-0" disabled={props.advancing} onClick={() => props.onChange('stop')}>停止</button>
+        </Match>
+        <Match when={true}>
+          {props.modelSelect}
+          <button type="button" class="btn btn-primary btn-sm shrink-0" disabled={props.advancing || props.busy || !props.canStart} onClick={() => props.onChange('start')}>開始</button>
+        </Match>
+      </Switch>
+    </div>
   </div>;
 }

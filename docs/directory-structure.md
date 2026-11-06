@@ -54,7 +54,7 @@ Beni/
 │           ├── ResizeHandle.tsx      作業領域の左右・上下比率を調整するハンドル
 │           ├── TerminalPanel.tsx     ターミナルタブ・描画・操作権・再接続
 │           ├── MarkdownPreview.tsx   Markdown の変換・サニタイズ・装飾表示
-│           ├── InstructionsSettings.tsx  指示テンプレートの閲覧
+│           ├── PromptTableMarkdownPreview.tsx  出典と根拠を表示する Markdown プレビュー
 │           ├── Menu.tsx              ホーム・設定への移動と検索のメニュー
 │           ├── TaskCreate.tsx        プロジェクトを選び、タスクを作成するフォーム
 │           ├── TaskList.tsx          タスク一覧と並べ替え操作

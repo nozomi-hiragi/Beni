@@ -32,7 +32,7 @@ function Connection(props: {provider: Provider}) {
       default: return '未確認';
     }
   };
-  return <div class="mt-6 rounded-2xl border border-base-300 bg-base-100 p-6 shadow-sm">
+  return <div class="card card-border border-base-300 bg-base-100 shadow-sm mt-6 p-6">
     <div class="flex items-center justify-between gap-4"><h2 class="text-[.95rem] font-bold">{name()} 接続</h2><button type="button" class="btn btn-sm" aria-label={`${name()} の接続状態を更新`} disabled={loading()} onClick={refresh}>{loading() ? '確認中...' : '更新'}</button></div>
     <Show when={error()}><p role="alert" class="mt-3 text-sm text-error">{error()}</p></Show>
     <dl class="mt-4 space-y-2 text-sm"><div><dt class="inline font-medium">実行ファイル: </dt><dd class="inline">{status() ? status()!.installed ? '検出済み' : `${name()} CLI をインストールしてください` : '未確認'}</dd></div><div><dt class="inline font-medium">パス: </dt><dd class="inline break-all">{status()?.path ?? '未確認'}</dd></div><div><dt class="inline font-medium">バージョン: </dt><dd class="inline">{status()?.version ?? '未確認'}</dd></div><div><dt class="inline font-medium">確認日時: </dt><dd class="inline">{status()?.checkedAt ? new Date(status()!.checkedAt).toLocaleString() : '未確認'}</dd></div><div><dt class="inline font-medium">認証: </dt><dd class="inline">{authLabel()}</dd></div><div><dt class="inline font-medium">モデル: </dt><dd class="inline"><Show when={status()?.models} fallback="未確認"><For each={status()!.models!}>{(model, index) => <>{index() > 0 ? '、' : ''}{model.name}</>}</For><Show when={status()!.models!.length === 0}>取得できるモデルはありません</Show></Show></dd></div><div><dt class="inline font-medium">利用枠: </dt><dd class="inline">未確認</dd></div></dl>
