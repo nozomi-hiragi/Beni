@@ -11,14 +11,28 @@ function sourceLabel(source: DocumentProvenanceDetail['sources'][number]) {
   switch (source.kind) {
     case 'template': return '初期設定';
     case 'legacy': return '取り込んだ既存文書';
-    case 'document': return phaseDocuments.find(item => item.name === name)?.label ?? name;
-    case 'instruction': return Object.hasOwn(instructionNames, name) ? instructionNames[name] : 'インストラクション';
+    case 'document': {
+      if (name === 'knowledge.md') return 'プロジェクトナレッジ';
+      const document = phaseDocuments.find(item => item.name === name);
+      return document ? `${document.label}ドキュメント` : /^[a-z][a-z0-9-]*\.md$/.test(name) ? name : 'ドキュメント';
+    }
+    case 'instruction': return Object.hasOwn(instructionNames, name) ? instructionNames[name] : '種類不明のプロンプト';
     case 'message':
     case 'result': {
-      const label = source.kind === 'message' ? '会話' : '実行結果';
+      const label = source.kind === 'message' ? 'チャット' : '実行結果';
       return Object.hasOwn(phaseLabels, name) ? `${phaseLabels[name as keyof typeof phaseLabels]}の${label}` : label;
     }
   }
+}
+
+function sourceContext(source: DocumentProvenanceDetail['sources'][number]) {
+  if (source.kind === 'instruction') return 'インストラクション';
+  const project = source.projectName ? `プロジェクト「${source.projectName}」` : undefined;
+  const task = source.taskName ? `タスク「${source.taskName}」` : undefined;
+  if (project && task) return `${project} / ${task}`;
+  if (project || task) return project ?? task;
+  if (source.kind === 'document' && source.id.split('/')[0] === 'knowledge.md') return undefined;
+  return '所属不明';
 }
 
 export default function PromptTableMarkdownPreview(props: MarkdownPreviewProps & {
@@ -35,6 +49,7 @@ export default function PromptTableMarkdownPreview(props: MarkdownPreviewProps &
 
   function close() {
     mousePosition = undefined;
+    popup = undefined;
     request++;
     setAnchor(undefined);
     setDetails(undefined);
@@ -43,30 +58,41 @@ export default function PromptTableMarkdownPreview(props: MarkdownPreviewProps &
   function reposition() {
     const current = anchor();
     if (!current) return;
-    const width = Math.min(384, window.innerWidth - 16);
-    const height = Math.min(320, window.innerHeight / 2);
+    const margin = 12;
+    const width = Math.max(0, Math.min(640, window.innerWidth - 2 * margin));
+    const maxHeight = Math.max(0, Math.min(720, window.innerHeight - 2 * margin));
+    const contentHeight = popup ? popup.scrollHeight + popup.offsetHeight - popup.clientHeight : maxHeight;
+    const height = Math.min(maxHeight, contentHeight || maxHeight);
+    const rightLimit = window.innerWidth - margin;
+    const bottomLimit = window.innerHeight - margin;
     if (mousePosition) {
       const { x, y } = mousePosition;
       const gap = 16;
-      const rightLimit = window.innerWidth - 8;
-      const preferredLeft = x + gap + width <= rightLimit ? x + gap : x - gap - width;
-      const left = Math.max(8, Math.min(preferredLeft, rightLimit - width));
-      const below = window.innerHeight - y - gap - 8;
-      const above = y - gap - 8;
+      const fitsRight = x + gap + width <= rightLimit;
+      const fitsLeft = x - gap - width >= margin;
+      const preferredLeft = fitsRight ? x + gap : x - gap - width;
+      const left = Math.max(margin, Math.min(preferredLeft, rightLimit - width));
+      if (fitsRight || fitsLeft) {
+        const top = Math.max(margin, Math.min(y + gap, bottomLimit - height));
+        setPosition({ left, top });
+        return;
+      }
+      const below = bottomLimit - y - gap;
+      const above = y - gap - margin;
       if (below >= height || below >= above) {
-        setPosition({ left, top: y + gap, maxHeight: below });
+        setPosition({ left, top: y + gap, maxHeight: Math.max(0, Math.min(maxHeight, below)) });
       } else {
-        setPosition({ left, bottom: window.innerHeight - y + gap, maxHeight: above });
+        setPosition({ left, bottom: window.innerHeight - y + gap, maxHeight: Math.max(0, Math.min(maxHeight, above)) });
       }
       return;
     }
     const rect = current.getBoundingClientRect();
-    const right = rect.right + width <= window.innerWidth - 8;
-    const left = right ? Math.max(8, rect.right) : Math.max(8, Math.min(rect.left, window.innerWidth - width - 8));
-    if (!right && rect.bottom + height > window.innerHeight - 8 && rect.top >= height + 8) {
+    const right = rect.right + width <= rightLimit;
+    const left = Math.max(margin, right ? rect.right : Math.min(rect.left, rightLimit - width));
+    if (!right && rect.bottom + height > bottomLimit && rect.top >= height + margin) {
       setPosition({ left, bottom: window.innerHeight - rect.top });
     } else {
-      const top = Math.max(8, Math.min(right ? rect.top : rect.bottom, window.innerHeight - height - 8));
+      const top = Math.max(margin, Math.min(right ? rect.top : rect.bottom, bottomLimit - height));
       setPosition({ left, top });
     }
   }
@@ -124,6 +150,12 @@ export default function PromptTableMarkdownPreview(props: MarkdownPreviewProps &
     rendered();
     close();
   });
+  createEffect(() => {
+    if (anchor()) {
+      details();
+      queueMicrotask(reposition);
+    }
+  });
   onMount(() => {
     window.addEventListener('keydown', onKeyDown);
     window.addEventListener('resize', reposition);
@@ -164,29 +196,38 @@ export default function PromptTableMarkdownPreview(props: MarkdownPreviewProps &
     <Show when={anchor()}>
       <Portal>
         <section ref={element => { popup = element; }} aria-label="出典と根拠" tabindex="-1"
-          class="fixed z-50 max-h-[min(20rem,50vh)] w-[min(24rem,calc(100vw-1rem))] overflow-auto rounded-box border border-base-300 bg-base-100 p-3 text-sm shadow-lg"
+          class="card card-border card-sm fixed! z-50 max-h-[min(720px,calc(100dvh-24px))] w-[min(640px,calc(100vw-24px))] overflow-auto border-base-300 bg-base-100 shadow-lg"
           style={{
             left: `${position().left}px`,
             top: position().top === undefined ? undefined : `${position().top}px`,
             bottom: position().bottom === undefined ? undefined : `${position().bottom}px`,
-            'max-height': position().maxHeight === undefined ? undefined : `min(20rem, 50vh, ${position().maxHeight}px)`,
+            'max-height': position().maxHeight === undefined ? undefined : `${position().maxHeight}px`,
           }}
           onFocusOut={onFocusOut}
         >
-          <h2 class="font-semibold">出典と根拠</h2>
-          <Show when={details()} fallback={<p role="status">読み込み中…</p>}>
-            {results => <For each={results()}>{detail => <div class="mt-2 space-y-2 break-words">
-              <Show when={detail} fallback={<p role="status">出典と根拠を取得できませんでした。</p>}>
-                {value => <>
-                  <p class="whitespace-pre-wrap">{value().reason}</p>
-                  <For each={value().sources}>{source => <figure class="border-l-2 border-base-300 pl-2">
-                    <figcaption class="font-medium">{sourceLabel(source)}</figcaption>
-                    <blockquote class="whitespace-pre-wrap">{source.text}</blockquote>
-                  </figure>}</For>
-                </>}
-              </Show>
-            </div>}</For>}
-          </Show>
+          <div class="card-body shrink-0">
+            <h2 class="card-title">出典と根拠</h2>
+            <Show when={details()} fallback={<p role="status">読み込み中…</p>}>
+              {results => <For each={results()}>{detail => <div class="space-y-2 wrap-break-word">
+                <Show when={detail} fallback={<p role="status">出典と根拠を取得できませんでした。</p>}>
+                  {value => <>
+                    <p class="whitespace-pre-wrap">{value().reason}</p>
+                    <Show when={value().sources.length}>
+                      <ul class="list">
+                        <For each={value().sources}>{source => <li class="list-row">
+                          <div class="list-col-grow min-w-0">
+                            <div class="font-medium">{sourceLabel(source)}</div>
+                            <Show when={sourceContext(source)}>{context => <div class="text-xs text-base-content/70">{context()}</div>}</Show>
+                            <blockquote class="whitespace-pre-wrap">{source.text}</blockquote>
+                          </div>
+                        </li>}</For>
+                      </ul>
+                    </Show>
+                  </>}
+                </Show>
+              </div>}</For>}
+            </Show>
+          </div>
         </section>
       </Portal>
     </Show>

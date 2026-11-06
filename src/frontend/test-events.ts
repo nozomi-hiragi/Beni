@@ -43,9 +43,9 @@ export function testPack(content: string, overrides: Partial<Pack> = {}): Pack {
 export { packHeader };
 
 // Existing draft/navigation tests use message fixtures; expose their authoritative pack API.
-export function packResponse(path: string, messages: { id: string | number; role: string; content: string; status?: string }[]): Response | undefined {
+export function packResponse(path: string, messages: { id: string | number; role: string; content: string; status?: string; provider?: Pack['provider']; model?: Pack['model']; createdAt?: string }[]): Response | undefined {
   if (!path.startsWith('/api/chat/packs')) return undefined;
-  const packs = messages.map((message, index) => testPack(message.content, { packId: `pack-${message.id}`, messageId: String(message.id), sequence: index + 1, role: message.role === 'user' ? 'user' : 'assistant' }));
+  const packs = messages.map((message, index) => testPack(message.content, { packId: `pack-${message.id}`, messageId: String(message.id), sequence: index + 1, provider: message.provider, model: message.model === undefined ? 'test' : message.model, createdAt: message.createdAt ?? '2026-01-01T00:00:00Z', role: message.role === 'user' ? 'user' : 'assistant' }));
   const url = new URL(path, 'http://localhost');
   const id = url.pathname.split('/')[4];
   const value = id ? { pack: packs.find(pack => pack.packId === id) } : { packs: packs.slice(url.searchParams.has('afterPackId') ? packs.findIndex(pack => pack.packId === url.searchParams.get('afterPackId')) + 1 : 0).map(pack => ({ packId: pack.packId, state: pack.state })) };

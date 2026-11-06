@@ -104,7 +104,7 @@ export default function Instructions() {
     onCleanup(() => { active = false; sequence++; unsubscribe(); });
     void reload();
   });
-  return <section class="mx-auto min-w-0">
+  return <section class="mx-auto h-full min-h-0 min-w-0 overflow-auto lg:overflow-hidden">
     <div ref={layout} class="instructions-layout grid min-w-0 items-start gap-6" style={{ "--instructions-left-ratio": `${leftRatio()}fr`, "--instructions-right-ratio": `${100 - leftRatio()}fr` }}>
       <aside ref={leftPanels} class="instructions-left min-w-0 space-y-6" style={{ "--instructions-chat-ratio": `${chatRatio()}fr`, "--instructions-references-ratio": `${100 - chatRatio()}fr` }}>
         <section class="card card-border border-base-300 bg-base-100 shadow-sm instructions-chat min-h-0 min-w-0 overflow-hidden">

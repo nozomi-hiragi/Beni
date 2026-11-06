@@ -10,6 +10,7 @@ import { INSTRUCTIONS_CHAT_ID, validId, isProvider, type Provider } from '../sha
 import { validProjectId, validTaskId } from '../shared/ids';
 import { implementationPlanReady } from './documents';
 import { DocumentWorkflow } from './document-workflow';
+import { listProjectFiles, readProjectFile, validProjectFilePath } from './project-files';
 import type { DocumentVersion } from './document-table';
 import { isAbsolute, dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
@@ -142,6 +143,21 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
     const file = url.pathname === '/ui/build/app.js' ? '../../dist/frontend/app.js' : url.pathname === '/ui/style.css' ? '../../dist/frontend/beni.css' : url.pathname === '/ui/generated.css' ? '../../dist/frontend/generated.css' : '../frontend/index.html';
     return new Response(Bun.file(new URL(file,import.meta.url)),{headers:{'Content-Security-Policy':"default-src 'self'; img-src 'self' data:; style-src 'self'; style-src-elem 'self' 'unsafe-inline'; style-src-attr 'unsafe-inline'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'",'X-Content-Type-Options':'nosniff','Cache-Control':'no-store'}});
    }
+   if (url.pathname === '/api/project-files' || url.pathname === '/api/project-file') {
+    const { searchParams } = url;
+    const preview = url.pathname === '/api/project-file';
+    const project = scope(searchParams.get('projectId'), null);
+    if (!project) return json({error:'プロジェクトが見つかりません'},404);
+    const path = searchParams.get('path') ?? '';
+    if (!validProjectFilePath(path) || (preview && !path) || ['projectId','path'].some(key => searchParams.getAll(key).length > 1)) {
+     return json({error:'パスを確認してください'},400);
+    }
+    try {
+     return json(await (preview ? readProjectFile(project.folder, path) : listProjectFiles(project.folder, path)));
+    } catch {
+     return json({error:preview ? 'ファイルを読み込めませんでした' : 'フォルダーを開けませんでした'},404);
+    }
+   }
    if (url.pathname === '/api/terminals') {const p=url.searchParams.get('projectId');if(!scope(p,null))return json({error:'プロジェクトが見つかりません'},404);return json(terminals.list(p as string))}
    if (url.pathname === '/api/instructions') {
     const editorState = await chat.instructionEditorState();
@@ -163,22 +179,37 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
         || ['name','revision','itemId','projectId','taskId'].some(key => searchParams.getAll(key).length > 1)) return invalid();
 
     let version: DocumentVersion | undefined;
+    let taskName: string | undefined;
+    let projectName: string | undefined;
     if (projectId === null && taskId === null) {
      if (!isInstructionKey(name)) return invalid();
      version = store.instructionDocument(name,revision);
     } else {
      if (!validProjectId(projectId) || !validTaskId(taskId) || !managedDocumentName.test(name)) return invalid();
-     if (!scope(projectId,taskId)) return missing();
+     const project = scope(projectId,taskId);
+     if (!project) return missing();
+     projectName = project.name;
      if (name === 'knowledge.md') {
       const task = projectTask(store.task(taskId));
       const knowledge = taskKnowledge(task,store.instructionJob(projectId,taskId)?.revision);
       if (knowledge && knowledge.revision !== revision) return missing();
       version = knowledge;
-     }
+     } else taskName = store.task(taskId)?.name;
      version ??= store.managedDocument(projectId,taskId,name,revision);
     }
     const item = version?.items.find(item => item.id === itemId);
-    return item && (item.reason || item.sources.length) ? json({reason:item.reason,sources:item.sources}) : missing();
+    if (!item || (!item.reason && !item.sources.length)) return missing();
+    const sources = item.sources.map(source => {
+     if (!projectName || !projectId || source.kind === 'instruction') return source;
+     const [sourceName, sourceItem] = source.id.split('/');
+     if (sourceName === 'knowledge.md') {
+      if (source.kind !== 'document' || !source.revision || !sourceItem) return source;
+      const knowledge = store.managedDocument(projectId,null,sourceName,source.revision);
+      return knowledge?.items.some(item => item.id === sourceItem) ? {...source, projectName} : source;
+     }
+     return taskName ? {...source, projectName, taskName} : source;
+    });
+    return json({reason:item.reason,sources});
    }
    if (url.pathname === '/api/codex/status') return json(await chat.status());
    if (url.pathname === '/api/claude/status') return json(await chat.claudeStatus());

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen } from '@solidjs/testing-library';
+import { cleanup, fireEvent, render, screen, within } from '@solidjs/testing-library';
 import { createSignal } from 'solid-js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import MarkdownPreview from './MarkdownPreview';
@@ -147,7 +147,11 @@ describe('Markdown preview provenance', () => {
     };
     const load = vi.fn(async (id: string) => ({
       reason: `根拠 ${id}`,
-      sources: [{ kind: 'document' as const, id: 'requirements.md/item-id', text: '<img src=x onerror=alert(1)>' }],
+      sources: [
+        { kind: 'document' as const, id: 'requirements.md/item-id', text: '<img src=x onerror=alert(1)>', projectName: '架空プロジェクト', taskName: 'サンプル' },
+        { kind: 'instruction' as const, id: 'common/instruction-id', text: '全体に適用する指示' },
+        { kind: 'document' as const, id: 'knowledge.md/knowledge-id', text: '再利用する知識' },
+      ],
     }));
     const { container } = render(() => <PromptTableMarkdownPreview content={content}
       provenance={{ revision: 'v1', items: [range('first', '- 一つ目'), range('nested', '- 子項目'), range('second', '- 二つ目'), range('table', '| 値 |')] }}
@@ -160,8 +164,14 @@ describe('Markdown preview provenance', () => {
     expect(await screen.findByText('根拠 first')).toBeTruthy();
     const popup = screen.getByRole('region', { name: '出典と根拠' });
     expect(container.contains(popup)).toBe(false);
-    expect(popup.textContent).toContain('要件定義');
-    expect(popup.textContent).toContain('<img src=x onerror=alert(1)>');
+    const [source, instruction, knowledge] = within(within(popup).getByRole('list')).getAllByRole('listitem');
+    expect(source.textContent).toContain('要件定義ドキュメント');
+    expect(source.textContent).toContain('プロジェクト「架空プロジェクト」 / タスク「サンプル」');
+    expect(source.textContent).toContain('<img src=x onerror=alert(1)>');
+    expect(instruction.textContent).toContain('全共通');
+    expect(instruction.textContent).toContain('インストラクション');
+    expect(knowledge.textContent).toContain('プロジェクトナレッジ');
+    expect(popup.textContent).not.toMatch(/requirements\.md|common\/instruction-id|knowledge-id/);
     expect(popup.querySelector('img')).toBeNull();
     fireEvent.mouseOver(items[1]!);
     expect(await screen.findByText('根拠 nested')).toBeTruthy();
@@ -222,14 +232,17 @@ describe('Markdown preview provenance', () => {
     />);
     const trigger = screen.getByText(content);
     fireEvent.mouseOver(trigger, { clientX: 60, clientY: 60 });
-    expect(await screen.findByText('要件定義の会話')).toBeTruthy();
+    expect(await screen.findByText('要件定義のチャット')).toBeTruthy();
+    expect(screen.getByText('所属不明')).toBeTruthy();
+    expect(screen.queryByText('requirements/chat/message')).toBeNull();
     const popup = screen.getByRole('region', { name: '出典と根拠' });
     expect(popup.style.left).toBe('76px');
     fireEvent.mouseMove(trigger, { clientX: 90, clientY: 90 });
     expect(popup.style.left).toBe('106px');
     fireEvent.mouseMove(trigger, { clientX: window.innerWidth - 1, clientY: window.innerHeight - 1 });
-    expect(parseFloat(popup.style.left) + 384).toBe(window.innerWidth - 17);
-    expect(popup.style.bottom).toBe('17px');
+    expect(parseFloat(popup.style.left) + 640).toBe(window.innerWidth - 17);
+    expect(parseFloat(popup.style.top) + Math.min(720, window.innerHeight - 24)).toBe(window.innerHeight - 12);
+    expect(popup.style.maxHeight).toBe('');
     expect(load).toHaveBeenCalledExactlyOnceWith('item');
     fireEvent.focusIn(trigger);
     fireEvent.mouseOut(trigger, { relatedTarget: popup });

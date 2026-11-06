@@ -76,7 +76,14 @@ test('文書の根拠は本文と同じ版の位置を返し、所有タスク�
   const prefix = '# 📝 要件\n\n';
   const body = '入力値を検証する。';
   const reason = '入力要件を明文化する。';
-  const sources = [{kind:'document' as const,id:name+'/'+source.id,revision:original.revision,text:source.text}];
+  const documentSource = {kind:'document' as const,id:name+'/'+source.id,revision:original.revision,text:source.text};
+  const knowledge = store.writeManagedDocument(project.id,null,'knowledge.md',
+   store.managedDocument(project.id,null,'knowledge.md')?.revision ?? null,
+   [{text:'過去の知見',reason:'知見をまとめる。',sources:[documentSource]}],'knowledge-fixture');
+  const sources = [
+   documentSource,
+   {kind:'document' as const,id:'knowledge.md/'+knowledge.items[0]!.id,revision:knowledge.revision,text:'過去の知見'}
+  ];
   const version = store.writeManagedDocument(project.id,task.id,name,original.revision,[
    {text:prefix,reason:'要件の見出しを付ける。',sources},{text:body,reason,sources}
   ],'fixture');
@@ -90,11 +97,12 @@ test('文書の根拠は本文と同じ版の位置を返し、所有タスク�
   });
   const params = {name,revision:version.revision,itemId,projectId:project.id,taskId:task.id};
   writeTaskDocument(store,project.id,task.id,name,'更新した本文。');
-  expect(await (await lookup(params)).json()).toEqual({reason,sources});
+  const namedSources = [{...sources[0],projectName:'Example',taskName:'Task'}, {...sources[1],projectName:'Example'}];
+  expect(await (await lookup(params)).json()).toEqual({reason,sources:namedSources});
   expect((await lookup({...params,taskId:other.id})).status).toBe(404);
   expect((await lookup({...params,projectId:generateId('project')})).status).toBe(404);
   expect((await lookup({...params,revision:original.revision})).status).toBe(404);
-  expect(await (await lookup({...params,itemId:version.items[0]!.id})).json()).toEqual({reason:'要件の見出しを付ける。',sources});
+  expect(await (await lookup({...params,itemId:version.items[0]!.id})).json()).toEqual({reason:'要件の見出しを付ける。',sources:namedSources});
   expect((await lookup({...params,name:'../requirements.md'})).status).toBe(400);
   expect((await lookup({...params,itemId:'invalid'})).status).toBe(400);
   expect((await lookup({name,revision:version.revision,itemId,projectId:project.id})).status).toBe(400);
@@ -789,4 +797,47 @@ test('インストラクション反映は64 KiB本文のJSONエスケープを�
   expect((await handle(new Request(origin+'/api/instructions/apply',{method:'POST',headers:{origin,'content-type':'application/json'},body:oversized}))).status).toBe(413);
   expect((await post('/api/instructions/apply',oversized)).status).toBe(413);
  } finally {await server.stop(true);store.close()}
+});
+
+test('プロジェクト内の実ファイルを階層ごとに一覧し、安全な範囲の本文を返す', async () => {
+ const root = await mkdtemp(join(tmpdir(),'beni-project-files-'));
+ const folder = join(root,'project'), outside = join(root,'outside');
+ const store = new Store(':memory:');
+ try {
+  await mkdir(join(folder,'docs'),{recursive:true});
+  await mkdir(join(folder,'node_modules'),{recursive:true});
+  await mkdir(outside);
+  await writeFile(join(folder,'.gitignore'),'node_modules\n');
+  await writeFile(join(folder,'.env'),'PRIVATE=example');
+  await writeFile(join(folder,'docs','設計.md'),'# 設計\n');
+  await writeFile(join(folder,'docs','raw.bin'),new Uint8Array([0,1,255]));
+  await writeFile(join(folder,'docs','large.txt'),'a'.repeat(1024*1024+1));
+  await writeFile(join(outside,'file.txt'),'外側');
+  await symlink(outside,join(folder,'external'));
+  await symlink(join(outside,'file.txt'),join(folder,'docs','external.txt'));
+  const project = store.createProject('Example',folder);
+  const handle = createHandler(store,root,new ChatService(()=>folder,()=>null));
+  const get = (endpoint:string,path:string,projectId=project.id,host='127.0.0.1:3210') =>
+   handle(new Request(`http://${host}/api/${endpoint}?${new URLSearchParams({projectId,path})}`));
+  expect(await (await get('project-files','')).json()).toEqual({
+   entries:[{name:'docs',kind:'directory'},{name:'.gitignore',kind:'file'}],truncated:false
+  });
+  expect(await (await get('project-files','docs')).json()).toEqual({
+   entries:[{name:'large.txt',kind:'file'},{name:'raw.bin',kind:'file'},{name:'設計.md',kind:'file'}],truncated:false
+  });
+  expect(await (await get('project-file','docs/設計.md')).json()).toEqual({kind:'text',content:'# 設計\n'});
+  expect(await (await get('project-file','docs/raw.bin')).json()).toEqual({kind:'binary'});
+  expect(await (await get('project-file','docs/large.txt')).json()).toEqual({kind:'too-large'});
+  for (const path of ['../outside/file.txt',join(outside,'file.txt'),'docs//設計.md','docs\\設計.md','.env','node_modules/file.js']) {
+   expect((await get('project-file',path)).status).toBe(400);
+  }
+  expect((await get('project-files','external')).status).toBe(404);
+  expect((await get('project-file','external/file.txt')).status).toBe(404);
+  expect((await get('project-file','docs/external.txt')).status).toBe(404);
+  expect((await get('project-files','',generateId('project'))).status).toBe(404);
+  expect((await get('project-file','docs/設計.md',project.id,'example.com')).status).toBe(403);
+ } finally {
+  store.close();
+  await rm(root,{recursive:true,force:true});
+ }
 });

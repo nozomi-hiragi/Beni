@@ -33,7 +33,9 @@ test('Claude normalizes partial text, tool boundaries, results and completion wi
  const run=await begin('tools');try{
   await until(run.closed);const events=run.events;
   expect(events.filter(event=>event.method==='item/agentMessage/delta').map(event=>event.params.delta).join('')).toBe('Before toolAfter tool');
-  expect(events.map(event=>event.method)).toEqual(['turn/started','item/agentMessage/delta','item/completed','item/started','item/completed','item/agentMessage/delta','item/completed','turn/completed']);
+  expect(events.map(event=>event.method)).toEqual(['turn/started','item/started','item/agentMessage/delta','item/completed','item/started','item/completed','item/started','item/agentMessage/delta','item/completed','turn/completed']);
+  const textStarts=events.filter(event=>event.method==='item/started'&&event.params.item.type==='agentMessage').map(event=>event.params.item.id);
+  expect(textStarts).toEqual(events.filter(event=>event.method==='item/agentMessage/delta').map(event=>event.params.itemId));
   expect(events.find(event=>event.method==='item/completed'&&event.params.item.type==='dynamicToolCall')?.params.item).toMatchObject({id:'tool-1',name:'Read',arguments:{file_path:'example.md'},output:'Example contents',status:'completed'});
   expect(events.at(-1)?.params).toMatchObject({threadId:run.thread,turn:{id:run.turn,status:'completed'}});
  }finally{run.rpc.close()}

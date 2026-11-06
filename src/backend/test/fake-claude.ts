@@ -27,7 +27,14 @@ if(process.env.FAKE_CLAUDE_LOG)appendFileSync(process.env.FAKE_CLAUDE_LOG,JSON.s
 const tools=args[args.indexOf('--tools')+1]?.split(',')??[];
 const settings=JSON.parse(args[args.indexOf('--settings')+1]??'{}');
 if(tools.includes('Bash')&&process.env.FAKE_CLAUDE_SANDBOX_UNAVAILABLE==='1'&&settings.sandbox?.failIfUnavailable===true){console.error('Sandbox is required but unavailable');process.exit(1)}
-if(process.env.FAKE_CLAUDE_RESUME_MISSING==='1'&&args.includes('--resume')){send({type:'result',subtype:'error_during_execution',is_error:true,errors:['Session does not exist']});process.exit(1)}
+const resumeMissing=process.env.FAKE_CLAUDE_RESUME_MISSING;
+if(args.includes('--resume')&&resumeMissing){
+ const diagnostic=`No conversation found with session ID: ${session}`;
+ if(resumeMissing==='stderr'){console.error(diagnostic);process.exit(1)}
+ if(resumeMissing==='after-init')send({type:'system',subtype:'init',session_id:session});
+ send({type:'result',subtype:'error_during_execution',is_error:true,result:diagnostic});
+ process.exit(1);
+}
 if(action==='disconnect'||action==='early exit')process.exit(1);
 if(action==='malformed'){console.log('invalid');process.exit(1)}
 if(action==='reject model'){send({type:'result',subtype:'error_during_execution',is_error:true,error:{code:'model_not_found'}});process.exit(1)}
