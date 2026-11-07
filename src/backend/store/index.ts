@@ -1,3 +1,4 @@
+import { isAgentId, type AgentId } from '../../shared/agent';
 import { createHash } from 'node:crypto';
 import { defaultInstructions, isInstructionKey, validateInstruction, type Instruction } from '../instructions';
 import { initialImplementationPlan, taskDocumentSnapshot, documentContentsKey, projectKnowledge } from '../documents';
@@ -42,7 +43,7 @@ export type InstructionJobInput = {
   projectId: string;
   taskId: string;
   revision: string;
-  provider: 'codex' | 'claude';
+  provider: AgentId;
   model: string | null;
 };
 export type InstructionJob = InstructionJobInput & {
@@ -157,7 +158,7 @@ export class Store {
     if (!validProjectId(job.projectId) || !validTaskId(job.taskId) ||
         typeof job.id !== 'string' || !job.id || job.id.length > 512 ||
         typeof job.revision !== 'string' || !job.revision || job.revision.length > 512 ||
-        (job.provider !== 'codex' && job.provider !== 'claude') ||
+        !isAgentId(job.provider) ||
         (job.model !== null && (typeof job.model !== 'string' || job.model.length > 512))) throw Error('Invalid instruction job');
     return this.db.transaction(() => {
       const previous = this.instructionJobById(job.id);

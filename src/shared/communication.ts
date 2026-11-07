@@ -1,11 +1,12 @@
 import { validProjectId, validTaskId } from './ids';
+import { isAgentId, type AgentId } from './agent';
 import { isTaskPhase, type TaskPhase } from './task-phase';
 export { isTaskPhase } from './task-phase';
 export type { TaskPhase } from './task-phase';
 export const INSTRUCTIONS_CHAT_ID='instructions';
 export type Scope = {projectId:string;taskId:string|null;terminalId?:string;phase?:TaskPhase|null};
-export type Provider = 'codex'|'claude';
-export const isProvider = (value:unknown):value is Provider => value==='codex'||value==='claude';
+export type Provider = AgentId;
+export const isProvider = isAgentId;
 export type ChatState = 'pending'|'streaming'|'completed'|'failed'|'interrupted'|'unknown';
 export type Pack = {provider?:Provider;packId:string;sequence:number;messageId:string;sendId:string;role:'user'|'assistant';kind:'text'|'tool';content:string;tool:{name:string;input:string;output:string}|null;model:string|null;createdAt:string;closedAt?:string;status:ChatState;state:'streaming'|'closed'};
 export type PackHeader = Omit<Pack,'content'|'tool'>;
@@ -34,7 +35,7 @@ export function validPack(v:unknown):v is Pack {if(!object(v))return false;retur
 export function packHeader(pack:Pack):PackHeader {const {content,tool,...header}=pack;return header}
 export function validHeader(v:unknown):v is PackHeader {return object(v)&&validPack({...v,content:'',tool:null})}
 // Lifecycle state and closing time are carried by the closed notification, outside the payload hash.
-export async function packHash(pack:Pack):Promise<string> {const bytes=new TextEncoder().encode(JSON.stringify([1,pack.packId,pack.sequence,pack.messageId,pack.sendId,pack.role,pack.kind,pack.content,pack.tool?[pack.tool.name,pack.tool.input,pack.tool.output]:null,pack.model,pack.createdAt,...(pack.provider==='claude'?['claude']:[])]));const hash=await crypto.subtle.digest('SHA-256',bytes);return Array.from(new Uint8Array(hash),n=>n.toString(16).padStart(2,'0')).join('')}
+export async function packHash(pack:Pack):Promise<string> {const bytes=new TextEncoder().encode(JSON.stringify([1,pack.packId,pack.sequence,pack.messageId,pack.sendId,pack.role,pack.kind,pack.content,pack.tool?[pack.tool.name,pack.tool.input,pack.tool.output]:null,pack.model,pack.createdAt,...(pack.provider&&pack.provider!=='codex'?[pack.provider]:[])]));const hash=await crypto.subtle.digest('SHA-256',bytes);return Array.from(new Uint8Array(hash),n=>n.toString(16).padStart(2,'0')).join('')}
 
 const nonnegative=(v:unknown)=>Number.isSafeInteger(v)&&Number(v)>=0;
 export const validTerminalSize=(cols:unknown,rows:unknown)=>Number.isInteger(cols)&&Number(cols)>=20&&Number(cols)<=240&&Number.isInteger(rows)&&Number(rows)>=5&&Number(rows)<=80;

@@ -1,6 +1,6 @@
-type RateLimitStatus = 'allowed' | 'allowed_warning' | 'rejected';
-type RateLimitWindow = { label: string; usedPercent?: number; resetsAt?: number; status?: RateLimitStatus };
-export type RateLimitUsage = 'unknown' | { observedAt: string; windows: RateLimitWindow[] };
+import type { RateLimitUsage, UsageWindow as RateLimitWindow } from '../shared/agent';
+export type { RateLimitUsage } from '../shared/agent';
+type RateLimitStatus = NonNullable<RateLimitWindow['status']>;
 
 function object(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};

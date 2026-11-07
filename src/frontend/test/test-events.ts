@@ -1,4 +1,16 @@
-import { packHeader, type Pack, type Scope, type Topic, type TopicEvent } from '../shared/communication';
+import { screen } from '@solidjs/testing-library';
+import { packHeader, type Pack, type Scope, type Topic, type TopicEvent } from '../../shared/communication';
+import { vi } from 'vitest';
+
+export function chatModelPicker() {
+  return screen.getByRole<HTMLButtonElement>('combobox', { name: 'モデル' });
+}
+
+export function stubLegacyAgentFetch(mock: (path: string, init?: RequestInit) => Response | Promise<Response>) {
+  vi.stubGlobal('fetch', (path: string, init?: RequestInit) => path === '/api/agents'
+    ? Promise.resolve(Response.json({error:'見つかりません'}, {status:404}))
+    : mock(path, init));
+}
 
 export class FakeWebSocket {
   static instances: FakeWebSocket[] = [];

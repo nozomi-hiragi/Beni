@@ -7,6 +7,9 @@
 - [ディレクトリ構成](directory-structure.md)
 - [通信仕様・API](communication/README.md)
 - [データ設計](data/README.md)
+- [Agent インターフェースと各実装の仕様](agents/README.md)
+- [Codex SDK・App Server の利用条件と認証](codex-sdk.md)
+- [Claude Agent SDK の利用条件と認証](claude-agent-sdk.md)
 
 ## 仕様
 

@@ -1,7 +1,7 @@
 import { instructionKeys, isInstructionKey, type InstructionKey } from './instructions';
 import { Store } from './store/index';
-import { findChatCommand } from '../shared/chat-commands';
 import { ChatService, ModelUnavailable } from './chat';
+import { createAgents } from './agents';
 import { TerminalService, TerminalError } from './terminal';
 import { communicationSocket, type SocketData } from './events';
 import type { Server } from 'bun';
@@ -79,7 +79,7 @@ const projectForScope = (store:Store,projectId:unknown,taskId:unknown) => {
   if (taskId!==null) {const task=store.task(taskId);if(!task || row(task).project_id!==projectId)return null}
   return project;
  };
-export function createHandler(store: Store, initialFolder = homedir(), chat = new ChatService(projectResolver(store)), publicOrigin?: string, terminals = new TerminalService(), taskEventsChanged:(p:string,t:string)=>void=()=>{}, documentsChanged:(p:string,t:string)=>void=()=>{}) {
+export function createHandler(store: Store, initialFolder = homedir(), chat = new ChatService(projectResolver(store),createAgents()), publicOrigin?: string, terminals = new TerminalService(), taskEventsChanged:(p:string,t:string)=>void=()=>{}, documentsChanged:(p:string,t:string)=>void=()=>{}) {
  const changed=(p:string,t:string)=>{taskEventsChanged(p,t);documentsChanged(p,t)};
  const workflow=new DocumentWorkflow(store,chat,projectResolver(store),changed,()=>chat.notifyInstructionChanges());
  chat.setWorkflowTools(workflow);
@@ -136,6 +136,7 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
  return async (request: Request): Promise<Response> => {
   const url = new URL(request.url);
   if (!access(request).allowed) return new Response('Forbidden',{status:403});
+  const agentId=url.pathname.match(/^\/api\/agents\/([a-z0-9][a-z0-9-]{0,127})\/status$/)?.[1];
   const json = (value: unknown, status = 200) => Response.json(value,{status,headers:{'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}});
   if (request.method === 'GET') {
    try {
@@ -211,6 +212,8 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
     });
     return json({reason:item.reason,sources});
    }
+   if (url.pathname === '/api/agents') return json({agents:chat.agentList()});
+   if (agentId) return chat.hasAgent(agentId)?json(await chat.agentStatus(agentId)):json({error:'接続先が見つかりません'},404);
    if (url.pathname === '/api/codex/status') return json(await chat.status());
    if (url.pathname === '/api/claude/status') return json(await chat.claudeStatus());
    const packMatch=url.pathname.match(/^\/api\/chat\/packs(?:\/([^/]+))?$/);
@@ -250,6 +253,10 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
    if (new TextEncoder().encode(body).byteLength > bodyLimit) return json({error:'入力が長すぎます'},413);
    const input = JSON.parse(body) as Record<string,unknown>;
    if (!input || typeof input !== 'object' || Array.isArray(input)) return json({error:'入力を確認してください'},400);
+   if (agentId) {
+    if (Object.keys(input).length) return json({error:'入力を確認してください'},400);
+    return chat.hasAgent(agentId)?json(await chat.refreshAgentUsage(agentId)):json({error:'接続先が見つかりません'},404);
+   }
    if (url.pathname === '/api/codex/status' || url.pathname === '/api/claude/status') {
     if (Object.keys(input).length) return json({error:'入力を確認してください'},400);
     return json(await chat.refreshUsage(url.pathname === '/api/codex/status' ? 'codex' : 'claude'));
@@ -269,11 +276,10 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
    if(url.pathname==='/api/chat/commands'){
     const p=input.projectId,t=input.taskId??null,project=chatScope(p,t);if(!project)return json({error:'会話が見つかりません'},404);
     if(!validChatPhase(t,input.phase)||(p===INSTRUCTIONS_CHAT_ID&&input.phase!==undefined))return json({error:'フェーズを確認してください'},400);
-    if(typeof input.command!=='string'||(input.args!==undefined&&typeof input.args!=='string')||(typeof input.args==='string'&&input.args.trim())||(input.provider!==undefined&&!isProvider(input.provider))||(input.model!==undefined&&input.model!==null&&(typeof input.model!=='string'||input.model.length>256))||Object.keys(input).some(key=>!['projectId','taskId','phase','command','args','provider','model'].includes(key)))return json({error:'コマンドを確認してください'},400);
-    const command=findChatCommand(input.command,input.provider as Provider|undefined??'claude');if(command?.kind!=='operation')return json({error:'コマンドを確認してください'},400);
+    if(typeof input.command!=='string'||(input.args!==undefined&&typeof input.args!=='string')||(typeof input.args==='string'&&input.args.length>16384)||(input.provider!==undefined&&!isProvider(input.provider))||(input.model!==undefined&&input.model!==null&&(typeof input.model!=='string'||input.model.length>256))||Object.keys(input).some(key=>!['projectId','taskId','phase','command','args','provider','model'].includes(key)))return json({error:'コマンドを確認してください'},400);
     if(t!==null&&chatBlocked(t as string,input.phase))return json({error:'現在のタスクには送信できません'},409);
     if(t!==null&&store.task(t as string)!.phase!==input.phase)return json({error:'フェーズが変更されています'},409);
-    try{return json(await chat.command(p as string,t as string|null,command.name,project.folder,t===null?undefined:documentFolder(store,project,projectTask(store.task(t as string))),chatPhase(t,input.phase),{args:input.args as string|undefined,provider:input.provider as Provider|undefined,model:input.model as string|null|undefined}),202)}catch(error){const message=error instanceof Error?error.message:'';return json({error:message==='busy'?'送信中です':message==='no thread'?'操作できる会話がありません':message==='provider mismatch'?'選択中の接続先と会話の接続先が異なります。会話を送信するか /clear で新しい会話を開始してください':message==='invalid command'?'この接続先ではコマンドを利用できません':message==='unavailable'?'接続状態を確認してください':message==='unsafe configuration'?'Codex の外部ツールを無効にできませんでした':'コマンドを開始できませんでした'},['busy','no thread','provider mismatch'].includes(message)?409:['unavailable','unsafe configuration','invalid command'].includes(message)?400:500)}
+    try{return json(await chat.command(p as string,t as string|null,input.command,project.folder,t===null?undefined:documentFolder(store,project,projectTask(store.task(t as string))),chatPhase(t,input.phase),{args:input.args as string|undefined,provider:input.provider as Provider|undefined,model:input.model as string|null|undefined}),202)}catch(error){const message=error instanceof Error?error.message:'';return json({error:message==='busy'?'送信中です':message==='no thread'?'この接続先とモデルで操作できる会話がありません':message==='invalid command'?'この接続先ではコマンドを利用できません':message==='unavailable'?'接続状態を確認してください':'コマンドを開始できませんでした'},['busy','no thread'].includes(message)?409:['unavailable','invalid command'].includes(message)?400:500)}
    }
    if (url.pathname === '/api/chat/send' || url.pathname === '/api/chat/interrupt') {
     const p=input.projectId,t=input.taskId??null;const project=chatScope(p,t);if(!project)return json({error:'会話が見つかりません'},404);
@@ -283,7 +289,7 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
      if((p===INSTRUCTIONS_CHAT_ID&&!isInstructionKey(input.instructionFocus))||(input.provider!==undefined&&!isProvider(input.provider))||typeof input.content!=='string'||!input.content.trim()||!(input.model===null||(typeof input.model==='string'&&input.model.length<=256)))return json({error:'入力を確認してください'},400);
      if(t!==null&&store.task(t as string)!.phase!==input.phase)return json({error:'フェーズが変更されています'},409);
      const {packs,...conversation}=await chat.send(p as string,t as string|null,input.content,input.model as string|null,project.folder,t===null?undefined:documentFolder(store,project,projectTask(store.task(t as string))),chatPhase(t,input.phase),false,input.provider as Provider|undefined,input.instructionFocus as InstructionKey|undefined);return json(conversation,202);
-    } catch(e) {const message=e instanceof Error?e.message:'';return json({...(e instanceof ModelUnavailable ? {code:'MODEL_UNAVAILABLE'} : {}),error:e instanceof ModelUnavailable?'選択したモデルを利用できません':message==='chat command arguments'?'クラウド実行やコメント投稿の引数は利用できません':message==='chat command'?'スラッシュコマンドはコマンド API を使ってください':message==='busy'?'送信中です':message==='unavailable'?`${input.provider==='claude'?'Claude Code':'Codex'} の接続状態を確認してください`:message==='unsafe configuration'?'Codex の外部ツールを無効にできませんでした':message==='not running'?'停止できる処理がありません':'保存または接続に失敗しました'},message==='busy'||message==='not running'?409:e instanceof ModelUnavailable||message==='chat command'||message==='chat command arguments'||message==='unavailable'||message==='unsafe configuration'?400:500)}
+    } catch(e) {const message=e instanceof Error?e.message:'';return json({...(e instanceof ModelUnavailable ? {code:'MODEL_UNAVAILABLE'} : {}),error:e instanceof ModelUnavailable?'選択したモデルを利用できません':message==='chat command arguments'?'クラウド実行やコメント投稿の引数は利用できません':message==='chat command'?'スラッシュコマンドはコマンド API を使ってください':message==='busy'?'送信中です':message==='unavailable'?`${chat.agentName(isProvider(input.provider)?input.provider:undefined)} の接続状態を確認してください`:message==='not running'?'停止できる処理がありません':'保存または接続に失敗しました'},message==='busy'||message==='not running'?409:e instanceof ModelUnavailable||message==='chat command'||message==='chat command arguments'||message==='unavailable'?400:500)}
    }
    if (url.pathname === '/api/folders/list') {
     const path = input.path === undefined ? initialFolder : input.path;
@@ -296,7 +302,7 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
    if (phaseMatch) {
     if (!isTaskPhase(input.phase) || !validProjectId(input.projectId) || (phaseMatch[2]==='phase'&&(!isTaskPhase(input.target)||!['requirements','documents','implementation'].includes(input.target)))) return json({error:'フェーズを確認してください'},400);
     const taskId=phaseMatch[1]!, projectId=input.projectId, expectedPhase=input.phase;
-    if(phaseMatch[2]==='start'&&((input.provider!==undefined&&!isProvider(input.provider))||!(input.model===null||(typeof input.model==='string'&&input.model.length<=256))))return json({error:'入力を確認してください'},400);
+    if(phaseMatch[2]==='start'&&((input.provider!==undefined&&(!isProvider(input.provider)||!chat.hasAgent(input.provider)))||!(input.model===null||(typeof input.model==='string'&&input.model.length<=256))))return json({error:'入力を確認してください'},400);
     const project=validTaskId(taskId)?scope(projectId,taskId):null;
     if (!project) return json({error:'タスクが見つかりません'},404);
     const action=phaseMatch[2];
@@ -339,7 +345,7 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
      return json(projectTask(task));
     } catch (error) {
      const message = error instanceof Error ? error.message : '';
-     const unavailable=action==='complete'?'終了に使うモデルの接続状態を確認してください':`${input.provider==='claude'?'Claude Code':'Codex'} の接続状態を確認してください`;
+     const unavailable=action==='complete'?'終了に使うモデルの接続状態を確認してください':`${chat.agentName(isProvider(input.provider)?input.provider:undefined)} の接続状態を確認してください`;
      return json({...(error instanceof ModelUnavailable ? {code:'MODEL_UNAVAILABLE'} : {}),error:error instanceof ModelUnavailable?'選択したモデルを利用できません':message === 'busy' ? 'チャットの処理中はフェーズを変更できません' : message === 'phase conflict' ? 'フェーズが変更されています' : message==='plan required'?'実装手順を作成してください':message==='review pending'?'反省会の精査を完了してください':message==='unavailable'?unavailable:'フェーズを保存できませんでした'}, ['busy','phase conflict','plan required','review pending'].includes(message) ? 409 : error instanceof ModelUnavailable||message==='unavailable'?400:500);
     }
    }
@@ -378,7 +384,7 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
   } catch(error) {if(error instanceof Error&&error.message.startsWith('Duplicate live project copy'))return json({error:'同じIDのプロジェクトが登録済みです'},409);return json({error:'入力または保存先を確認してください'},400)}
  };
 }
-export function createServerOptions(store:Store,initialFolder=homedir(),chat=new ChatService(projectResolver(store)),publicOrigin?:string, terminals=new TerminalService()) {
+export function createServerOptions(store:Store,initialFolder=homedir(),chat=new ChatService(projectResolver(store),createAgents()),publicOrigin?:string, terminals=new TerminalService()) {
  const eventListeners=new Map<string,Set<(event:any)=>void>>();
  const documentListeners=new Map<string,Set<(event:any)=>void>>();
  const notifyDocuments=(p:string,t:string)=>{for(const listener of documentListeners.get(JSON.stringify([p,t]))??[])listener({name:'documents.changed',data:{}})};
@@ -420,7 +426,7 @@ if (import.meta.main) {
  const {database} = dataPaths();
  await mkdir(dirname(resolve(database)),{recursive:true,mode:0o700});
  const store = new Store(database);
- const chat = new ChatService(projectResolver(store));
+ const chat = new ChatService(projectResolver(store),createAgents());
  const terminals = new TerminalService();
  const port = Number(process.env.BENI_PORT ?? 3210);
  const publicOrigin = process.env.BENI_PUBLIC_ORIGIN;

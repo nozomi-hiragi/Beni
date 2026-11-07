@@ -1,0 +1,108 @@
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@solidjs/testing-library';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import type { AgentConnectionStatus, AgentInfo } from '../../shared/agent';
+import { modelScope, resetModelCache } from '../model-cache';
+import { chatModelPicker, FakeWebSocket, packResponse } from './test-events';
+import ChatPanel from '../components/ChatPanel';
+import CodexSettings from '../components/CodexSettings';
+import UsageIndicators from '../components/UsageIndicators';
+
+beforeEach(() => {
+  resetModelCache();
+  localStorage.clear();
+  FakeWebSocket.instances = [];
+  vi.stubGlobal('WebSocket', FakeWebSocket);
+});
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+
+it('uses a registered agent for models, command aliases, settings and usage', async () => {
+  const agent: AgentInfo = {
+    id: 'test-agent', name: '試験エージェント', supportsUsage: true,
+    commands: [
+      {name:'inspect', aliases:['check'], description:'状態を調査', kind:'maintenance', requiresSession:false, argumentHint:'[対象]'},
+      {name:'compact', description:'会話を圧縮', kind:'maintenance', requiresSession:true},
+    ],
+  };
+  const status: AgentConnectionStatus = {
+    availability:'ready', auth:'not-required', models:[{id:'one',name:'One'}, {id:'two',name:'Two'}], checkedAt:'2026-01-01T00:00:00Z',
+    usage:{observedAt:'2026-01-01T00:00:00Z', windows:[{label:'当日',usedPercent:10}]},
+  };
+  const fetchMock = vi.fn(async (path: string, init?: RequestInit) => {
+    if (path === '/api/agents') return Response.json({agents:[agent]});
+    if (path === '/api/agents/test-agent/status') {
+      return Response.json(init?.method === 'POST' ? {...status, usage:{observedAt:'2026-01-01T00:00:00Z', windows:[{label:'当日',usedPercent:30}]}} : status);
+    }
+    if (path.startsWith('/api/chat?')) return Response.json({id:'registered-chat',messages:[],selectedModel:{id:'one',name:'One',provider:'test-agent'},sessionProvider:'test-agent',threadId:'registered-thread'});
+    if (path === '/api/chat/commands') return Response.json({command:{id:'inspect-result',name:'inspect',status:'completed'}});
+    const packs = packResponse(path, []);
+    if (packs) return packs;
+    throw new Error(path);
+  });
+  vi.stubGlobal('fetch', fetchMock);
+  render(() => <><CodexSettings /><UsageIndicators /><ChatPanel projectId="019a0000-0000-7000-8000-000000000901" /></>);
+
+  expect(await screen.findByRole('heading',{name:'試験エージェント 接続'})).toBeTruthy();
+  expect(await screen.findByText('認証不要')).toBeTruthy();
+  const models = chatModelPicker();
+  await waitFor(() => expect(models.value).toBe('test-agent:one'));
+  fireEvent.click(models);
+  const options = within(screen.getByRole('listbox',{name:'モデル'}));
+  expect(options.getAllByRole('option')).toEqual([
+    options.getByRole('option',{name:'試験エージェント/One'}),
+    options.getByRole('option',{name:'試験エージェント/Two'}),
+  ]);
+  const text = screen.getByRole<HTMLTextAreaElement>('textbox',{name:'希望や回答を入力'});
+  fireEvent.click(options.getByRole('option',{name:'試験エージェント/Two'}));
+  await waitFor(() => expect(models.value).toBe('test-agent:two'));
+  fireEvent.input(text,{target:{value:'/ch'}});
+  expect(screen.getByRole('option',{name:'/inspect · 状態を調査'})).toBeTruthy();
+  expect(screen.queryByRole('option',{name:'/compact · 会話を圧縮'})).toBeNull();
+  fireEvent.input(text,{target:{value:'/check 対象'}});
+  fireEvent.submit(text.form!);
+  await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/chat/commands', expect.objectContaining({method:'POST'})));
+  const request = fetchMock.mock.calls.find(([path]) => path === '/api/chat/commands')?.[1];
+  expect(JSON.parse(String(request?.body))).toMatchObject({command:'inspect',args:'対象',provider:'test-agent',model:'two'});
+
+  await waitFor(() => expect(models.disabled).toBe(false));
+  fireEvent.click(models);
+  fireEvent.click(within(screen.getByRole('listbox',{name:'モデル'})).getByRole('option',{name:'試験エージェント/One'}));
+  const context = screen.getByRole('img',{name:/コンテキスト:/});
+  fireEvent.contextMenu(context);
+  expect(screen.getByRole('menuitem',{name:'Compress'})).toBeTruthy();
+
+  const gauge = screen.getByRole('progressbar',{name:'試験エージェント の利用枠'});
+  expect(gauge.getAttribute('aria-valuetext')).toBe('当日 残り 90%');
+  const refresh = screen.getByRole<HTMLButtonElement>('button',{name:'試験エージェント の接続状態を更新'});
+  await waitFor(() => expect(refresh.disabled).toBe(false));
+  fireEvent.click(refresh);
+  await waitFor(() => expect(gauge.getAttribute('aria-valuetext')).toBe('当日 残り 70%'));
+  expect(fetchMock.mock.calls.filter(([path]) => path === '/api/agents')).toHaveLength(1);
+  expect(fetchMock.mock.calls.some(([path]) => /^\/api\/(codex|claude)\/status$/.test(path))).toBe(false);
+});
+
+it('preserves the selected model and history when the registry is empty', async () => {
+  const projectId = '019a0000-0000-7000-8000-000000000902';
+  const saved = {id:'model', name:'過去のモデル', provider:'removed-agent'};
+  const storageKey = `beni:model:${modelScope(projectId)}`;
+  localStorage.setItem(storageKey, JSON.stringify(saved));
+  const fetchMock = vi.fn(async (path: string) => {
+    if (path === '/api/agents') return Response.json({agents:[]});
+    if (path.startsWith('/api/chat?')) return Response.json({id:'saved-chat',messages:[]});
+    const packs = packResponse(path, [{id:'reply',role:'assistant',content:'過去の応答',provider:'removed-agent',model:'model'}]);
+    if (packs) return packs;
+    throw new Error(path);
+  });
+  vi.stubGlobal('fetch', fetchMock);
+  render(() => <><CodexSettings /><ChatPanel projectId={projectId} /></>);
+  expect(await screen.findByText('登録されているエージェントはありません。')).toBeTruthy();
+  expect(await screen.findByText('過去の応答')).toBeTruthy();
+  expect(within(screen.getByRole('log')).getByText(/removed-agent\/model/)).toBeTruthy();
+  expect(chatModelPicker().title).toBe('⚠️ removed-agent/過去のモデル');
+  expect(chatModelPicker().disabled).toBe(true);
+  const text = screen.getByRole<HTMLTextAreaElement>('textbox',{name:'希望や回答を入力'});
+  fireEvent.input(text,{target:{value:'新しい質問'}});
+  fireEvent.submit(text.form!);
+  expect(screen.getByRole<HTMLButtonElement>('button',{name:'送信'}).disabled).toBe(true);
+  expect(JSON.parse(localStorage.getItem(storageKey)!)).toEqual(saved);
+  expect(fetchMock.mock.calls.some(([path]) => path.endsWith('/status') || path === '/api/chat/send')).toBe(false);
+});

@@ -6,10 +6,15 @@ import MarkdownPreview from './components/MarkdownPreview';
 import PromptTableMarkdownPreview from './components/PromptTableMarkdownPreview';
 import ChatPanel from './components/ChatPanel';
 import ResizeHandle from './components/ResizeHandle';
+import TabBar from './components/TabBar';
 import { phaseLabels } from './components/PhaseIndicator';
 import { taskPhases as phases, type TaskPhase } from '../shared/task-phase';
 
 const labels: Record<string, string> = { editor: '編集相談用プロンプト', common: '全共通', ...phaseLabels };
+const instructionTabs = [
+  { id: 'editor', label: '編集用' },
+  { id: 'instructions', label: 'インストラクション' },
+];
 const variables = [
   { name: 'project_directory', description: 'プロジェクトのディレクトリ' },
   { name: 'working_directory', description: '作業ディレクトリ' },
@@ -59,6 +64,7 @@ export default function Instructions() {
   let leftPanels: HTMLElement | undefined;
   let layout: HTMLDivElement | undefined;
   const tabId = createUniqueId();
+  const groupPanelId = `${tabId}-group-panel`;
   const [loading, setLoading] = createSignal(true);
   const [error, setError] = createSignal('');
   const [editorState, setEditorState] = createSignal({ pending: false, busy: false });
@@ -107,33 +113,23 @@ export default function Instructions() {
   return <section class="mx-auto h-full min-h-0 min-w-0 overflow-auto lg:overflow-hidden">
     <div ref={layout} class="instructions-layout grid min-w-0 items-start gap-6" style={{ "--instructions-left-ratio": `${leftRatio()}fr`, "--instructions-right-ratio": `${100 - leftRatio()}fr` }}>
       <aside ref={leftPanels} class="instructions-left min-w-0 space-y-6" style={{ "--instructions-chat-ratio": `${chatRatio()}fr`, "--instructions-references-ratio": `${100 - chatRatio()}fr` }}>
-        <section class="card card-border border-base-300 bg-base-100 shadow-sm instructions-chat min-h-0 min-w-0 overflow-hidden">
-          <div class="flex shrink-0 items-center justify-between border-b border-base-300 px-4 py-3"><h2 class="text-sm font-bold">インストラクション相談</h2><Show when={editorState().pending}><button type="button" class="btn btn-primary btn-sm" disabled={chatBusy() || editorState().busy || applying()} onClick={applyEditor}>{applying() ? '適用中...' : '適用'}</button></Show></div>
+        <section role="region" aria-label="インストラクション相談" class="card card-border border-base-300 bg-base-100 shadow-sm instructions-chat min-h-0 min-w-0 overflow-hidden">
+          <div class="flex shrink-0 items-center justify-between border-b border-base-300 px-4 py-3">
+            <h2 class="text-sm font-bold">フォーカス: {labels[instructionFocus() ?? ''] ?? '未選択'}</h2>
+            <Show when={editorState().pending}>
+              <button type="button" class="btn btn-primary btn-sm" disabled={chatBusy() || editorState().busy || applying()} onClick={applyEditor}>{applying() ? '適用中...' : '適用'}</button>
+            </Show>
+          </div>
           <Show when={applyError()}><p role="alert" class="px-4 py-2 text-sm text-error">{applyError()}</p></Show>
-          <div class="instructions-chat-content flex h-[clamp(28rem,65vh,48rem)] min-h-0 flex-col"><ChatPanel projectId="instructions" onBusyChange={setChatBusy} instructionFocus={instructionFocus()} instructionFocusLabel={instructionFocus() ? labels[instructionFocus()!] : undefined} /></div>
+          <div class="instructions-chat-content flex h-[clamp(28rem,65vh,48rem)] min-h-0 flex-col"><ChatPanel projectId="instructions" onBusyChange={setChatBusy} instructionFocus={instructionFocus()} /></div>
         </section>
         <ResizeHandle orientation="horizontal" label="チャットと変数・ツールの高さを調整" container={() => leftPanels} value={chatRatio()} onChange={setChatRatio} />
         <InstructionReferences />
       </aside>
       <ResizeHandle orientation="vertical" label="相談とインストラクションの幅を調整" container={() => layout} value={leftRatio()} onChange={setLeftRatio} />
-      <section class="card card-border border-base-300 bg-base-100 shadow-sm instructions-content min-h-0 min-w-0 overflow-auto p-4 sm:p-6">
-        <div role="tablist" aria-label="プロンプトの種類" class="tabs tabs-border flex-nowrap">
-          <For each={['editor', 'instructions']}>{(group, index) => <button type="button" role="tab"
-            id={`${tabId}-group-${group}`} aria-controls={`${tabId}-group-panel`} aria-selected={selectedGroup() === group}
-            tabIndex={selectedGroup() === group ? 0 : -1} class={`tab whitespace-nowrap ${selectedGroup() === group ? 'tab-active' : ''}`}
-            onClick={() => setSelectedGroup(group)} onKeyDown={event => {
-              let next: number;
-              if (event.key === 'ArrowRight' || event.key === 'ArrowLeft') next = 1 - index();
-              else if (event.key === 'Home') next = 0;
-              else if (event.key === 'End') next = 1;
-              else return;
-              event.preventDefault();
-              const nextGroup = ['editor', 'instructions'][next];
-              setSelectedGroup(nextGroup);
-              document.getElementById(`${tabId}-group-${nextGroup}`)?.focus();
-            }}>{group === 'editor' ? '編集用' : 'インストラクション'}</button>}</For>
-        </div>
-        <div role="tabpanel" id={`${tabId}-group-panel`} aria-labelledby={`${tabId}-group-${selectedGroup()}`} tabIndex={0}>
+      <section class="card card-border border-base-300 bg-base-100 shadow-sm instructions-content min-h-0 min-w-0 overflow-hidden">
+        <TabBar label="プロンプトの種類" tabs={instructionTabs} panelId={groupPanelId} activeId={selectedGroup()} onSelect={setSelectedGroup} />
+        <div role="tabpanel" id={groupPanelId} aria-labelledby={`${groupPanelId}-${selectedGroup()}`} tabIndex={0} class="min-h-0 min-w-0 flex-1 overflow-auto p-4 sm:p-6">
           <Show when={loading()}><p role="status" class="mt-3 text-sm">読み込み中...</p></Show>
           <Show when={error()}><p role="alert" class="mt-3 text-sm text-error">{error()}</p></Show>
           <Show when={!loading() && !error()}>
@@ -193,25 +189,10 @@ function FocusPrompt(props: { label: string; selected: boolean; onSelect: () => 
 
 function InstructionReferences() {
   const [selectedGroup, setSelectedGroup] = createSignal('instructions');
-  const tabId = createUniqueId();
-  return <section class="card card-border border-base-300 bg-base-100 shadow-sm instructions-references min-h-0 min-w-0 overflow-auto p-4 sm:p-6">
-    <div role="tablist" aria-label="変数・ツールの種類" class="tabs tabs-border flex-nowrap">
-      <For each={['editor', 'instructions']}>{(group, index) => <button type="button" role="tab"
-        id={`${tabId}-${group}`} aria-controls={`${tabId}-panel`} aria-selected={selectedGroup() === group}
-        tabIndex={selectedGroup() === group ? 0 : -1} class={`tab whitespace-nowrap ${selectedGroup() === group ? 'tab-active' : ''}`}
-        onClick={() => setSelectedGroup(group)} onKeyDown={event => {
-          let next: number;
-          if (event.key === 'ArrowRight' || event.key === 'ArrowLeft') next = 1 - index();
-          else if (event.key === 'Home') next = 0;
-          else if (event.key === 'End') next = 1;
-          else return;
-          event.preventDefault();
-          const nextGroup = ['editor', 'instructions'][next];
-          setSelectedGroup(nextGroup);
-          document.getElementById(`${tabId}-${nextGroup}`)?.focus();
-        }}>{group === 'editor' ? '編集用' : 'インストラクション'}</button>}</For>
-    </div>
-    <div role="tabpanel" id={`${tabId}-panel`} aria-labelledby={`${tabId}-${selectedGroup()}`} tabIndex={0}>
+  const panelId = `${createUniqueId()}-panel`;
+  return <section class="card card-border border-base-300 bg-base-100 shadow-sm instructions-references min-h-0 min-w-0 overflow-hidden">
+    <TabBar label="変数・ツールの種類" tabs={instructionTabs} panelId={panelId} activeId={selectedGroup()} onSelect={setSelectedGroup} />
+    <div role="tabpanel" id={panelId} aria-labelledby={`${panelId}-${selectedGroup()}`} tabIndex={0} class="min-h-0 min-w-0 flex-1 overflow-auto p-4 sm:p-6">
       <h2 class="mt-4 text-sm font-bold">変数</h2>
       <Show when={selectedGroup() === 'instructions'} fallback={<p class="mt-3 text-sm">なし</p>}>
         <ul aria-label="埋め込み変数" class="mt-3 flex flex-wrap gap-2">

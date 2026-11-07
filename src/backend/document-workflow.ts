@@ -362,7 +362,7 @@ export class DocumentWorkflow {
   const selection = (await this.chat.get(p, t, phase)).selectedModel ??
    (await this.chat.get(p, t, phase === 'documents' ? 'requirements' : 'documents')).selectedModel;
   await this.chat.send(p, t, '先行文書を読んで引用元と根拠を記録し、このフェーズの文書を作成または見直してください。',
-   model ?? selection?.id ?? null, this.folder(p), this.store.taskDocumentFolder(p, t), phase, false, provider ?? selection?.provider ?? 'codex', undefined, true);
+   model ?? selection?.id ?? null, this.folder(p), this.store.taskDocumentFolder(p, t), phase, false, provider ?? this.chat.providerForModel(selection), undefined, true);
  }
  async runReview(p: string, t: string, retry = false) {
   if (this.running.has(t) || this.scheduledReview.has(t)) return;
@@ -377,7 +377,7 @@ export class DocumentWorkflow {
    this.changed(p, t);
    const model = (await this.chat.get(p, t, 'retrospective')).selectedModel ?? (await this.chat.get(p, t, 'execution')).selectedModel;
    await this.chat.send(p, t, '全フェーズの資料を順に精査し、過不足と根拠、改善策を反省会文書に記録してください。',
-    model?.id ?? null, this.folder(p), this.store.taskDocumentFolder(p, t), 'retrospective', false, model?.provider ?? 'codex', undefined, true);
+    model?.id ?? null, this.folder(p), this.store.taskDocumentFolder(p, t), 'retrospective', false, this.chat.providerForModel(model), undefined, true);
    dispatched = true;
   } catch {
    this.reviewFailed(p, t);
@@ -436,7 +436,7 @@ export class DocumentWorkflow {
   try {
    const model = (await this.chat.get(p,t,'execution')).selectedModel;
    await this.chat.send(p,t,'未完了の実装・検証を続けてください。完了した場合や続行不能の場合は finish_execution で理由を記録してください。',
-    model?.id ?? null,this.folder(p),this.store.taskDocumentFolder(p,t),'execution',false,model?.provider ?? 'codex',undefined,true);
+    model?.id ?? null,this.folder(p),this.store.taskDocumentFolder(p,t),'execution',false,this.chat.providerForModel(model),undefined,true);
   } catch {
    this.continuedExecution.delete(t);
    if(this.store.task(t)?.phase === 'execution')await this.chat.recoverExecution(p,t);
@@ -458,7 +458,7 @@ export class DocumentWorkflow {
   const result = this.completion(p, t, history.id);
   if (!result) return false;
   this.store.enqueueInstructionJob({ id: history.id, projectId: p, taskId: t, revision: result.revision,
-   provider: history.selectedModel?.provider ?? 'codex', model: history.selectedModel?.id ?? null });
+   provider: this.chat.providerForModel(history.selectedModel), model: history.selectedModel?.id ?? null });
   return true;
  }
  kickJobs() {

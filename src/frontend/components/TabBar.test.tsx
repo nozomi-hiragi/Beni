@@ -1,4 +1,5 @@
 import { cleanup, fireEvent, render, screen } from '@solidjs/testing-library';
+import { createSignal } from 'solid-js';
 import { afterEach, expect, it, vi } from 'vitest';
 import TabBar from './TabBar';
 
@@ -99,4 +100,26 @@ it('does not offer deletion for document tabs', () => {
   render(() => <TabBar label="文書" tabs={[{id:'a',label:'requirements.md'}]} activeId="a" onSelect={() => {}} onDelete={vi.fn()} />);
   fireEvent.contextMenu(screen.getByRole('tab'));
   expect(screen.queryByRole('menu')).toBeNull();
+});
+
+it('fits an extended menu to the viewport and focuses an action when it becomes available', async () => {
+  const [disabled, setDisabled] = createSignal(true);
+  render(() => <TabBar label="チャット" tabs={[{ id: 'general', label: 'General' }]} activeId="general" onSelect={() => {}} contextActions={() => [
+    { id: 'status', label: '状態', disabled: disabled(), run: () => {} },
+  ]} />);
+  const tab = screen.getByRole('tab');
+  fireEvent.contextMenu(tab, { clientX: window.innerWidth - 1, clientY: window.innerHeight - 1 });
+  const menu = screen.getByRole('menu');
+  Object.defineProperties(menu, { offsetWidth: { value: 220 }, offsetHeight: { value: 300 } });
+  await vi.waitFor(() => expect(document.activeElement).toBe(menu));
+  expect(menu.style.left).toBe(`${window.innerWidth - 220}px`);
+  expect(menu.style.top).toBe(`${window.innerHeight - 300}px`);
+  expect(menu.classList.contains('overflow-auto')).toBe(true);
+
+  setDisabled(false);
+  const action = screen.getByRole('menuitem');
+  await vi.waitFor(() => expect(document.activeElement).toBe(action));
+  fireEvent.keyDown(action, { key: 'Escape' });
+  expect(screen.queryByRole('menu')).toBeNull();
+  expect(document.activeElement).toBe(tab);
 });

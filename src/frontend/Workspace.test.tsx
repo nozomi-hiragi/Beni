@@ -1,10 +1,10 @@
 import { createSignal } from 'solid-js';
 import { resetModelCache } from './model-cache';
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-library';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@solidjs/testing-library';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import Workspace from './Workspace';
-import {FakeWebSocket, packResponse} from './test-events';
+import { chatModelPicker, FakeWebSocket, packResponse, stubLegacyAgentFetch } from './test/test-events';
 import type { TaskDetail } from './types';
 
 type Deferred<T> = { promise: Promise<T>; resolve(value: T): void };
@@ -55,7 +55,7 @@ describe('Workspace message submission across navigation', () => {
       }
       throw new Error(`Unexpected request: ${path}`);
     });
-    vi.stubGlobal('fetch', fetchMock);
+    stubLegacyAgentFetch(fetchMock);
     const onHome = vi.fn();
 
     const first = render(() => <Workspace taskId={taskId} onHome={onHome} />);
@@ -99,7 +99,7 @@ it('refreshes real Markdown content without duplicating tabs and selects require
  const task={id:'019a0000-0000-7100-8000-000000000385',projectId:'019a0000-0000-7000-8000-000000000001',name:'Documents',phase:'requirements',status:'idle'};
  let content='# Initial',version=1, currentPhase='requirements';
  const provenanceRequests: URLSearchParams[] = [];
- vi.stubGlobal('fetch',vi.fn((path:string, init?: RequestInit)=>{
+ stubLegacyAgentFetch(vi.fn((path:string, init?: RequestInit)=>{
   if(path.endsWith('/phase')) { expect(JSON.parse(String(init?.body))).toEqual({projectId:task.projectId,phase:'requirements',target:'documents'}); currentPhase='documents'; return Promise.resolve(json({...task,phase:currentPhase})); }
   if(path==='/api/state')return Promise.resolve(json({projects:[],tasks:[task]}));
   if(path==='/api/tasks/019a0000-0000-7100-8000-000000000385')return Promise.resolve(json({task:{...task,phase:currentPhase},messages:[],documents:[{path:'requirements.md',name:'requirements.md',content,version,provenance:{revision:`revision-${version}`,items:[{id:'item',start:0,end:content.length}]}},{path:'documents.md',name:'documents.md',content:'# Index\n\n## 仕様\n\n[API](api.md)',version:1},{path:'api.md',name:'api.md',content:'# API specification',version:1},{path:'implementation.md',name:'implementation.md',content:'# Plan',version:1}]}));
@@ -152,7 +152,7 @@ it('deletes an inactive task without changing selection and removes active task 
   const first = {id:'019a0000-0000-7100-8000-000000000601',projectId,name:'Delete A',phase:'requirements',status:'idle'};
   const second = {...first,id:'019a0000-0000-7100-8000-000000000602',name:'Delete B'};
   const onTaskChange = vi.fn(); const onTaskDeleted = vi.fn(); const deletes: string[] = [];
-  vi.stubGlobal('fetch', vi.fn((path:string, init?:RequestInit) => {
+  stubLegacyAgentFetch(vi.fn((path:string, init?:RequestInit) => {
     if (path === '/api/state') return Promise.resolve(json({projects:[],tasks:[first,second]}));
     if (path.endsWith('/delete')) { expect(init?.method).toBe('POST'); expect(JSON.parse(String(init?.body))).toEqual({projectId}); deletes.push(path); return Promise.resolve(json({ok:true})); }
     const task = [first,second].find(task => path === `/api/tasks/${task.id}`);
@@ -183,11 +183,94 @@ it('deletes an inactive task without changing selection and removes active task 
   expect(deletes).toEqual([`/api/tasks/${first.id}/delete`,`/api/tasks/${second.id}/delete`]);
 });
 
+it('opens status for the clicked chat after its history loads and cancels on navigation', async ({ onTestFinished }) => {
+  // jsdom does not implement modal dialogs. ChatCommands tests use the native API in happy-dom.
+  const dialogPrototype = HTMLDialogElement.prototype;
+  const showModal = Object.getOwnPropertyDescriptor(dialogPrototype, 'showModal');
+  const close = Object.getOwnPropertyDescriptor(dialogPrototype, 'close');
+  Object.defineProperties(dialogPrototype, {
+    showModal: { configurable: true, value(this: HTMLDialogElement) { this.open = true; } },
+    close: { configurable: true, value(this: HTMLDialogElement) { this.open = false; } },
+  });
+  onTestFinished(() => {
+    if (showModal) Object.defineProperty(dialogPrototype, 'showModal', showModal);
+    else Reflect.deleteProperty(dialogPrototype, 'showModal');
+    if (close) Object.defineProperty(dialogPrototype, 'close', close);
+    else Reflect.deleteProperty(dialogPrototype, 'close');
+  });
+  const projectId = '019a0000-0000-7000-8000-000000000601';
+  const task = { id: '019a0000-0000-7100-8000-000000000601', projectId, name: '作業チャット', phase: 'documents', status: 'idle' };
+  const taskHistory = { id: 'task-chat', projectId, taskId: task.id, selectedModel: { id: 'test', name: 'Test', provider: 'codex' }, sessionProvider: 'claude', messages: [] };
+  const generalHistory = { ...taskHistory, id: 'general-chat', taskId: null, sessionProvider: 'codex' };
+  const onTaskReload = vi.fn();
+  let taskReload: Deferred<Response> | undefined;
+  stubLegacyAgentFetch(vi.fn(async (path: string) => {
+    if (path === '/api/state') return json({ projects: [], tasks: [task] });
+    if (path === `/api/tasks/${task.id}`) return json({ task, documents: [] });
+    if (path === '/api/codex/status') return json({ installed: true, auth: 'chatgpt', models: [{ id: 'test', name: 'Test' }] });
+    if (path === '/api/claude/status') return json({ installed: false, auth: 'none', models: [] });
+    if (path.startsWith('/api/chat?')) {
+      const taskId = new URL(path, 'http://localhost').searchParams.get('taskId');
+      if (taskId !== task.id) return json(generalHistory);
+      if (taskReload) { onTaskReload(); return taskReload.promise; }
+      return json(taskHistory);
+    }
+    const packs = packResponse(path, []);
+    if (packs) return packs;
+    throw new Error(path);
+  }));
+  render(() => <Workspace projectId={projectId} taskId={task.id} onHome={() => {}} />);
+
+  const general = screen.getByRole('tab', { name: 'General' });
+  await screen.findByRole('textbox', { name: '希望や回答を入力' });
+  const taskTab = screen.getByRole('tab', { name: task.name });
+  const status = () => screen.getByRole<HTMLButtonElement>('menuitem', { name: '状態を表示' });
+  const composerCommand = /^\//;
+  fireEvent.contextMenu(taskTab);
+  await waitFor(() => expect(status().disabled).toBe(false));
+  expect(screen.queryByRole('menuitem', { name: composerCommand })).toBeNull();
+  fireEvent.keyDown(status(), { key: 'Escape' });
+
+  fireEvent.keyDown(general, { key: 'F10', shiftKey: true });
+  const generalMenu = screen.getByRole('menu', { name: 'General の操作' });
+  const generalStatus = within(generalMenu).getByRole('menuitem', { name: '状態を表示' });
+  expect(within(generalMenu).queryByRole('menuitem', { name: /リネーム|削除/ })).toBeNull();
+  expect(within(generalMenu).queryByRole('menuitem', { name: composerCommand })).toBeNull();
+  expect(taskTab.getAttribute('aria-selected')).toBe('true');
+  fireEvent.click(generalStatus);
+  const generalDialog = await screen.findByRole('dialog', {name:'チャットの状態'});
+  expect(within(generalDialog).getByText('Codex')).toBeTruthy();
+  expect(general.getAttribute('aria-selected')).toBe('true');
+  fireEvent.click(within(generalDialog).getByRole('button', {name:'閉じる'}));
+
+  taskReload = deferred<Response>();
+  fireEvent.contextMenu(taskTab);
+  expect(screen.getByRole('menuitem', { name: 'リネーム' })).toBeTruthy();
+  expect(screen.getByRole('menuitem', { name: '削除' })).toBeTruthy();
+  expect(screen.queryByRole('menuitem', { name: composerCommand })).toBeNull();
+  expect(general.getAttribute('aria-selected')).toBe('true');
+  fireEvent.click(status());
+  expect(taskTab.getAttribute('aria-selected')).toBe('true');
+  await waitFor(() => expect(onTaskReload).toHaveBeenCalled());
+  expect(screen.queryByRole('dialog', {name:'チャットの状態'})).toBeNull();
+  fireEvent.click(general);
+  taskReload.resolve(json(taskHistory));
+  await screen.findByRole('textbox', { name: '希望や回答を入力' });
+  expect(screen.queryByRole('dialog', {name:'チャットの状態'})).toBeNull();
+
+  fireEvent.contextMenu(taskTab);
+  fireEvent.click(status());
+  const dialog = await screen.findByRole('dialog', {name:'チャットの状態'});
+  expect(within(dialog).getByText('Claude')).toBeTruthy();
+  fireEvent.click(within(dialog).getByRole('button', {name:'閉じる'}));
+  expect(screen.queryByRole('dialog', {name:'チャットの状態'})).toBeNull();
+});
+
 it('moves back, recovers a phase conflict and follows task event changes', async () => {
   const task = {id:'019a0000-0000-7100-8000-000000000801',projectId:'019a0000-0000-7000-8000-000000000801',name:'Phase changes',phase:'documents',status:'idle'};
   let phase = task.phase, conflict = false;
   const onTaskChange = vi.fn();
-  vi.stubGlobal('fetch', vi.fn((path: string, init?: RequestInit) => {
+  stubLegacyAgentFetch(vi.fn((path: string, init?: RequestInit) => {
     if (path === '/api/state') return Promise.resolve(json({projects:[],tasks:[task]}));
     if (path.endsWith('/phase')) {
       expect(JSON.parse(String(init?.body))).toEqual({projectId:task.projectId,phase:'documents',target:'requirements'});
@@ -221,7 +304,7 @@ it.each(['codex','claude'] as const)('starts with the selected %s model and refr
   const task = {id:'019a0000-0000-7100-8000-000000000901',projectId:'019a0000-0000-7000-8000-000000000901',name:'Selected model',phase:'implementation',status:'idle'};
   let phase = task.phase, canStart = true;
   const starts: unknown[] = [];
-  vi.stubGlobal('fetch', vi.fn((path: string, init?: RequestInit) => {
+  stubLegacyAgentFetch(vi.fn((path: string, init?: RequestInit) => {
     if (path === '/api/state') return Promise.resolve(json({projects:[],tasks:[task]}));
     if (path.endsWith('/start')) {
       starts.push(JSON.parse(String(init?.body)));
@@ -260,7 +343,7 @@ it('利用不可の保存モデルを表示して送信を止め、有効モデ�
  const {default:ChatPanel}=await import('./components/ChatPanel');
  let selectedModel={id:'removed',name:'Saved model'};
  const post=vi.fn();
- vi.stubGlobal('fetch',vi.fn((path:string,init?:RequestInit)=>{
+ stubLegacyAgentFetch(vi.fn((path:string,init?:RequestInit)=>{
   if(path==='/api/codex/status')return Promise.resolve(json({installed:true,auth:'chatgpt',models:[{id:'available',name:'Available'}]}));
   if(path.startsWith('/api/chat/packs'))return Promise.resolve(json({packs:[]}));
   if(path.startsWith('/api/chat?'))return Promise.resolve(json({id:'models',messages:[],selectedModel}));
@@ -268,14 +351,19 @@ it('利用不可の保存モデルを表示して送信を止め、有効モデ�
   throw Error(path);
  }));
  render(()=><ChatPanel projectId="019a0000-0000-7000-8000-000000000001" />);
- const model=await screen.findByRole('combobox',{name:'モデル'});
- await screen.findByRole('option',{name:'⚠️ Codex/Saved model'});
+ const model=chatModelPicker();
+ await waitFor(()=>expect(model.title).toBe('⚠️ Codex/Saved model'));
  fireEvent.input(screen.getByRole('textbox',{name:'希望や回答を入力'}),{target:{value:'hello'}});
  expect((screen.getByRole('button',{name:'送信'}) as HTMLButtonElement).disabled).toBe(true);
  expect(post).not.toHaveBeenCalled();
- fireEvent.change(model,{target:{value:'codex:available'}});
+ await waitFor(()=>expect(model.disabled).toBe(false));
+ fireEvent.click(model);
+ expect(screen.getByRole('option',{name:'⚠️ Codex/Saved model'}).getAttribute('aria-disabled')).toBe('true');
+ fireEvent.click(screen.getByRole('option',{name:'Codex/Available'}));
  await waitFor(()=>expect((screen.getByRole('button',{name:'送信'}) as HTMLButtonElement).disabled).toBe(false));
  expect(post).not.toHaveBeenCalled();
+ expect(model.title).toBe('Codex/Available');
+ fireEvent.click(model);
  expect(screen.queryByRole('option',{name:'⚠️ Codex/Saved model'})).toBeNull();
 });
 
@@ -304,12 +392,12 @@ it('実装担当モデルをチャットと独立して記憶し、実装から�
     }
     return json({sessions: []});
   });
-  vi.stubGlobal('fetch', fetchMock);
+  stubLegacyAgentFetch(fetchMock);
   const view = render(() => <Workspace taskId={taskId} onHome={() => {}} />);
   const select = await screen.findByRole('combobox', {name:'実装担当モデル'});
   await waitFor(() => expect((select as HTMLSelectElement).value).toBe('codex:c'));
   fireEvent.change(select, {target:{value:'claude:a'}});
-  expect((screen.getByRole('combobox', {name:'モデル'}) as HTMLSelectElement).value).toBe('codex:c');
+  expect(chatModelPicker().value).toBe('codex:c');
   fireEvent.click(screen.getByRole('button', {name:'仕様整理'}));
   await waitFor(() => expect(posted.at(-1)?.body.target).toBe('documents'));
   await waitFor(() => expect((screen.getByRole('button', {name:'開始'}) as HTMLButtonElement).disabled).toBe(false));
@@ -361,7 +449,7 @@ it('保存した実装担当モデルが利用不可なら警告を表示し開�
  const projectId='019a0000-0000-7000-8000-000000000001', taskId='019a0000-0000-7100-8000-000000000090';
  const task={id:taskId,projectId,name:'サンプル',phase:'implementation',status:'idle'};
  localStorage.setItem(`beni:model:${projectId}:${taskId}:implementation-assignee`,JSON.stringify({id:'removed',name:'Old',provider:'claude'}));
- vi.stubGlobal('fetch',vi.fn(async (path:string) => {
+ stubLegacyAgentFetch(vi.fn(async (path:string) => {
   if(path==='/api/state')return json({projects:[],tasks:[task]});
   if(path===`/api/tasks/${taskId}`)return json({task,documents:[],canStart:true});
   if(path==='/api/codex/status')return json({installed:true,auth:'chatgpt',models:[{id:'new',name:'New'}]});
@@ -403,7 +491,7 @@ async function executionHistory(status = 'idle', initialPhase = 'retrospective')
     }
     return json({sessions:[]});
   });
-  vi.stubGlobal('fetch',fetchMock);
+  stubLegacyAgentFetch(fetchMock);
   render(()=><Workspace taskId={taskId()} projectId={projectId} onHome={()=>{}} />);
   await screen.findByText(`${tasks[0].id} ${initialPhase}の会話`);
   const socket = FakeWebSocket.instances.find(item=>!item.closed)!;
@@ -469,7 +557,7 @@ it('自動精査の進捗と再試行に応じて反省会のチャットと完�
   const workflow: NonNullable<TaskDetail['workflow']> = { review: { state: 'pending', remaining: 3 } };
   const documents = [{ path: 'retrospective.md', name: 'retrospective.md', content: '# 精査結果', version: 1 }];
   const retries: string[] = [];
-  vi.stubGlobal('fetch', vi.fn(async (path: string, init?: RequestInit) => {
+  stubLegacyAgentFetch(vi.fn(async (path: string, init?: RequestInit) => {
     if (path === '/api/state') return json({ projects: [], tasks: [task] });
     if (path === `/api/tasks/${id}`) return json(structuredClone({ task, documents, workflow }));
     if (path === `/api/tasks/${id}/retry-review` || path === `/api/tasks/${id}/retry-instructions`) {
