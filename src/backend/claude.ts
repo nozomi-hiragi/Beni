@@ -1,6 +1,8 @@
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { createInterface } from 'node:readline';
+import { createSdkMcpServer, query, type Query, type Options as SdkOptions } from '@anthropic-ai/claude-agent-sdk';
+import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { type EmbeddedTool, type EmbeddedToolResult, toolResult } from './embedded-tools';
 import type { RateLimitUsage } from './rate-limits';
 
@@ -44,12 +46,13 @@ const localCommands=['context','usage'] as const;
 const maxCommandOutput=64*1024;
 type Block={id:string;type:'text'|'tool_use';text:string;name?:string;input?:unknown;partial?:string;complete:boolean};
 
-// ChatService が使う内部通知に CLI の NDJSON を変換する。CLI はターンごとに起動する。
+// ChatService が使う内部通知に SDK のメッセージを変換する。ローカル保守コマンドだけ CLI を直接起動する。
 export class ClaudeRpc {
  onEvent:(method:string,params:any)=>void=()=>{};
  onClose:()=>void=()=>{};
  onToolCall:(params:any)=>Promise<EmbeddedToolResult>=async()=>toolResult({error:'Unsupported tool'},false);
  private child:ChildProcessWithoutNullStreams|null=null;
+ private sdkQuery:Query|null=null;
  private session:string|null=null;
  private resumed=false;
  private options:Options|null=null;
@@ -57,6 +60,7 @@ export class ClaudeRpc {
  private interrupted=false;
  private completed=false;
  private closed=false;
+ private closing=false;
  private termination:ReturnType<typeof setTimeout>|null=null;
  private blocks=new Map<string,Block>();
  private currentMessage='';
@@ -72,12 +76,11 @@ export class ClaudeRpc {
  private usageReport:unknown;
  private commandUnavailable=false;
  private generationCommand:string|null=null;
- private initialPrompt:string|null=null;
  private pending:{resolve:()=>void;reject:(error:Error)=>void;timer:ReturnType<typeof setTimeout>}|null=null;
  constructor(private executable:string){}
  async init(){}
  async request(method:string,params:any):Promise<any>{
-  if(this.closed)throw Error('Connection closed');
+  if(this.closed||this.closing)throw Error('Connection closed');
   if(method==='config/read')return {config:{mcp_servers:{},web_search:'disabled',features:{shell_tool:false,apps:false,plugins:false,multi_agent:false,browser_use:false,computer_use:false,code_mode_host:false,hooks:false,skill_mcp_dependency_install:false}}};
   if(method==='thread/start'||method==='thread/resume'){
    if(this.session)throw new ClaudeRejected();
@@ -107,30 +110,29 @@ export class ClaudeRpc {
    // Bash の許可は CLI の必須 sandbox と組み合わせ、隔離外への再試行を許可しない。
    // 管理者ポリシーが優先され、CLI 既定の一時領域・worktree の共有 .git は書込可能。
    const settings={disableAllHooks:true,...(writable?{sandbox:{enabled:true,failIfUnavailable:true,autoAllowBashIfSandboxed:true,allowUnsandboxedCommands:false,excludedCommands:[],enableWeakerNestedSandbox:false,enableWeakerNetworkIsolation:false,allowAppleEvents:false,filesystem:{disabled:false,allowWrite:[]},network:{strictAllowlist:true,allowedDomains:[],deniedDomains:['*'],allowUnixSockets:[],allowAllUnixSockets:false,allowLocalBinding:false,allowMachLookup:[]}}}:{})};
-   // 固定 allowlist の専用経路だけ組み込み slash command を有効にする。
-   const args=['--print','--output-format','stream-json','--verbose','--include-partial-messages','--restricted','--safe-mode','--setting-sources','','--strict-mcp-config','--mcp-config','{"mcpServers":{}}','--no-chrome',...(!maintenance&&!generation?['--disable-slash-commands']:[]),'--permission-mode','dontAsk','--permission-prompts','none','--tools',tools,'--allowedTools',tools,'--disallowedTools','mcp__*','--settings',JSON.stringify(settings),'--system-prompt-snapshot','off','--model',model,this.resumed?'--resume':'--session-id',this.session];
-   if(this.options.ephemeral)args.push('--no-session-persistence');
-   if(!maintenance&&this.options.dynamicTools?.length){
-    // ユーザー設定を読まず、Beni 内部の SDK transport だけを接続する。
-    args[args.indexOf('--mcp-config')+1]=JSON.stringify({mcpServers:{beni:{type:'sdk',name:'beni'}}});
-    args[args.indexOf('--allowedTools')+1]=[tools,...this.options.dynamicTools.map(tool=>`mcp__beni__${tool.name}`)].join(',');
-    args.splice(args.indexOf('--disallowedTools'),2);
-    args.push('--input-format','stream-json');
-   }
    // 追加文脈は slash の引数に連結せず、通常のシステム文脈として別送する。
    const context=generation?params.input.slice(1).map((item:any)=>item.text).join('\n\n'):'';
    const instructions=[this.options.developerInstructions,context].filter(Boolean).join('\n\n');
-   if(instructions)args.push('--append-system-prompt',instructions);
+   const prompt=compacting?'/compact':local?`/${this.localCommand}`:generation?`/${generation.name}${generation.args?' '+generation.args:''}`:params.input.map((item:any)=>item.text).join('\n\n');
    const acceptance=new Promise<void>((resolve,reject)=>{const timer=setTimeout(()=>{this.rejectPending(Error('Claude acceptance timed out'));this.close()},60000);timer.unref();this.pending={resolve,reject,timer}});
    // spawn 失敗時にも acceptance の rejection を未処理にしない。
    void acceptance.catch(()=>{});
+   if(!maintenance){
+    this.startQuery(prompt,model,tools,settings,instructions,writable);
+    await acceptance;
+    return {turn:{id:this.turn}};
+   }
+   // /compact・/context・/usage は CLI 固有のローカル結果を厳密に識別する保守経路。
+   const args=['--print','--output-format','stream-json','--verbose','--include-partial-messages','--restricted','--safe-mode','--setting-sources','','--strict-mcp-config','--mcp-config','{"mcpServers":{}}','--no-chrome','--permission-mode','dontAsk','--permission-prompts','none','--tools','','--allowedTools','','--disallowedTools','mcp__*','--settings',JSON.stringify(settings),'--system-prompt-snapshot','off','--model',model,this.resumed?'--resume':'--session-id',this.session];
+   if(this.options.ephemeral)args.push('--no-session-persistence');
+   if(instructions)args.push('--append-system-prompt',instructions);
    const child=spawn(this.executable,args,{cwd:this.options.cwd,env:{...process.env,...(writable?{CLAUDE_CODE_SUBPROCESS_ENV_SCRUB:'1'}:{})},stdio:['pipe','pipe','pipe']});this.child=child;
    // stderr を公開せず、再開対象を明示した既知の診断だけを照合する。
    let stderr='';
    child.stderr.setEncoding('utf8');
    child.stderr.on('data',chunk=>{if(stderr.length<=4096)stderr+=String(chunk).slice(0,4097-stderr.length)});
    const lines=createInterface({input:child.stdout});lines.on('line',line=>{
-    if(this.closed||this.completed)return;
+    if(this.closed||this.closing||this.completed)return;
     if(this.canRetryMissingSession()&&this.missingSessionDiagnostic(line)){this.rejectPending(new ClaudeSessionMissing());this.close();return}
     try{this.receive(JSON.parse(line))}catch{this.close()}
    });
@@ -139,17 +141,15 @@ export class ClaudeRpc {
    child.stdin.on('error',()=>{});
    await new Promise<void>((resolve,reject)=>{child.once('spawn',resolve);child.once('error',()=>reject(Error('Claude unavailable')))});
    this.emit('turn/started',{turn:{id:this.turn}});
-   const prompt=compacting?'/compact':local?`/${this.localCommand}`:generation?`/${generation.name}${generation.args?' '+generation.args:''}`:params.input.map((item:any)=>item.text).join('\n\n');
-   if(!maintenance&&this.options.dynamicTools?.length){
-    child.stdin.write(JSON.stringify({type:'control_request',request_id:'beni-initialize',request:{subtype:'initialize',hooks:null}})+'\n');
-    this.initialPrompt=prompt;
-   }else child.stdin.end(prompt);
+   child.stdin.end(prompt);
    await acceptance;
    return maintenance?{}:{turn:{id:this.turn}};
   }
   if(method==='turn/interrupt'){
    if(!this.child||params.threadId!==this.session||params.turnId!==this.turn)throw new ClaudeRejected();
-   this.interrupted=true;this.child.kill('SIGINT');
+   this.interrupted=true;
+   if(this.sdkQuery)void this.sdkQuery.interrupt().catch(()=>this.close());
+   else this.child.kill('SIGINT');
    this.termination=setTimeout(()=>this.child?.kill('SIGKILL'),3000);this.termination.unref();
    return {};
   }
@@ -181,15 +181,12 @@ export class ClaudeRpc {
    return;
   }
   if(this.compacting||this.localCommand){
+   if(message.type==='control_request'){
+    // 保守コマンドからの対話要求は受け付けない。
+    this.child?.stdin.write(JSON.stringify({type:'control_response',response:{subtype:'error',request_id:message.request_id,error:'Unsupported control request'}})+'\n');return;
+   }
    if(message.parent_tool_use_id)return;
    if(message.session_id!==undefined&&message.session_id!==this.session){this.rejectPending(new ClaudeRejected());this.close();return}
-  }
-  if(message.type==='control_response'&&message.response?.request_id==='beni-initialize'){
-   if(message.response.subtype!=='success'){this.close();return}
-   if(this.initialPrompt!==null){this.child?.stdin.write(JSON.stringify({type:'user',session_id:this.session,message:{role:'user',content:this.initialPrompt},parent_tool_use_id:null})+'\n');this.initialPrompt=null}return;
-  }
-  if(message.type==='control_request'){
-   void this.control(message).catch(()=>this.close());return;
   }
   if(message.parent_tool_use_id)return;
   if(message.type==='system'&&message.subtype==='init'){
@@ -299,23 +296,65 @@ export class ClaudeRpc {
    this.finish(this.interrupted?'interrupted':failed?'failed':'completed',modelUnavailable);
   }
  }
- private async control(message:any){
-  const request=message.request;
-  const reply=(response:unknown)=>{if(!this.closed&&!this.completed)this.child?.stdin.write(JSON.stringify({type:'control_response',response:{subtype:'success',request_id:message.request_id,response}})+'\n')};
-  if(this.compacting||this.localCommand||request?.subtype!=='mcp_message'||request.server_name!=='beni'||!this.options?.dynamicTools?.length){
-   if(!this.closed&&!this.completed)this.child?.stdin.write(JSON.stringify({type:'control_response',response:{subtype:'error',request_id:message.request_id,error:'Unsupported control request'}})+'\n');return;
+ private startQuery(prompt:string,model:string,tools:string,settings:SdkOptions['settings'],instructions:string,writable:boolean){
+  let stderr='';
+  const dynamicTools=this.options!.dynamicTools??[];
+  const servers:NonNullable<SdkOptions['mcpServers']>={};
+  if(dynamicTools.length){
+   const server=createSdkMcpServer({name:'beni',version:'1.0.0'});
+   // JSON Schema とアプリ側の入力検証を維持し、SDK に MCP transport の処理を任せる。
+   server.instance.server.registerCapabilities({tools:{}});
+   server.instance.server.setRequestHandler(ListToolsRequestSchema,async()=>({tools:dynamicTools.map(({name,description,inputSchema})=>({name,description,inputSchema}))}));
+   server.instance.server.setRequestHandler(CallToolRequestSchema,async request=>{
+    if(this.closed||this.closing||this.completed||this.interrupted||!dynamicTools.some(tool=>tool.name===request.params.name))return {content:[{type:'text',text:JSON.stringify({error:'Embedded tool request rejected or unavailable'})}],isError:true};
+    const output=await this.onToolCall({threadId:this.session,turnId:this.turn,callId:randomUUID(),tool:request.params.name,arguments:request.params.arguments??{}});
+    return {content:output.contentItems.map(item=>({type:'text',text:item.text})),isError:!output.success};
+   });
+   servers.beni=server;
   }
-  const rpc=request.message;if(!rpc||rpc.jsonrpc!=='2.0')throw Error('Invalid SDK request');
-  let result:unknown;
-  if(rpc.method==='initialize')result={protocolVersion:'2025-11-25',capabilities:{tools:{}},serverInfo:{name:'beni',version:'1.0.0'}};
-  else if(rpc.method==='notifications/initialized'||rpc.method==='ping')result={};
-  else if(rpc.method==='tools/list')result={tools:this.options.dynamicTools.map(({name,description,inputSchema})=>({name,description,inputSchema}))};
-  else if(rpc.method==='tools/call'){
-   const output=await this.onToolCall({threadId:this.session,turnId:this.turn,callId:message.request_id,tool:rpc.params?.name,arguments:rpc.params?.arguments});
-   result={content:output.contentItems.map(item=>({type:'text',text:item.text})),isError:!output.success};
-  }else{reply({mcp_response:{jsonrpc:'2.0',id:rpc.id,error:{code:-32601,message:'Unsupported MCP method'}}});return}
-  reply({mcp_response:{jsonrpc:'2.0',...(rpc.id!==undefined?{id:rpc.id}:{}),result}});
+  try{
+   this.sdkQuery=query({prompt,options:{
+    pathToClaudeCodeExecutable:this.executable,cwd:this.options!.cwd,model,
+    ...(this.resumed?{resume:this.session!}:{sessionId:this.session!}),
+    persistSession:!this.options!.ephemeral,
+    tools:tools?tools.split(','):[],allowedTools:[...(tools?tools.split(','):[]),...dynamicTools.map(tool=>`mcp__beni__${tool.name}`)],
+    ...(!dynamicTools.length?{disallowedTools:['mcp__*']}:{}),
+    permissionMode:'dontAsk',permissionPrompts:'none',settingSources:[],strictMcpConfig:true,mcpServers:servers,
+    settings,includePartialMessages:true,systemPrompt:{type:'preset',preset:'claude_code',snapshot:false},
+    env:{...process.env,...(writable?{CLAUDE_CODE_SUBPROCESS_ENV_SCRUB:'1'}:{})},
+    extraArgs:{print:null,restricted:null,'safe-mode':null,'no-chrome':null,'system-prompt-snapshot':'off',
+     ...(!this.generationCommand?{'disable-slash-commands':null}:{}),
+     ...(!dynamicTools.length?{'mcp-config':'{"mcpServers":{}}'}:{}),
+     ...(instructions?{'append-system-prompt':instructions}:{})},
+    spawnClaudeCodeProcess:options=>{
+     const child=spawn(options.command,options.args,{cwd:options.cwd,env:options.env,signal:options.signal,stdio:['pipe','pipe','pipe']});
+     this.child=child;
+     child.stderr.setEncoding('utf8');
+     child.stderr.on('data',chunk=>{if(stderr.length<=4096)stderr+=String(chunk).slice(0,4097-stderr.length)});
+     child.once('spawn',()=>this.emit('turn/started',{turn:{id:this.turn}}));
+     child.once('close',()=>{if(this.termination)clearTimeout(this.termination);this.termination=null;if(this.closing)this.signalClose()});
+     return child;
+    }
+   }});
+   void this.consumeQuery(this.sdkQuery,()=>stderr);
+  }catch{this.rejectPending(Error('Claude unavailable'));this.close()}
+ }
+ private async consumeQuery(stream:Query,stderr:()=>string){
+  try{
+   for await(const message of stream){
+    if(this.closed||this.closing||this.completed)break;
+    this.receive(message);
+    if(this.completed){this.close();break}
+   }
+  }catch{
+   // SDK の例外には CLI stderr が含まれるため外へ渡さず、finally で既知の欠落診断だけを照合する。
+  }finally{
+   this.rejectPending(this.interrupted?new ClaudeRejected(false,true):this.canRetryMissingSession()&&this.missingSessionDiagnostic(stderr().trim())?new ClaudeSessionMissing():Error('Claude closed before acceptance'));
+   if(this.interrupted&&!this.completed)this.finish('interrupted');
+   stream.close();
+   this.close();
+  }
  }
  private signalClose(){if(this.closed)return;if((this.compacting||this.localCommand)&&this.interrupted&&!this.completed)this.finish('interrupted');this.closed=true;setImmediate(()=>this.onClose())}
- close(){this.rejectPending(this.interrupted?new ClaudeRejected(false,true):Error('Connection closed'));if(this.termination)clearTimeout(this.termination);this.termination=null;if(this.child&&this.child.exitCode===null&&this.child.signalCode===null){this.child.kill('SIGTERM');this.termination=setTimeout(()=>this.child?.kill('SIGKILL'),3000);this.termination.unref()}this.signalClose()}
+ close(){if(this.closing||this.closed)return;this.closing=true;this.sdkQuery?.close();this.rejectPending(this.interrupted?new ClaudeRejected(false,true):Error('Connection closed'));if(this.termination)clearTimeout(this.termination);this.termination=null;if(this.child&&this.child.exitCode===null&&this.child.signalCode===null){this.child.kill('SIGTERM');this.termination=setTimeout(()=>this.child?.kill('SIGKILL'),3000);this.termination.unref()}else this.signalClose()}
 }

@@ -12,7 +12,7 @@ Beni/
 │   │   ├── server.test.ts            API・配信・文書管理・変更通知・保存先のテスト
 │   │   ├── instructions.ts           指示テンプレートの初期値と変数の置換
 │   │   ├── chat.ts                   エージェント通信、会話の保存・再開・受信・中断
-│   │   ├── claude.ts                 Claude Code CLI の状態確認とストリーム変換
+│   │   ├── claude.ts                 Claude の SDK 送信、CLI 操作、状態確認とストリーム変換
 │   │   ├── claude.test.ts            Claude の受信・権限設定・中断・接続失敗のテスト
 │   │   ├── chat.test.ts              会話の保存・再開・中断・分離、接続エラーのテスト
 │   │   ├── data.ts                   メタデータ検証・保存と旧 Markdown が残ったタスクの復元
@@ -32,7 +32,7 @@ Beni/
 │   │   │   └── index.test.ts         メタデータ・復元のテスト
 │   │   └── test/                     バックエンドのテスト補助
 │   │       ├── fake-codex.ts          実サービスを使わず Codex 通信を模擬する実行ファイル
-│   │       └── fake-claude.ts         実サービスを使わず Claude 通信を模擬する実行ファイル
+│   │       └── fake-claude.ts         SDK の起動先と保守コマンドで使うテスト用 Claude CLI
 │   ├── shared/                       FE・BE 共通の通信定義
 │   │   ├── ids.ts                    プロジェクト・タスクIDの生成と種別検証
 │   │   ├── task-phase.ts             共通のフェーズ識別子と検証

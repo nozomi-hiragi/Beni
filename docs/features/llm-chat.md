@@ -6,20 +6,23 @@
 
 Beni はインストールとログイン状態を確認する。未インストールならインストールを、未ログインならログインを案内し、ユーザーが CLI 側で済ませた後に「更新」で再確認する。Beni 内でログインを開始したり、認証トークンを取得・保存・転送したりしない。認証情報の管理と更新、サービスとの通信は公式 CLI に任せる。
 
-この接続方式の採用は、第三者アプリでのサブスク利用に関する提供元の許諾を確認済みとするものではない。対応する CLI・SDK の利用条件は公式資料に従う。
+利用枠の消費先とアプリへの組み込み条件は、接続先ごとの資料を参照。 [Codex SDK・App Server の利用条件と認証](../codex-sdk.md) · [Claude Agent SDK の利用条件と認証](../claude-agent-sdk.md)
 
 ## 接続方式
 
+以下は現行の接続方式。接続先を登録制にし、Beni の型でやり取りする設計は [Agent インターフェース仕様（未実装）](../agents/README.md) を参照。
+
 ### Codex
 
-- 検出したインストール済み Codex CLI の app-server を起動し、構造化された通信で初期化する。会話の作成・再開、発言の送信、回答の逐次受信、エラーや承認要求を扱う。会話の継続に必要な接続先の ID を保存する。
+- 検出した Codex CLI の App Server を起動し、標準入出力で JSON-RPC を送受信する。会話の作成・再開、発言の送信、回答の逐次受信、エラーを扱う。対話的な承認要求は拒否する。会話の継続に必要なスレッド ID を保存する。
 - 接続状態とモデル一覧は、使用する実行環境・アカウントに対して確認する。取得したモデル一覧は利用権限の保証として扱わない。
 - ログイン状態は app-server の正式なアカウント情報取得機能で確認する。Beni 自身はログイン操作や資格情報ファイルの読み取りを行わない。CLI が使用中の認証方式を確認し、サブスク以外で動いている場合はその状態を明示して、意図しない API 課金に切り替えない。
 - CLI の作業範囲は下記の [タスク文書と作業範囲](#タスク文書と作業範囲) に従う。アプリ・プラグイン・外部 MCP・Web 検索などは無効にする。
 
 ### Claude Code
 
-- インストール済みの公式Claude Code CLIを非対話モードで起動し、`stream-json` の部分応答・ツール結果・完了通知を既存のパック配信へ変換する。外部SDKを追加せず、認証とサービスとの通信はCLIに任せる。
+- 通常送信と生成を伴うコマンドには Claude Agent SDK を使う。検出した Claude Code CLI を SDK に指定し、SDK が返す部分応答・ツール結果・完了通知を既存のパック配信へ変換する。認証とサービスとの通信は CLI が担う。
+- 圧縮・コンテキスト表示・使用量表示は Claude Code CLI の非対話モードで実行する。圧縮は手動圧縮の通知と正常終了を確認し、情報表示は CLI のローカル結果を使う。
 - 対応するCLIは2.1.292以降。`--version` と `auth status --json` で状態を確認する。認証方式が `claude.ai`、接続先が `firstParty`、ログイン済みのときに利用する。APIキー・第三者プロバイダーへ自動変更しない。アカウントIDやメールアドレスは保存・返却しない。
 - モデル候補はCLIの `sonnet`・`opus`・`haiku` エイリアス。候補の表示はアカウントの利用権限を保証しない。送信時のモデル拒否は警告表示と入力の復元で扱う。
 - `restricted`・`safe-mode` を使い、ユーザーやプロジェクトの追加設定、外部MCP、フック、ブラウザー連携などを無効にする。General・準備フェーズ・終了の組み込みツールは Read・Glob・Grep に限る。実装中・反省会では Write・Edit・Bash を加える。
@@ -79,7 +82,7 @@ FE・BE 間の配信・確定・再接続は [チャットのパック同期](..
 
 `/help`・`/status`・`/model`・`/copy`・`/export` はフロントエンド内で処理する。`/rename` は既存のタスク名変更APIを使う。これらをLLMへの発言に変換しない。コマンドの結果は通常の回答パックとは分け、チャット履歴内に折りたたんで表示する。必要なときだけ本文を開き、閉じるボタンで表示を消せる。結果を入力欄の上に固定して会話領域を狭めない。
 
-Claudeの `/context`・`/usage` は、CLIが返すコマンド識別情報付きの出力を表示する。通常のモデル応答を情報表示の代わりに使わない。コマンドの本文を受信しても、処理の正常終了を確認するまでは成功としない。
+Claude の `/context`・`/usage` は、CLI が返すコマンド識別情報付きの出力を表示する。旧形式では、対象セッションの初期化を確認し、応答のストリームや不一致の出力がない場合に限り、正常終了の `result` に含まれる本文を使う。コマンドの本文を受信しても、処理の正常終了を確認するまでは成功としない。
 
 `/review`・`/recap` など生成を伴うコマンドは、選択中モデルに対して通常の会話と同じ保存・配信・中断・作業範囲の制限を適用する。Codexのレビューは `review/start`、要約は要約用の依頼として実行する。Claudeでは対応する組み込みコマンドを実行する。レビューのクラウド実行や外部投稿を指定する引数は受け付けない。
 
@@ -115,6 +118,8 @@ Beniに保存したメッセージとパックは圧縮操作で変更しない�
 - [Sign in with ChatGPT：Codex app-server](https://developers.openai.com/siwc/token-sharing-open-source/codex-app-server)
 - [Sign in with ChatGPT：プレビューの制限](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations)
 - [Claude Codeの非対話実行](https://code.claude.com/docs/en/headless)
+- [Claude Agent SDK の TypeScript リファレンス](https://code.claude.com/docs/en/agent-sdk/typescript)
+- [Claude プランでの Agent SDK の利用](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan)
 - [Claudeの非対話セッションでのコマンド](https://code.claude.com/docs/en/agent-sdk/slash-commands#compact-history-with-compact)
 - [Claude Code の利用条件](https://code.claude.com/docs/en/legal-and-compliance)
 

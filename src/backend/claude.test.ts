@@ -106,7 +106,7 @@ test('Claude 内部ツールだけを明示許可し、外部設定とコード�
   const invocation=JSON.parse((await readFile(log,'utf8')).trim()),args=invocation.args;
   for(const flag of ['--restricted','--safe-mode','--strict-mcp-config','--no-chrome','--disable-slash-commands'])expect(args).toContain(flag);
   expect(args[args.indexOf('--setting-sources')+1]).toBe('');expect(args[args.indexOf('--permission-prompts')+1]).toBe('none');expect(args[args.indexOf('--tools')+1]).toBe('Read,Glob,Grep');expect(args[args.indexOf('--input-format')+1]).toBe('stream-json');
-  expect(JSON.parse(args[args.indexOf('--mcp-config')+1])).toEqual({mcpServers:{beni:{type:'sdk',name:'beni'}}});expect(args[args.indexOf('--allowedTools')+1].split(',')).toEqual(['Read','Glob','Grep',...eventTools.map(tool=>`mcp__beni__${tool.name}`)]);
+  expect(args).not.toContain('--mcp-config');expect(invocation.initialization.sdkMcpServers).toEqual(['beni']);expect(invocation.initialization.sdkMcpServerManifests.beni.toolsListResult.tools).toEqual(eventTools.map(({name,description,inputSchema})=>({name,description,inputSchema})));expect(args[args.indexOf('--allowedTools')+1].split(',')).toEqual(['Read','Glob','Grep',...eventTools.map(tool=>`mcp__beni__${tool.name}`)]);
   expect(JSON.parse(args[args.indexOf('--settings')+1]).disableAllHooks).toBe(true);
  }finally{rpc.close();delete process.env.FAKE_CLAUDE_LOG;await rm(root,{recursive:true,force:true})}
 });
@@ -347,3 +347,19 @@ test('Claude local synthetic だけでは完了せず、中断・切断・別ses
   }
  }finally{delete process.env.FAKE_CLAUDE_COMMAND}
 });
+
+
+test('Claude SDK は検出したCLIで安全フラグと既定プロンプトを保ち、終了しない子も回収する',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'beni-claude-sdk-exit-')),log=join(root,'calls.jsonl');process.env.FAKE_CLAUDE_LOG=log;
+ const run=await begin('stubborn',root);
+ try{
+  const call=JSON.parse((await readFile(log,'utf8')).trim());
+  expect(call.rawArgs).toContain(`--session-id=${run.thread}`);expect(call.rawArgs).toContain('--setting-sources=');
+  for(const flag of ['--print','--input-format','--include-partial-messages','--restricted','--safe-mode','--strict-mcp-config','--no-chrome'])expect(call.rawArgs).toContain(flag);
+  expect(call.initialization.systemPrompt).toBeUndefined();expect(call.initialization.systemPromptSnapshot).toBe(false);expect(call.initialization.hooks).toBeUndefined();
+  expect(call.rawArgs).not.toContain('--system-prompt');expect(call.rawArgs).toContain('Keep task documents current.');
+  for(let i=0;i<600&&!run.closed();i++)await Bun.sleep(10);
+  expect(run.closed()).toBe(true);expect(()=>process.kill(call.pid,0)).toThrow();
+  expect(run.events.at(-1)?.params.turn.status).toBe('completed');
+ }finally{run.rpc.close();delete process.env.FAKE_CLAUDE_LOG;await rm(root,{recursive:true,force:true})}
+},10000);
