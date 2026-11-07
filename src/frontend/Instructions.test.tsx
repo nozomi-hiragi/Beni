@@ -55,7 +55,7 @@ it('loads templates and switches the Markdown preview with descriptive variable 
  fireEvent.keyDown(document.activeElement!,{key:'End'});
  expect(screen.getByRole('tab',{name:'終了'}).getAttribute('aria-selected')).toBe('true');
  const finalization = screen.getByRole('region',{name:'終了のフォーカス対象'});
- expect(within(finalization).getByRole('heading',{name:'終了時に参照する 反省会チャットのパス'})).toBeTruthy();
+ expect(within(finalization).getByRole('heading',{name:'終了時に参照する 履歴抜粋を参照する案内（反省会）'})).toBeTruthy();
  fireEvent.click(finalization);
  expect(screen.getByTestId('focus-label').textContent).toBe('終了');
  expect(screen.getByRole('heading',{name:'Common プロジェクトのディレクトリ'})).toBeTruthy();

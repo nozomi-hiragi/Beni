@@ -14,12 +14,12 @@ const variables = [
   { name: 'project_directory', description: 'プロジェクトのディレクトリ' },
   { name: 'working_directory', description: '作業ディレクトリ' },
   { name: 'task_id', description: 'タスクID' },
-  { name: 'task_directory', description: 'タスク文書のディレクトリ' },
+  { name: 'task_directory', description: 'タスク文書を埋め込みツールで参照する案内' },
   { name: 'phase', description: '現在のフェーズ' },
-  { name: 'knowledge_path', description: 'ナレッジのパス' },
+  { name: 'knowledge_path', description: 'ナレッジを埋め込みツールで参照する案内' },
   { name: 'knowledge_content', description: 'ナレッジの本文' },
-  { name: 'execution_chat_path', description: '実装中チャットのパス' },
-  { name: 'retrospective_chat_path', description: '反省会チャットのパス' },
+  { name: 'execution_chat_path', description: '履歴抜粋を参照する案内（実装中）' },
+  { name: 'retrospective_chat_path', description: '履歴抜粋を参照する案内（反省会）' },
 ];
 const variableLabels = Object.fromEntries(variables.map(variable => [variable.name, variable.description]));
 const embeddedTools = [
