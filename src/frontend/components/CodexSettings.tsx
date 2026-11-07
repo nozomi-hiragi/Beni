@@ -83,7 +83,7 @@ function Connection(props: {provider: Provider}) {
         </>}
       </Show>
     </div>
-    <Show when={props.provider === 'claude'}><p class="mt-4 text-sm text-base-content/70">Claude Code 2.1.292 以降とサブスクリプションのログインが必要です。タスクではファイル編集とコマンド実行ができます。ネットワークと外部ツールは無効です。</p></Show>
+    <Show when={props.provider === 'claude'}><p class="mt-4 text-sm text-base-content/70">Claude Code 2.1.292 以降とサブスクリプションのログインが必要です。実装中・反省会では作業フォルダー内のファイル編集とコマンド実行ができます。ネットワークと外部ツールは無効です。</p></Show>
   </div>;
 }
 export default function CodexSettings() {

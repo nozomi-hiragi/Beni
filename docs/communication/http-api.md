@@ -5,67 +5,87 @@ HTTP による取得・操作と、チャットのパック同期の契約を定
 ## 共通規則
 
 - 接続先は `http://127.0.0.1:3210`。ポートは `BENI_PORT` で変更可能。Tailscale Serve の HTTPS 公開 URL は `BENI_PUBLIC_ORIGIN` に指定する（パスや末尾 `/` なし）。
-- URL のホスト名が `127.0.0.1` でも、URL の host（ポートを含む）が指定した公開 origin と完全一致するものでもなければ 403。WebSocket も同じ制限。通常の GET に共通の Origin 検査はない。
+- URL のホスト名が `127.0.0.1` の場合、または URL の host（ポートを含む）が指定した公開 origin の host と一致する場合に受け付ける。それ以外は 403。WebSocket にも同じホスト制限がある。通常の GET に共通の Origin 検査はない。
 - POST は `Origin` がローカル要求 URL の origin、または公開 host に対しては設定した HTTPS origin と一致し、`Content-Type` が厳密に `application/json` であること。転送ヘッダーは判定に使わない。違反は 403。
-- POST の本文は JSON オブジェクト。配列・null・不正 JSON は 400。本文上限は 65,536 バイトで、超過は 413。
-- HTMLのCSPはスクリプトを同一originに制限する。xterm.jsが生成するスタイル要素・属性のため、CSSのインライン適用は許可する。MarkdownプレビューのHTMLサニタイズは維持する。
+- POST の本文は JSON オブジェクト。配列・null・不正 JSON は 400。本文上限は 65,536 バイトで、`/api/instructions/apply` に限り `65536 * 6 + 1024` バイト。超過は 413。
 - JSON 応答には `Cache-Control: no-store` と `X-Content-Type-Options: nosniff` を付ける。
 - API のエラー本文は原則 `{ "error": "表示用メッセージ" }`。ホスト拒否の本文は JSON ではなく `Forbidden`。機械判定用の共通エラーコードは設けない。
-- 下表のエラーのほか、POST の解析・保存先処理などの例外は共通処理で 400 になる。GET のすべての例外が JSON エラーに統一されているわけではない。
+- 下表のエラーのほか、ハンドラーの共通処理では GET の例外を JSON の 500、POST の解析・保存先処理などの例外を JSON の 400 で返す。
 
 ## API 一覧
 
-`projectId` とタスクIDは [データの共通ID規則](../data/README.md#idの共通規則) に従う文字列。プロジェクト用とタスク用を区別し、整数IDは受け付けない。チャットの `taskId` は同じプロジェクトのタスク ID または null。タスク会話では `phase` も必須で、Generalではnullまたは省略とする。GET の会話指定では `taskId` を省略すると一般会話、POST では null を明示する。
+`projectId` とタスクIDは [データの共通ID規則](../data/README.md#idの共通規則) に従う文字列。プロジェクト用とタスク用を区別し、整数IDは受け付けない。タスク会話では、同じプロジェクトに属する `taskId` と `phase` が必須。Generalでは GET の `taskId` と `phase` を省略する。POST では null または省略で指定する。
 
 | メソッド・パス | 入力 | 成功 | 個別の主なエラー |
 | --- | --- | --- | --- |
 | `GET /api/state` | なし | 200 `{projects: Project[], tasks: Task[]}` | — |
-| `POST /api/projects` | `{name: string, folder: string}`。名前は空白のみ不可、folder は絶対パス | 201 `Project` | 400 入力・保存先不正 |
+| `POST /api/projects` | `{name: string, folder: string}`。名前は空白のみ不可、folder は絶対パス | 201 `Project` | 400 入力・保存先不正、409 同じIDの別の作業フォルダーが登録済みで現存する |
 | `GET /api/project-files` | query: `projectId`, 任意の相対 `path`。省略時はプロジェクト直下 | 200 `ProjectFileList` | 400 パス不正、404 プロジェクト・フォルダーを開けない |
 | `GET /api/project-file` | query: `projectId`, ファイルの相対 `path` | 200 `ProjectFilePreview` | 400 パス不正、404 プロジェクト・ファイルを開けない |
 | `POST /api/tasks` | `{projectId: string, name: string}`。空白のみの名前は保存時に拒否 | 201 `Task` | 400 入力不正、404 プロジェクトなし |
 | `POST /api/tasks/:id/delete` | `{projectId: string}` | 200 `{ok: true}`。タスク・文書・タスク会話を削除 | 404 タスクなし・所属不一致、409 チャット実行中、500 削除失敗 |
 | `POST /api/tasks/:id/phase` | `{projectId: string, phase: string, target: string}`。現在と移動先の準備フェーズを指定 | 200 移動後の `Task` | 400 入力不正、404 タスクなし・所属不一致、409 実行中・フェーズ不一致 |
-| `POST /api/tasks/:id/start` | `{projectId: string, phase: string, model: string \| null, provider?: "codex" \| "claude"}` | 200 実装中の `Task`。選択モデルへ実装開始の依頼を送信 | 400 入力不正、404 対象なし、409 実行中・フェーズ不一致・実装手順未編集、500 開始失敗 |
-| `POST /api/tasks/:id/stop` | `{projectId: string, phase: "execution"}` | 200 停止完了後の実装手順の `Task` | 404 対象なし、409 フェーズ不一致・停止処理中、500 停止失敗 |
-| `POST /api/tasks/:id/complete` | `{projectId: string, phase: "retrospective"}` | 200 `phase: finalization` の `Task` | 404 対象なし、409 フェーズ・状態不一致、チャット実行中 |
+| `POST /api/tasks/:id/start` | `{projectId: string, phase: string, model: string \| null, provider?: "codex" \| "claude"}` | 200 実装中の `Task`。選択モデルへ実装開始の依頼を送信 | 400 入力不正・接続先やモデルを利用できない、404 対象なし、409 実行中・フェーズ不一致・実装手順未編集、500 開始失敗 |
+| `POST /api/tasks/:id/stop` | `{projectId: string, phase: "execution"}` | 200 停止完了後の実装手順の `Task` | 400 入力不正、404 対象なし、409 フェーズ不一致・停止処理中、500 停止失敗 |
+| `POST /api/tasks/:id/complete` | `{projectId: string, phase: "retrospective"}` | 200 `phase: finalization` の `Task` | 400 入力不正・接続先やモデルを利用できない、404 対象なし、409 フェーズ・状態不一致・自動精査未完了・処理中、500 開始失敗 |
 | `POST /api/tasks/:id/reopen` | `{projectId: string, phase: "finalization" または "retrospective"}` | 200 反省会・`status: idle` の `Task` | 404 対象なし、409 フェーズ・状態不一致 |
 | `POST /api/tasks/:id/rename` | `{projectId: string, name: string}`。名前の前後の空白を除く | 200 更新後の `Task` | 400 名前不正、404 タスクなし・所属不一致、500 保存失敗 |
-| `GET /api/tasks/:id` | パスのタスク ID | 200 `{task: Task, documents: Document[], canStart: boolean}` | 404 タスクなし、500 文書取得失敗 |
+| `GET /api/tasks/:id` | パスのタスク ID | 200 `TaskDetail` | 404 タスクなし、500 文書取得失敗 |
+| `POST /api/tasks/:id/retry-review` | `{projectId: string}` | 202 `{ok: true}`。反省会の自動精査を再試行 | 404 タスクなし・所属不一致、409 `retrospective`・`idle`・精査 `failed` の条件を満たさない |
+| `POST /api/tasks/:id/retry-instructions` | `{projectId: string}` | 202 `{ok: true}`。インストラクション更新を再試行 | 404 タスクなし・所属不一致、409 `completed`・更新ジョブ `failed` の条件を満たさない |
 | `POST /api/folders/list` | `{path?: string}`。指定時は絶対パス | 200 `FolderList` | 400 パス不正・開けない |
 | `GET /api/codex/status` | なし | 200 `CodexStatus` | 接続失敗時は一部の情報を unknown/null として返す |
 | `GET /api/claude/status` | なし | 200 `ClaudeStatus` | 接続失敗時はunknown/nullとして返す |
-| `GET /api/chat` | query: `projectId`, 任意の `taskId`、タスクでは `phase` | 200 `Conversation` | 404 会話対象なし、500 履歴取得失敗 |
-| `POST /api/chat/send` | `{projectId, taskId, phase, content, model, provider?}`。content は空白のみ不可、model は256文字以内の文字列か null | 202 `Conversation` | 409 送信中、400 Codex 利用不可・設定不適合、404 対象なし、500 保存・接続失敗 |
-| `POST /api/chat/commands` | `{projectId, taskId, phase?, command, args?, provider?, model?}` | 202 `{command: ChatCommand}` | 400 未対応コマンド・接続先利用不可、404 対象なし、409 実行中・セッションなし・接続先やフェーズ・状態の不一致、500 保存・接続失敗 |
-| `POST /api/chat/interrupt` | `{projectId, taskId, phase}` | 200 `{ok: true}` | 409 停止対象なし、404 対象なし、500 保存・接続失敗 |
+| `POST /api/codex/status` | 空の JSON オブジェクト `{}` | 200 `CodexStatus`。接続状態と利用枠を再確認 | 400 入力不正 |
+| `POST /api/claude/status` | 空の JSON オブジェクト `{}` | 200 `ClaudeStatus`。接続状態と利用枠を再確認 | 400 入力不正 |
+| `GET /api/chat` | query: `projectId`, 任意の `taskId`、タスクでは `phase` | 200 `Conversation` | 400 フェーズ不正、404 会話対象なし、500 履歴取得失敗 |
+| `POST /api/chat/send` | `{projectId, taskId?, phase?, content, model, provider?, instructionFocus?}`。content は空白のみ不可、model は256 UTF-16コード単位以内の文字列か null | 202 `Conversation` | 400 入力不正・接続先やモデルを利用できない・設定不適合、404 対象なし、409 送信中・フェーズや状態の不一致、500 保存・接続失敗 |
+| `POST /api/chat/commands` | `{projectId, taskId?, phase?, command, args?, provider?, model?}` | 202 `{command: ChatCommand}` | 400 入力不正・未対応コマンド・接続先利用不可、404 対象なし、409 実行中・セッションなし・接続先やフェーズ・状態の不一致、500 保存・接続失敗 |
+| `POST /api/chat/interrupt` | `{projectId, taskId?, phase?}` | 200 `{ok: true}` | 400 フェーズ不正、404 対象なし、409 停止対象なし・状態不一致、500 保存・接続失敗 |
 
 タスクチャットの `phase` は `requirements`・`documents`・`implementation`・`execution`・`retrospective`・`finalization` のいずれかとする。
 
 `chat/send` の 202 は受け付けであり、返答終了ではない。メッセージの送信は `/api/chat/send` を使う。
 
-準備中は `requirements`・`documents`・`implementation` 間を選択できる。`execution` へ入るにはstartを使い、stop完了後は `implementation` へ戻る。phase操作ではエージェントを自動起動せず、startでは実装開始の定型依頼を実装中の会話へ送る。
+準備中は `requirements`・`documents`・`implementation` 間を選択できる。`phase` で別フェーズの `documents` または `implementation` へ移ると、そのフェーズの文書を作成・見直しする依頼を自動送信する。自動送信に失敗してもフェーズの変更は保存される。`start` は `execution` の会話へ実装開始の定型依頼を送る。`stop` が完了すると `implementation` へ戻る。
 
-プロジェクト・タスク作成は対応する文書ディレクトリも初期化する。タスク詳細取得でも必要な文書の初期化処理が走る。`GET /api/chat` は実行中でない pending/streaming メッセージを unknown に更新する場合がある。
+プロジェクト作成は `.beni/` を初期化し、タスク作成はタスクのメタデータと初期文書を保存する。`GET /api/state` とタスク詳細取得では実装中・終了フェーズの中断状態なども復旧する。`GET /api/chat` は実行中でない pending/streaming メッセージを unknown に更新する場合がある。
 
 ## データ形式
 
-以下はワイヤー上のデータを示す説明用の型。フロントエンドの型が一部の項目を省略していても、実際の応答には含まれる。
+以下の型はワイヤー上の主な項目を示す。会話の応答には内部のセッション管理用項目も含まれる場合がある。
 
 ```ts
 type Project = { id: string; name: string; folder: string };
 type Task = { id: string; projectId: string; name: string; phase: string; status: string; createdAt: string | null; updatedAt: string | null };
-type Document = { name: string; path: string; content: string; version: number };
+type DocumentProvenance = { revision: string; items: { id: string; start: number; end: number }[] };
+type Document = { name: string; path: string; content: string; version: number; provenance?: DocumentProvenance };
+type TaskDetail = {
+  task: Task; documents: Document[]; canStart: boolean;
+  workflow: {
+    review: { state: 'pending' | 'running' | 'done' | 'failed'; remaining: number; error: string | null } | null;
+    instructionJob?: {
+      id: string; projectId: string; taskId: string; revision: string;
+      provider: 'codex' | 'claude'; model: string | null;
+      status: 'pending' | 'succeeded' | 'failed' | 'superseded'; error?: string; reason?: string;
+    };
+  };
+};
 type FolderList = {
   path: string; parent: string | null;
   directories: { name: string; path: string }[]; truncated: boolean;
 };
 type ProjectFileList = { entries: { name: string; kind: 'directory' | 'file' }[]; truncated: boolean };
 type ProjectFilePreview = { kind: 'text'; content: string } | { kind: 'binary' | 'too-large' };
+type UsageWindow = {
+  label: string; usedPercent?: number; resetsAt?: number;
+  status?: 'allowed' | 'allowed_warning' | 'rejected';
+};
+type ProviderUsage = 'unknown' | { observedAt: string; windows: UsageWindow[] };
 type CodexStatus = {
   installed: boolean; path: string | null; version: string | null; checkedAt: string;
   auth: 'chatgpt' | 'apiKey' | 'other' | 'none' | 'unknown';
-  models: { id: string; name: string }[] | null; usage: 'unknown';
+  models: { id: string; name: string }[] | null; usage: ProviderUsage;
 };
 type ClaudeStatus = Omit<CodexStatus, 'auth'> & {
   auth: 'claude' | 'apiKey' | 'other' | 'none' | 'unknown';
@@ -74,7 +94,7 @@ type ChatMessage = {
   id: string; sendId: string; role: 'user' | 'assistant'; content: string;
   provider: 'codex' | 'claude'; model: string | null; createdAt: string; updatedAt: string;
   status: 'pending' | 'streaming' | 'completed' | 'failed' | 'interrupted' | 'unknown';
-  threadId: string | null; sessionId: string | null; errorCode?: 'MODEL_UNAVAILABLE';
+  threadId: string | null; sessionId: string | null; errorCode?: 'MODEL_UNAVAILABLE'; systemGenerated?: true;
 };
 type ChatCommand = {
   id: string; name: 'compact' | 'clear' | 'context' | 'usage';
@@ -90,13 +110,25 @@ type Conversation = {
 ```
 
 - 一覧のプロジェクト・タスクは ID 降順。会話内のパックは保存された順序に従う。
-- Document の path はファイル名。version はファイルの更新時刻 `mtimeMs` であり、DB 文書の版番号とは別。
+- `Document.path` は文書名。`version` はDB文書の更新順を比較できるミリ秒単位の値。根拠の取得には `provenance.revision` を使う。`canStart` は実装手順の文書が開始条件を満たすかを表し、接続先・モデル・タスク状態の検査は開始要求でも行う。
 - フォルダー一覧は直下の実ディレクトリのみ、最大 500 件。シンボリックリンクは一覧対象外。省略時はサーバー起動時の初期フォルダー（通常はホーム）。
-- プロジェクトファイル一覧は指定フォルダーの直下のみ、最大500件。相対パスの区切りは `/`。プロジェクト内部データや依存パッケージ（`.beni`、`.git`、`node_modules` など）、代表的な認証情報ファイル（`.env`、秘密鍵など）、シンボリックリンクは一覧・本文取得の対象外。本文取得は1 MiB以下のUTF-8テキストに限る。
+- `usage.observedAt` は取得日時、`usedPercent` は使用率（0〜100）、`resetsAt` はUnix時刻の秒。GET は同じアカウントについて保持している利用枠を返す。POST で取得できなかった場合も、同じアカウントの前回値を返すことがある。取得方法は [設定画面](../screens/settings.md) を参照。
+
+### プロジェクトファイルの取得
+
+一覧は指定フォルダーの直下から最大500件を返す。ディレクトリを先に並べ、それぞれ名前順に整列する。相対パスは4,096 UTF-16コード単位以内で、区切りは `/`。`projectId` と `path` の重複指定は400を返す。
+
+プロジェクト内部データや依存パッケージ（`.beni`、`.git`、`node_modules` など）、代表的な認証情報ファイル（`.env`、秘密鍵など）、シンボリックリンクは一覧・本文取得の対象外。本文取得はリンク数が1の通常ファイルに限る。1 MiB超過は `too-large`、UTF-8としてデコードできないデータや所定の制御文字を含むデータは `binary` を返す。
+
+## 文書の根拠
+
+`GET /api/document-provenance` は、`name`、`revision`、`itemId` のクエリーを受け取り、200 `{reason, sources}` を返す。タスク画面の文書は `projectId` と `taskId` も指定する。インストラクションは `name` に指示キーを指定し、両IDを省略する。`revision` と `itemId` は文書取得時の `provenance` に含まれる。`items[].start` と `end` は連結済みMarkdownに対するゼロ起点のUTF-16コード単位で、終端は範囲に含まない。
+
+`sources` には参照元の種別・ID・テキストが含まれ、参照先に応じて版、抜粋開始位置、プロジェクト名、タスク名も含まれる。形式不正や重複クエリーは400、該当する根拠がない場合は404。項目と参照元の詳細は [要求・根拠を追跡できる文書管理](../traceable-documents-design.md) を参照。
 
 ## チャットのコマンド
 
-`POST /api/chat/commands` は通常の発言とは別の操作で、`command` にスラッシュを除いた名前を指定する。`compact`・`clear` と、Claude用の `context`・`usage` を受け付ける。`new`・`reset` は `clear`、`cost`・`stats` は `usage` の別名。`args` は省略または空文字列のみ。`provider` は `codex` または `claude`、`model` はモデルIDまたはnull。`instructionFocus` は不要。インストラクション編集相談では通常の送信と同じ `projectId: "instructions"`, `taskId: null` を使う。
+`POST /api/chat/commands` は通常の発言とは別の操作で、`command` にスラッシュを除いた名前を指定する。`compact`・`clear` と、Claude用の `context`・`usage` を受け付ける。`new`・`reset` は `clear`、`cost`・`stats` は `usage` の別名。`args` は省略または空白だけの文字列を指定できる。`provider` は `codex` または `claude`、`model` はモデルIDまたはnull。インストラクション編集相談では `projectId: "instructions"`, `taskId: null` を使い、`instructionFocus` を省略する。
 
 FEは選択中モデルの `provider` と `model` を送る。`compact`・`context`・`usage` は保存済みの `threadId` と `sessionProvider` に対して実行し、指定した `provider` が一致しなければ409で拒否する。これらの操作で接続先を切り替えたり、新規セッションを作ったりしない。`provider` 省略時は保存済みの接続先を使う。操作中に会話のメッセージとパック列を変更しない。未知の名前や入力不正は400、セッションなし・同じタスクの処理中・タスクの状態不一致は409とする。
 
@@ -163,7 +195,7 @@ status/state は生成状態を表します。正常終了したアシスタン�
 
 ## 静的配信
 
-`/`、`/settings`、`/instructions`、`/project/:id`（プロジェクト用ID文字列）、`/ui/index.html` は同じ HTML を返す。`/ui/build/app.js` と `/ui/generated.css` は dist の生成物を返す。HTML と生成物には CSP、nosniff、no-store を設定する。画像は同一 origin と data URL を許可し、daisyUI の吹き出しが使う埋め込み SVG を表示する。スクリプト・スタイル・通信先は同一 origin に限定する。この配信は HTTP のまま。
+`/`、`/settings`、`/instructions`、`/project/:id`（プロジェクト用ID文字列）、`/ui/index.html` は同じ HTML を返す。`/ui/build/app.js`、`/ui/generated.css`、`/ui/style.css`（xterm.js の CSS）は dist の生成物を返す。HTML と生成物には CSP、nosniff、no-store を設定する。スクリプト・外部スタイルシート・通信先は同一 origin に限定し、xterm.js が生成するインラインのスタイル要素・属性を許可する。画像は同一 origin と data URL を許可する。Markdown プレビューでは別途 HTML をサニタイズする。
 
 ## ターミナル管理
 
@@ -191,11 +223,11 @@ status/state は生成状態を表します。正常終了したアシスタン�
 
 送信・実装開始の `provider` は `codex` または `claude`。省略時は既存クライアント互換として `codex`。モデルIDは接続先の生IDを送り、画面表示の接頭辞は含めない。選択した接続先だけへ送信し、他方へ自動変更しない。
 
-実装中・終了フェーズ・完了済みタスクの `chat/send`・`chat/interrupt`・`chat/commands` は409で拒否する。実装中はタスクのstopを利用できる。実装が終わるとBEが反省会への遷移を保存して通知する。反省会のcomplete操作で終了の定型依頼を送信し、処理の終端でタスクを完了にする。終了のチャットは履歴を取得・購読できる。処理中のreopenは409で拒否し、完了後のreopenで反省会に戻す。
+実装中・終了フェーズ・完了済みタスクと、反省会の自動精査が `pending` または `running` のタスクでは、`chat/send`・`chat/interrupt`・`chat/commands` を409で拒否する。実装中はタスクの `stop` を利用できる。停止以外で実装が終わると、BEが反省会への遷移を保存して自動精査を始める。精査完了後の `complete` は終了の定型依頼を送信する。ナレッジの版が確定すればタスクを完了し、確定できなければ反省会に戻す。終了のチャットは履歴を取得・購読できる。処理中の `reopen` は409で拒否し、完了後の `reopen` で反省会に戻す。
 
 ## インストラクション
 
-`GET /api/instructions` は `{instructions: [{key, content}], editorState: {pending, busy}}` を返します。Markdownテンプレートを変数未展開で取得します。`pending` は保存された編集用プロンプトと会話に適用済みの本文の差、`busy` は編集相談の送信準備・生成中を示します。
+`GET /api/instructions` は `{instructions: [{key, content}], editorState: {pending, busy}, provenance}` を返します。Markdownテンプレートを変数未展開で取得します。`pending` は保存された編集用プロンプトと会話に適用済みの本文の差、`busy` は編集相談の送信準備・生成中を示します。`provenance` は根拠を持つテンプレートだけを含む、指示キーから `DocumentProvenance` への対応です。
 
 `POST /api/instructions/apply` は `{expected_content: string}` を受け取り、保存された編集用本文と一致し、会話が実行中でないときに新しい空の会話へ切り替えます。成功時は `{editorState: {pending: false, busy: false}}` を返します。同一originを必須とし、本文の競合や実行中は409です。変更なしなら会話をリセットしません。成功時は `chat.changed` で各クライアントに通知します。適用リクエストだけは64KiBの本文がJSONエスケープで膨らむ場合に対応し、リクエスト上限を `65536 * 6 + 1024` バイトとします。他のAPIは64KiBの上限を維持します。本文自体のHTTP更新APIはありません。詳細は [インストラクション管理](../features/instructions.md) を参照してください。
 

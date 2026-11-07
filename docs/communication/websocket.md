@@ -4,7 +4,7 @@ WS の接続、購読、イベント、エラーの契約を定義します。
 
 ## 接続と役割
 
-同一 origin の `/api/ws` にブラウザーのタブごとに一本接続します。HTTP Upgrade 時にホストと Origin を検査します。ローカル接続は `127.0.0.1` と同一 Origin、Tailscale Serve 経由は `BENI_PUBLIC_ORIGIN` の host と HTTPS Origin の一致が必要です。ホストの制限は HTTP と共通で、転送ヘッダーは判定に使いません。接続後も購読対象のプロジェクト・タスクの対応を検証します。
+同一 origin の `/api/ws` にブラウザーのタブごとに一本接続します。Upgrade には GET を使い、ホストと Origin を検査します。ローカル接続は `127.0.0.1` と同一 Origin、Tailscale Serve 経由は `BENI_PUBLIC_ORIGIN` の host と HTTPS Origin の一致が必要です。`Sec-Fetch-Site: cross-site` の要求も拒否します。ホストの制限は HTTP と共通で、転送ヘッダーは判定に使いません。接続後はトピックごとに購読対象を検証します。
 
 通常の作成・取得・変更は HTTP です。WS は購読管理、リアルタイム通知、ターミナル入出力を扱います。任意の HTTP 操作を呼ぶ RPC は用意しません。
 
@@ -36,7 +36,7 @@ WS の接続、購読、イベント、エラーの契約を定義します。
 | `error` | BE → FE | `code`, `message`。対象を特定できる場合は `subscriptionId` |
 | `terminal.input` / `terminal.resize` / `terminal.takeover` | FE → BE | 個別シェルの `subscriptionId` と権限の `generation`。詳細は [ターミナル通信](terminal.md) |
 
-`subscriptionId` は FE が作る接続内で一意な文字列。パック ID とは別です。同じ対象を複数の画面部品が使う場合、FE の共通層で購読を共有します。
+`subscriptionId` は FE が作る接続内で一意な、1〜128 UTF-16コード単位の文字列です。パック ID とは別です。同じ対象を複数の画面部品が使う場合、FE の共通層で購読を共有します。
 
 ```json
 {"type":"hello","version":1}
@@ -55,7 +55,7 @@ WS の接続、購読、イベント、エラーの契約を定義します。
 | `documents` | `{projectId: string, taskId: string}` | `documents.changed` |
 | `terminal` | `{projectId: string, taskId: null, terminalId?: string}` | `terminal.changed`, `terminal.state`, 画面同期・入出力イベント |
 
-チャットの一般会話は taskId を null にします。文書は具体的なタスクが必須です。ターミナルは terminalId を省略すると一覧、指定すると個別シェルを購読します。操作メッセージとイベントの詳細は [ターミナル通信](terminal.md) を参照してください。
+General の `taskId` は null とします。インストラクション編集相談は `chat` トピックで `{projectId: 'instructions', taskId: null}` を指定します。文書は対象プロジェクトに属する現存タスクを指定します。ターミナルは `terminalId` を省略すると一覧、指定すると個別シェルを購読します。操作メッセージとイベントの詳細は [ターミナル通信](terminal.md) を参照してください。
 
 ```json
 {"type":"subscribe","subscriptionId":"s1","topic":"chat","scope":{"projectId":"019a5000-0000-7000-8000-000000000001","taskId":"019a5000-0000-7100-8000-000000000002","phase":"requirements"}}
@@ -104,7 +104,7 @@ FE は HTTP の ack でハッシュ照合を行います。未受信のパック
 {"type":"event","subscriptionId":"s2","name":"documents.changed","data":{}}
 ```
 
-対象は購読の scope で特定します。本文は含まず、FE が `GET /api/tasks/:id` で最新文書を読み直します。短時間の変更はまとめて通知できます。取得中に再度通知された場合も、最終状態を取得し直せるようにします。
+対象は購読の scope で特定します。タスク文書の保存や文書ワークフローの状態変更を知らせ、FE は `GET /api/tasks/:id` で最新の内容を読み直します。取得中に再度通知された場合は、取得を終えてから最新状態を取得します。プロジェクトファイルのプレビューはファイル選択時に HTTP で取得します。
 
 ## エラーと切断
 
@@ -114,7 +114,7 @@ FE は HTTP の ack でハッシュ照合を行います。未受信のパック
 
 | code | 対応 |
 | --- | --- |
-| `INVALID_MESSAGE` | JSON・型・必須項目が不正。処理を実行しない |
+| `INVALID_MESSAGE` | JSON・型・必須項目が不正。または同期中のターミナル操作、終了済みシェルへの入力、古い世代での操作権取得などを拒否 |
 | `UNSUPPORTED_VERSION` | ready を返さず接続を閉じる |
 | `NOT_READY` | バージョン確認前の操作を拒否する |
 | `UNKNOWN_TOPIC` | 未対応の購読を拒否する |
@@ -124,7 +124,7 @@ FE は HTTP の ack でハッシュ照合を行います。未受信のパック
 | `LIMIT_EXCEEDED` | 購読などの上限超過を拒否する |
 | `INTERNAL_ERROR` | 内部情報を含まないメッセージで失敗を伝える |
 
-文書監視など成立後の購読が継続できなくなった場合は、その購読の error を通知して終了します。
+タスク変更履歴の初回取得に失敗した場合など、成立後の購読が継続できない場合は、その購読の `INTERNAL_ERROR` を通知して解除します。
 
 遅い受信側へ送信待ちデータを無制限にためません。チャットの差分を黙って捨てて接続を継続することも避けます。上限を超えた接続は切断し、再接続後の HTTP 同期へ進めます。
 
@@ -142,7 +142,7 @@ FE は HTTP の ack でハッシュ照合を行います。未受信のパック
 | メッセージサイズ | 送受信とも64 KiB以内 |
 | 送信待ち量 | 1 MiB以内。超過時は切断して再同期 |
 | 同時購読数 | 接続ごとに32件 |
-| 使用済み購読 ID | 接続ごとに4,096件。到達時は接続を閉じて再接続で更新 |
+| 使用済み購読 ID | 接続ごとに4,096件。超過する購読要求では接続を閉じて再接続で更新 |
 | BE の hello 待機 | 5秒 |
 | FE の接続・購読成立待機 | 10秒 |
 | BE の idle timeout | 30秒。WS ping で生存確認 |
@@ -152,12 +152,12 @@ FE は HTTP の ack でハッシュ照合を行います。未受信のパック
 
 明示的に閉じるコードは、非対応版が1002、バイナリ受信が1003、hello タイムアウトが1008、送信フレーム超過が1009、送信待ち超過・購読 ID の更新が1013です。切断後はチャット・文書をHTTPで同期し、ターミナルは再購読して端末画面を復元します。
 
-FE は不正な応答または INTERNAL_ERROR を受けたときに接続をやり直します。安定した購読が30秒続かないままこれらの失敗が3回重なった場合は自動再試行を止め、ページ再読み込みを案内します。30秒以上の安定稼働後は失敗回数をリセットします。通常のネットワーク切断はこの回数制限に含めません。
+FE は不正な応答または `INTERNAL_ERROR` を受けたときに接続をやり直し、失敗を3回数えると自動再試行を止めてページ再読み込みを案内します。同じ接続で購読成立から30秒以上経過していれば、それまでの失敗回数をリセットして今回を1回目と数えます。通常のネットワーク切断は回数に加えません。
 
 購読が一件もなくなった場合、FE は接続と再接続タイマーを閉じます。次に購読が必要になったときに接続を開きます。
 
 ## フェーズ別チャットと変更履歴
 
-`chat` のscopeはタスク会話で `{projectId, taskId, phase}` とする。phaseは終了を含む6フェーズの識別子で、Generalはnullまたは省略する。購読共有・キャッシュ・再接続の対象はphaseまで含めて分離する。`documents`・`terminal` のscopeにphaseは指定しない。
+`chat` の scope はタスク会話で `{projectId, taskId, phase}` とする。`phase` は終了を含む6フェーズの識別子で、Generalはnullまたは省略する。購読共有・キャッシュ・再接続の対象はフェーズまで含めて分離する。他のトピックでは `phase` を省略する。
 
-`task-events` は `{projectId, taskId}` をscopeとし、タスク全体の変更を購読する。イベント名は `task.events.changed`、dataは `{lastEventId: number}`。通知を受けた画面はHTTPでタスクのフェーズと変更履歴を再取得する。通知本文に文書の過去版を載せない。`lastEventId` はプロジェクト共通のイベントIDであり、タスク単位の連番ではない。削除済みタスクも履歴の購読・取得ができる。
+`task-events` は `{projectId, taskId}` を scope とし、タスク全体の変更を購読する。登録済みプロジェクトと形式上有効なタスク ID を指定でき、削除済みタスクの履歴も取得できる。購読成立時には、同じプロジェクトの現存タスクであれば最新の履歴を記録する。購読成立後の初回と以後の更新時に `task.events.changed` でカーソルを通知する。data は `{lastEventId: number}` で、`lastEventId` はプロジェクト共通のイベント ID。画面は必要なタスク状態と履歴を HTTP で取得する。詳細は [タスクの変更履歴](../objects/task-events.md#取得と通知の契約) を参照。

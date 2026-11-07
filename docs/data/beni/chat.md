@@ -16,7 +16,7 @@
 
 ## フェーズ別の保存
 
-`phase` は `requirements`、`documents`、`implementation`、`execution`、`retrospective`、`finalization`。各会話は独立した会話ID・発言・パック列・CLIセッション・`lastEventId` を持つ。未送信のフェーズは空の会話として扱い、保存ファイルは必要時に作成する。Generalのphaseはnull。`lastEventId` はプロジェクトイベントについてLLMが確認完了を通知した上限であり、送信受付だけでは更新しない。
+`phase` は `requirements`、`documents`、`implementation`、`execution`、`retrospective`、`finalization`。各会話は独立した会話ID・発言・パック列を持ち、CLIセッションとイベントの確認済み位置を接続先ごとに保持する。未送信のフェーズは空の会話として扱い、保存ファイルは必要時に作成する。Generalのphaseはnull。
 
 | フェーズ | チャットファイル | 対応するタスク文書 |
 | --- | --- | --- |
@@ -39,9 +39,11 @@
 
 ## 接続先とセッション
 
-メッセージの `provider` は `codex` または `claude`。`selectedModel.provider` と `sessionProvider` の省略は既存データとの互換のため `codex` として扱う。`sessionProvider` は現在のCLIセッションの接続先を示す。接続先を切り替えて送信するときはセッションIDをリセットし、保存済み本文を参考履歴として新しいセッションへ渡す。元のメッセージとパックは書き換えない。
+メッセージの `provider` は `codex` または `claude`。`selectedModel.provider` と `sessionProvider` の省略は既存データとの互換のため `codex` として扱う。`sessionProvider` は現在のCLIセッションの接続先を示す。現在のセッションの `threadId`、`sessionId`、`lastEventId`、引き継ぎ位置 `contextMessageCount` などは会話の直下に置く。接続先を切り替えるときは、直前のセッションを任意項目 `sessions` の接続先別エントリーへ退避し、切り替え先の状態を復元する。過去のメッセージとパックはそのまま保持する。
 
-CLIプロセスの起動成功だけではセッション成立・入力受理と見なさない。Claudeの初期化と入力受理を確認してからセッションを保存する。イベントの確認済み位置は、別途 `acknowledge_events` を受けたときだけ進める。新規起動が受理前に失敗した場合は仮のセッションIDを再開に使わず、次の明示的な送信で新規セッションを作る。
+再開時は、そのセッションがまだ受け取っていない発言を抜粋して引き継ぐ。`lastEventId` はプロジェクトイベントについてLLMが確認完了を通知した上限で、`acknowledge_events` を受けたときに進める。
+
+Claudeは初期化と入力受理を確認してからセッションを保存する。新規起動が受理前に失敗した場合は仮のセッションIDを破棄し、次の明示的な送信で新規セッションを作る。再開先の消失がターン受理前に明示された場合は、新規セッションで同じ送信を一度だけ試す。[会話の引き継ぎ](../../features/llm-chat.md#フェーズ別の会話と変更の引き継ぎ)
 
 `eventToolsVersion: 1` は、イベント参照ツールを登録したセッションであることを示す。未登録のCodexセッションへツールを後付けせず、新しいセッションへ保存済み会話本文を引き継ぐ。
 

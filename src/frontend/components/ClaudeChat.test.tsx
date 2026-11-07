@@ -86,7 +86,7 @@ it('設定のClaude更新だけ共有一覧へ反映し、CLI制限と非対応�
  }));
  render(()=><><CodexSettings/><ChatPanel projectId="019a0000-0000-7000-8000-000000000ad5"/></>);
  await screen.findByText('Claude Code 2.1.292 以降に更新してください');
- expect(screen.getByText('Claude Code 2.1.292 以降とサブスクリプションのログインが必要です。タスクではファイル編集とコマンド実行ができます。ネットワークと外部ツールは無効です。')).toBeTruthy();
+ expect(screen.getByText('Claude Code 2.1.292 以降とサブスクリプションのログインが必要です。実装中・反省会では作業フォルダー内のファイル編集とコマンド実行ができます。ネットワークと外部ツールは無効です。')).toBeTruthy();
  expect(codexCalls).toBe(1);expect(claudeCalls).toBe(1);
  const refresh=screen.getByRole('button',{name:'Claude の接続状態を更新'}) as HTMLButtonElement;
  await waitFor(()=>expect(refresh.disabled).toBe(false));version='2.1.292';fireEvent.click(refresh);
