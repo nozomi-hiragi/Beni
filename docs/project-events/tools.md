@@ -10,7 +10,7 @@ LLMはプロジェクトイベントを調べ、必要に応じて差分やチ�
 | get_event | event_id | 実行内容・状態、ファイル変更、チャットへの参照 |
 | get_file_change | event_id | 対象ファイルの差分・変更後ハッシュ |
 | get_file_version | path、change_id | 指定した変更後の本文、ハッシュ、存在状態 |
-| get_execution_output | operation_id | 参照先チャットに保存された出力の抜粋。削除されていれば削除済みと返す |
+| get_execution_output | operation_id | 参照先の現行・保管済みチャットに保存された出力の抜粋。参照先が削除されていれば削除済みと返す |
 | acknowledge_events | through | 確認完了を受け付けた上限ID |
 
 pathは対象版でのプロジェクト相対パスとし、change_idとの対応を検証する。復元の起点が全文キャッシュ・初版のどちらであっても、同じ版の本文を返す。

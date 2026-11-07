@@ -694,6 +694,11 @@ test('操作イベントは出力を重複せず、他タスクのパック参�
   process.env.FAKE_EMBEDDED_CALLS=JSON.stringify([{tool:'get_execution_output',arguments:{operation_id:records[0].operationId}}]);
   await chat.send(p,null,'event tools',null,root);await waitFor(async()=>(await chat.get(p,null)).messages.at(-1)?.status==='completed');
   let result=JSON.parse(JSON.parse((await chat.get(p,null)).messages.at(-1)!.content)[0].contentItems[0].text);expect(result).toMatchObject({deleted:false,output:'example\n',status:'completed'});
+  const originalChatId=(await chat.get(p,t)).id;
+  await chat.command(p,t,'clear',root);
+  expect((await chat.get(p,t)).id).not.toBe(originalChatId);
+  await chat.send(p,null,'event tools',null,root);await waitFor(async()=>(await chat.get(p,null)).messages.at(-1)?.status==='completed');
+  result=JSON.parse(JSON.parse((await chat.get(p,null)).messages.at(-1)!.content)[0].contentItems[0].text);expect(result).toMatchObject({deleted:false,output:'example\n',status:'completed'});
   await rm(join(root,'.beni','chat',t),{recursive:true});
   await chat.send(p,null,'event tools',null,root);await waitFor(async()=>(await chat.get(p,null)).messages.at(-1)?.status==='completed');
   result=JSON.parse(JSON.parse((await chat.get(p,null)).messages.at(-1)!.content)[0].contentItems[0].text);expect(result.deleted).toBe(true);await expect(readFile(join(root,'.beni','chat',t,'requirements.json'),'utf8')).rejects.toThrow();

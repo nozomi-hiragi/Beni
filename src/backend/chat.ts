@@ -803,9 +803,8 @@ export class ChatService {
      while(!operation){const page=provider.events(c.projectId,null,after,history.through,100);operation=page.events.find(event=>event.operationId===args.operation_id&&typeof event.packId==='string');if(operation||!page.hasMore)break;const next=page.nextCursor??page.lastEventId;if(next<=after)throw Error('Invalid event page');after=next}
      if(!operation)throw Error('Unknown operation');
      if((operation.taskId!==null&&!validTaskId(operation.taskId))||(operation.taskId===null?operation.phase!==null:!isTaskPhase(operation.phase)))throw Error('Invalid output scope');
-     let chat:Conversation|undefined;
-     try{chat=this.validateHistory(readJson(this.path(c.projectId,operation.taskId,operation.phase,false)),c.projectId,operation.taskId,operation.phase)}catch(error:any){if(error.code!=='ENOENT')throw error}
-     const pack=chat?.id===operation.chatId?chat?.packs.find(pack=>pack.packId===operation.packId):undefined;
+     const source=typeof operation.chatId==='string'?this.workflowSources(c.projectId,operation.taskId,operation.phase,operation.chatId):undefined;
+     const pack=source?.packs.find(pack=>pack.packId===operation.packId);
      if(pack){
       const output=pack.tool?.output??pack.content;
       const excerpt=shorten(output,excerptLimit,jsonBytes,true);
