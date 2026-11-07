@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { FakeWebSocket } from './test-events';
+import { FakeWebSocket } from './test/test-events';
 import { cleanup, fireEvent, render, screen, within, waitFor } from '@solidjs/testing-library';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import App, { parseRoute } from './App';
@@ -194,7 +194,7 @@ it('opens instruction management from the header and keeps it separate from sett
   render(() => <App />);
   fireEvent.click(screen.getByRole('button', {name:'インストラクション管理'}));
   expect(location.pathname).toBe('/instructions');
-  expect(await screen.findByRole('heading', {name:'インストラクション相談',level:2})).toBeTruthy();
+  expect(await screen.findByRole('region', {name:'インストラクション相談'})).toBeTruthy();
   expect(screen.queryByRole('heading', {level:1})).toBeNull();
   expect(await screen.findByText('共通の指示')).toBeTruthy();
   expect(screen.queryByText('編集相談用の指示')).toBeNull();
@@ -212,7 +212,7 @@ it('opens instruction management from the header and keeps it separate from sett
   expect(screen.queryByRole('tablist', {name:'フェーズ別インストラクション'})).toBeNull();
   expect(screen.queryByRole('heading',{name:'埋め込みツール'})).toBeNull();
   pop('/instructions');
-  expect(await screen.findByRole('heading', {name:'インストラクション相談',level:2})).toBeTruthy();
+  expect(await screen.findByRole('region', {name:'インストラクション相談'})).toBeTruthy();
   expect(screen.queryByRole('heading', {level:1})).toBeNull();
   pop('/settings');
   expect(await screen.findByRole('heading', {name:'設定',level:1})).toBeTruthy();
@@ -225,7 +225,7 @@ it('recognizes a direct instruction management URL', async () => {
   pop('/instructions');
   expect(parseRoute(new URL(location.href))).toEqual({kind:'instructions'});
   render(() => <App />);
-  expect(await screen.findByRole('heading', {name:'インストラクション相談',level:2})).toBeTruthy();
+  expect(await screen.findByRole('region', {name:'インストラクション相談'})).toBeTruthy();
   expect(screen.queryByRole('heading', {level:1})).toBeNull();
   expect(screen.queryByRole('heading', {name:'設定',level:1})).toBeNull();
 });

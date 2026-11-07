@@ -7,7 +7,7 @@ import Menu from './Menu';
 afterEach(() => { cleanup(); resetModelCache(); vi.unstubAllGlobals(); });
 
 it('displays the current title and only shows the home button outside home', async () => {
-  vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ installed: false, usage: 'unknown' }))));
+  vi.stubGlobal('fetch', vi.fn(async () => Response.json({agents: []})));
   const onHome = vi.fn();
   const onSettings = vi.fn();
   const onInstructions = vi.fn();

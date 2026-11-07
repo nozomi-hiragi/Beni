@@ -22,6 +22,8 @@
 
 `read-only` と `workspace-write` を提供する。`restricted`・`safe-mode`、設定読み込みの制限、許可ツールの絞り込みを維持する。組み込みツールを無効にした実行では Beni が渡した埋め込みツールのみ使う。保守コマンドではツールを無効にする。書き込みとコマンド実行は CLI のサンドボックスで制限し、サンドボックスが使えなければコマンド実行を拒否する。 [Claude の接続方式と隔離範囲](../features/llm-chat.md#claude-code)
 
+ターンが正常終了したら、SDK の `getContextUsage({ detail: 'summary' })` が返す `totalTokens` と `rawMaxTokens` を使う。サマリーは最後の応答とローカルの推計に基づく。Claude の `/context` が構造化データを返した場合も使用量を更新できる。 [SDK リファレンス](https://code.claude.com/docs/en/agent-sdk/typescript#sdkcontrolgetcontextusageresponse)
+
 ## コマンド
 
 | 登録名 | 種別 | 処理 |

@@ -4,6 +4,8 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {ClaudeRpc,ClaudeRejected,claudeModels,claudeStatus} from './claude';
 import {eventTools,toolResult} from './embedded-tools';
+import {ClaudeAgent} from './agents/claude';
+import type {AgentEvent,AgentRequest} from './agents/agent';
 
 const fake=join(import.meta.dir,'test/fake-claude.ts');
 async function until(fn:()=>boolean){for(let i=0;i<100;i++){if(fn())return;await Bun.sleep(10)}throw Error('Timed out')}
@@ -42,6 +44,26 @@ test('Claude normalizes partial text, tool boundaries, results and completion wi
 });
 test('Claude accepts complete assistant messages and final-only output',async()=>{
  for(const [prompt,text] of [['full only','Full only'],['result only','Final only']]){const run=await begin(prompt);try{await until(run.closed);expect(run.events.filter(event=>event.method==='item/agentMessage/delta').map(event=>event.params.delta).join('')).toBe(text);expect(run.events.at(-1)?.params.turn.status).toBe('completed')}finally{run.rpc.close()}}
+});
+test('Claude requests only the SDK context summary after the turn and tolerates missing data',async()=>{
+ const agent=new ClaudeAgent(()=>fake);
+ const request:AgentRequest={
+  sendId:'test-send',target:{mode:'new'},modelId:'sonnet',cwd:tmpdir(),access:'read-only',
+  builtInTools:'disabled',instructions:'',references:[],tools:[],operation:{kind:'send',text:'hello'},
+ };
+ try{
+  for(const mode of ['valid','invalid','silent']){
+   process.env.FAKE_CLAUDE_CONTEXT_SUMMARY=mode;
+   const events:AgentEvent[]=[];
+   const outcome=await agent.run(request,{
+    signal:new AbortController().signal,emit:async event=>{events.push(event)},callTool:async()=>{throw Error('Unexpected tool call')},
+   });
+   expect(outcome.status).toBe('completed');
+   expect(events[0].type).toBe('accepted');
+   expect(events.filter(event=>event.type==='context.usage')).toEqual(mode==='valid'?
+    [{type:'context.usage',data:{usedTokens:24_000,maxTokens:200_000}}]:[]);
+  }
+ }finally{delete process.env.FAKE_CLAUDE_CONTEXT_SUMMARY}
 });
 test('Claude never infers model unavailability from successful discussion or unknown failure text',async()=>{
  for(const prompt of ['discuss invalid model','unknown model error']){
@@ -223,6 +245,21 @@ test('Claude local command は専用経路でのみ slash を有効にし、保�
   }
  }finally{delete process.env.FAKE_CLAUDE_LOG;await rm(root,{recursive:true,force:true})}
 });
+test('Claude /context uses structured usage only when the local command succeeds',async()=>{
+ process.env.FAKE_CLAUDE_CONTEXT_REPORT='1';
+ try{
+  for(const mode of ['success','failure','legacy']){
+   process.env.FAKE_CLAUDE_COMMAND=mode;
+   const run=await prepareCommand();
+   try{
+    await run.started;await until(run.closed);
+    const reports=run.events.filter(event=>event.method==='thread/context/usage');
+    expect(reports.map(report=>report.params.usage)).toEqual(mode==='success'?[{usedTokens:24_000,maxTokens:200_000}]:[]);
+    expect(run.events.at(-1)?.params.turn.status).toBe(mode==='failure'?'failed':'completed');
+   }finally{run.rpc.close()}
+  }
+ }finally{delete process.env.FAKE_CLAUDE_CONTEXT_REPORT;delete process.env.FAKE_CLAUDE_COMMAND}
+});
 test('Claude local command は固定allowlistとresumeを要求し、通常ターンではslash無効を維持する',async()=>{
  for(const command of ['context extra','usage\n/compact','compact','unknown']){const run=await prepareCommand(command);try{await expect(run.started).rejects.toBeInstanceOf(ClaudeRejected);expect(run.events).toEqual([])}finally{run.rpc.close()}}
  const fresh=await prepareCommand('context',{resume:false});try{await expect(fresh.started).rejects.toBeInstanceOf(ClaudeRejected);expect(fresh.events).toEqual([])}finally{fresh.rpc.close()}
@@ -363,3 +400,124 @@ test('Claude SDK は検出したCLIで安全フラグと既定プロンプトを
   expect(run.events.at(-1)?.params.turn.status).toBe('completed');
  }finally{run.rpc.close();delete process.env.FAKE_CLAUDE_LOG;await rm(root,{recursive:true,force:true})}
 },10000);
+
+const agent = new ClaudeAgent(() => fake);
+const agentRequest = (text: string): AgentRequest => ({
+ sendId: 'send', target: {mode:'new'}, modelId: 'sonnet', cwd: tmpdir(), access: 'read-only',
+ builtInTools: 'disabled', instructions: '', references: [], tools: [], operation: {kind:'send', text},
+});
+
+test('ClaudeAgent confirms split and full assistant frames on their original stream items', async () => {
+ const text = 'Split Claude response.';
+ const firstStream: AgentEvent[] = [{type:'text.started', itemId:'split:1'}, {type:'text.delta', itemId:'split:1', delta:text}];
+ const secondStream: AgentEvent[] = [{type:'text.started', itemId:'split:2'}, {type:'text.delta', itemId:'split:2', delta:'Draft'}];
+ const first: AgentEvent = {type:'text.completed', itemId:'split:1', text};
+ const second: AgentEvent = {type:'text.completed', itemId:'split:2', text};
+ const cases: [string, AgentEvent[]][] = [
+  ['test: claude split assistant blocks', [...firstStream, first]],
+  ['test: claude repeated assistant text', [...firstStream, first, ...secondStream, second]],
+  ['test: claude full assistant blocks', [...firstStream, ...secondStream, first, second]],
+ ];
+ for (const [prompt, expected] of cases) {
+  const events: AgentEvent[] = [];
+  const result = await agent.run(agentRequest(prompt), {
+   signal: new AbortController().signal,
+   emit: async event => { events.push(event); },
+   callTool: async () => { throw Error('Unexpected tool'); },
+  });
+  expect(result).toEqual({status:'completed'});
+  expect(events.filter(event => event.type.startsWith('text.'))).toEqual(expected);
+ }
+});
+
+test('ClaudeAgent delivers usage before acceptance and confirms authoritative text in order', async () => {
+ process.env.FAKE_CLAUDE_RATE_LIMIT = '0.42';
+ try {
+  const events: AgentEvent[] = [];
+  const result = await agent.run(agentRequest('corrected text'), {
+   signal: new AbortController().signal,
+   emit: async event => { await Bun.sleep(5); events.push(event); },
+   callTool: async () => { throw Error('Unexpected tool'); },
+  });
+  const {accountKey} = await agent.getStatus();
+  expect(result).toEqual({status:'completed'});
+  expect(events).toMatchObject([
+   {type:'usage', data:{accountKey, kind:'window-update', usage:{windows:[{usedPercent:42}]}}},
+   {type:'accepted', session:{agentId:'claude', id:expect.any(String), legacySessionId:expect.any(String)}},
+   {type:'text.started', itemId:'corrected:0'},
+   {type:'text.delta', itemId:'corrected:0', delta:'Draft'},
+   {type:'text.completed', itemId:'corrected:0', text:'Final'},
+  ]);
+ } finally { delete process.env.FAKE_CLAUDE_RATE_LIMIT; }
+});
+
+test('ClaudeAgent persists acceptance before dispatching an embedded tool that arrives ahead of text', async () => {
+ let accepted = false;
+ const calls: string[] = [];
+ const result = await agent.run({...agentRequest('early embedded tool'), tools:eventTools}, {
+  signal: new AbortController().signal,
+  emit: async event => {
+   if (event.type === 'accepted') { await Bun.sleep(5); accepted = true; }
+  },
+  callTool: async ({name}) => {
+   expect(accepted).toBe(true);
+   calls.push(name);
+   return {ok:true,text:'{}'};
+  },
+ });
+ expect(result).toEqual({status:'completed'});
+ expect(calls).toEqual(['list_events','acknowledge_events']);
+});
+
+test('ClaudeAgent waits for process cleanup on abort or rejected event delivery', async () => {
+ const cwd = await mkdtemp(join(tmpdir(), 'beni-claude-agent-stop-'));
+ const log = join(cwd, 'calls.jsonl');
+ process.env.FAKE_CLAUDE_LOG = log;
+ try {
+  for (const fail of [false, true]) {
+   const controller = new AbortController();
+   const result = await agent.run({...agentRequest('wait'), cwd}, {
+    signal: controller.signal,
+    emit: async event => {
+     if (event.type !== 'accepted') return;
+     if (fail) throw Error('Save failed');
+     controller.abort();
+    },
+    callTool: async () => { throw Error('Unexpected tool'); },
+   });
+   const records = (await readFile(log, 'utf8')).trim().split('\n');
+   const {pid} = JSON.parse(records.at(-1)!);
+   expect(() => process.kill(pid, 0)).toThrow();
+   expect(result).toEqual({status:fail ? 'unknown' : 'interrupted'});
+  }
+ } finally {
+  delete process.env.FAKE_CLAUDE_LOG;
+  await rm(cwd, {recursive:true, force:true});
+ }
+});
+
+test('ClaudeAgent requires a successful CLI exit for maintenance and prefers structured usage', async () => {
+ const host = {
+  signal: new AbortController().signal,
+  emit: async () => {},
+  callTool: async () => { throw Error('Unexpected tool'); },
+ };
+ try {
+  const request: AgentRequest = {...agentRequest(''), target:{mode:'resume',session:{agentId:'claude',id:compactSession}},
+   operation:{kind:'command',name:'context',args:''}};
+  expect(await agent.run(request, host)).toEqual({status:'completed',output:'Context usage: 12%\n'});
+  process.env.FAKE_CLAUDE_COMMAND = 'failed-exit';
+  expect(await agent.run(request, host)).toEqual({status:'unknown'});
+  delete process.env.FAKE_CLAUDE_COMMAND;
+
+  process.env.FAKE_CLAUDE_USAGE_REPORT = '1';
+  process.env.FAKE_CLAUDE_RATE_LIMIT = '0.42';
+  expect(await agent.getUsage()).toMatchObject({kind:'snapshot',usage:{windows:[{usedPercent:0},{usedPercent:45}]}});
+  delete process.env.FAKE_CLAUDE_USAGE_REPORT;
+  expect(await agent.getUsage()).toMatchObject({kind:'window-update',usage:{windows:[{usedPercent:42}]}});
+ } finally {
+  delete process.env.FAKE_CLAUDE_COMMAND;
+  delete process.env.FAKE_CLAUDE_USAGE_REPORT;
+  delete process.env.FAKE_CLAUDE_RATE_LIMIT;
+ }
+});

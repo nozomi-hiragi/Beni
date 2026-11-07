@@ -1,12 +1,13 @@
-import { resetModelCache } from './model-cache';
+import { stubLegacyAgentFetch } from './test-events';
+import { resetModelCache } from '../model-cache';
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-library';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import Workspace from './Workspace';
+import Workspace from '../Workspace';
 import {FakeWebSocket, packResponse} from './test-events';
 
 // Terminal behavior is covered separately; these tests isolate task/document navigation.
-vi.mock('./components/TerminalPanel', () => ({default: () => null}));
+vi.mock('../components/TerminalPanel', () => ({default: () => null}));
 
 type Deferred<T> = { promise: Promise<T>; resolve(value: T): void };
 function deferred<T>(): Deferred<T> {
@@ -30,7 +31,7 @@ describe('Workspace task and document tabs', () => {
     const first = { id:'019a0000-0000-7100-8000-000000000065', projectId:'019a0000-0000-7000-8000-000000000018', name: '設計', phase: 'requirements', status: 'idle' };
     const second = { id:'019a0000-0000-7100-8000-000000000066', projectId:'019a0000-0000-7000-8000-000000000018', name: '画面', phase: 'requirements', status: 'idle' };
     const documents = [{ name: '指示書.md', content: '# 設計', version: 1 }, { name: '仕様.md', content: '# 仕様', version: 1 }];
-    vi.stubGlobal('fetch', vi.fn((path: string) => {
+    stubLegacyAgentFetch(vi.fn((path: string) => {
       if (path === '/api/state') return Promise.resolve(json({ projects: [], tasks: [first, second] }));
       if (path === '/api/tasks/019a0000-0000-7100-8000-000000000065') return Promise.resolve(json({ task: first, messages: [], documents }));
       if (path === '/api/tasks/019a0000-0000-7100-8000-000000000066') return Promise.resolve(json({ task: second, messages: [], documents }));
@@ -80,7 +81,7 @@ describe('Workspace task and document tabs', () => {
   it('removes the outside-click listener when the workspace is unmounted', () => {
     const add = vi.spyOn(document, 'addEventListener');
     const remove = vi.spyOn(document, 'removeEventListener');
-    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(() => {})));
+    stubLegacyAgentFetch(vi.fn(() => new Promise<Response>(() => {})));
     try {
       const view = render(() => <Workspace taskId={'019a0000-0000-7100-8000-000000000067'} onHome={() => {}} />);
       const registered = add.mock.calls.find(([type, , capture]) => type === 'click' && capture === true);
@@ -99,7 +100,7 @@ describe('Workspace task and document tabs', () => {
     const foreign = { id:'019a0000-0000-7100-8000-000000000003', projectId:'019a0000-0000-7000-8000-000000000005', name: '別プロジェクト', phase: 'requirements', status: 'idle' };
     const firstDocs = [{ name: '指示書.md', content: '# 設計', version: 1 }, { name: '仕様.md', content: '# 仕様', version: 1 }];
     const secondDocs = [{ name: '指示書.md', content: '# 画面', version: 1 }];
-    vi.stubGlobal('fetch', vi.fn((path: string, init?: RequestInit) => {
+    stubLegacyAgentFetch(vi.fn((path: string, init?: RequestInit) => {
       if (path === '/api/state' && !init) return Promise.resolve(json({ projects: [], tasks: [first, second, foreign] }));
       if (path === '/api/tasks/019a0000-0000-7100-8000-000000000001' && !init) return Promise.resolve(json({ task: first, messages: [], documents: firstDocs }));
       if (path === '/api/tasks/019a0000-0000-7100-8000-000000000002' && !init) return Promise.resolve(json({ task: second, messages: [], documents: secondDocs }));
@@ -150,7 +151,7 @@ describe('Workspace task and document tabs', () => {
     const post = deferred<Response>();
     const messages: { id: number; role: string; content: string }[] = [];
     let posts = 0;
-    vi.stubGlobal('fetch', vi.fn((path: string, init?: RequestInit) => {
+    stubLegacyAgentFetch(vi.fn((path: string, init?: RequestInit) => {
       if (path === '/api/state' && !init) return Promise.resolve(json({ projects: [], tasks: [task] }));
       if (path === '/api/tasks/019a0000-0000-7100-8000-00000000000b' && !init) return Promise.resolve(json({ task, messages: [], documents: [] }));
       if (path === '/api/chat/model') return Promise.resolve(json({id:'c',messages:[...messages],selectedModel:{id:JSON.parse(String(init?.body)).model,name:'Test'}}));
@@ -189,7 +190,7 @@ describe('Workspace task and document tabs', () => {
     const second = { id:'019a0000-0000-7100-8000-000000000016', projectId:'019a0000-0000-7000-8000-00000000000c', name: '後のタスク', phase: 'requirements', status: 'idle' };
     const slow = deferred<Response>();
     let posts = 0;
-    vi.stubGlobal('fetch', vi.fn((path: string, init?: RequestInit) => {
+    stubLegacyAgentFetch(vi.fn((path: string, init?: RequestInit) => {
       if (path === '/api/state' && !init) return Promise.resolve(json({ projects: [], tasks: [first, second] }));
       if (path === '/api/tasks/019a0000-0000-7100-8000-000000000015' && !init) return Promise.resolve(json({ task: first, messages: [], documents: [{ name: '先.md', content: '先の内容', version: 1 }] }));
       if (path === '/api/tasks/019a0000-0000-7100-8000-000000000016' && !init) return slow.promise;
@@ -215,7 +216,7 @@ describe('Workspace task and document tabs', () => {
     const task = { id:'019a0000-0000-7100-8000-00000000001f', projectId:'019a0000-0000-7000-8000-00000000000e', name: '閉じた後', phase: 'requirements', status: 'idle' };
     const post = deferred<Response>();
     const messages: { id: number; role: string; content: string }[] = [];
-    vi.stubGlobal('fetch', vi.fn((path: string, init?: RequestInit) => {
+    stubLegacyAgentFetch(vi.fn((path: string, init?: RequestInit) => {
       if (path === '/api/state' && !init) return Promise.resolve(json({ projects: [], tasks: [task] }));
       if (path === '/api/tasks/019a0000-0000-7100-8000-00000000001f' && !init) return Promise.resolve(json({ task, messages: [], documents: [] }));
       if (path === '/api/chat/model') return Promise.resolve(json({id:'c',messages:[...messages],selectedModel:{id:JSON.parse(String(init?.body)).model,name:'Test'}}));
@@ -251,7 +252,7 @@ describe('Workspace task and document tabs', () => {
     const state = deferred<Response>();
     const firstGet = deferred<Response>();
     let taskGets = 0;
-    vi.stubGlobal('fetch', vi.fn((path: string, init?: RequestInit) => {
+    stubLegacyAgentFetch(vi.fn((path: string, init?: RequestInit) => {
       if (path === '/api/state' && !init) return state.promise;
       if (path === '/api/tasks/019a0000-0000-7100-8000-000000000029' && !init) {
         taskGets++;
@@ -276,7 +277,7 @@ describe('Workspace task and document tabs', () => {
     const task = { id:'019a0000-0000-7100-8000-000000000033', projectId:'019a0000-0000-7000-8000-000000000010', name: '復元', phase: 'requirements', status: 'idle' };
     const firstGet = deferred<Response>();
     let taskGets = 0;
-    vi.stubGlobal('fetch', vi.fn((path: string, init?: RequestInit) => {
+    stubLegacyAgentFetch(vi.fn((path: string, init?: RequestInit) => {
       if (path === '/api/state' && !init) return Promise.reject(new Error('offline'));
       if (path === '/api/tasks/019a0000-0000-7100-8000-000000000033' && !init) {
         taskGets++;
@@ -297,7 +298,7 @@ describe('Workspace task and document tabs', () => {
   it('distinguishes document versions and opens the latest revision from the phase indicator', async () => {
     const task = { id:'019a0000-0000-7100-8000-00000000003d', projectId:'019a0000-0000-7000-8000-000000000011', name: '版', phase: 'requirements', status: 'idle' };
     const documents = [{ name: 'requirements.md', content: '第一版の内容', version: 1 }, { name: 'requirements.md', content: '第二版の内容', version: 2 }];
-    vi.stubGlobal('fetch', vi.fn((path: string, init?: RequestInit) => {
+    stubLegacyAgentFetch(vi.fn((path: string, init?: RequestInit) => {
       if (path === '/api/state' && !init) return Promise.resolve(json({ projects: [], tasks: [task] }));
       if (path === '/api/tasks/019a0000-0000-7100-8000-00000000003d' && !init) return Promise.resolve(json({ task, messages: [], documents }));
       if (path === `/api/tasks/${task.id}/phase`) {
@@ -331,7 +332,7 @@ it('updates the task tab and tree from the rename response without selecting a d
   if(path===`/api/tasks/${task.id}`) return Promise.resolve(json({task:{...task},documents:[]}));
   throw Error('Unexpected request');
  });
- vi.stubGlobal('fetch',fetchMock);
+ stubLegacyAgentFetch(fetchMock);
  render(()=><Workspace taskId={task.id} onTaskChange={changed} onHome={()=>{}} />);
  fireEvent.contextMenu(await screen.findByRole('tab',{name:'Before'}));fireEvent.click(screen.getByRole('menuitem',{name:'リネーム'}));
  fireEvent.input(screen.getByRole('textbox',{name:'タスク名'}),{target:{value:'After'}});fireEvent.keyDown(screen.getByRole('textbox',{name:'タスク名'}),{key:'Enter'});
@@ -359,7 +360,7 @@ it('タスクを選ばずにフォルダーを展開し、プロジェクトフ�
     if (pathname === '/api/project-file' && path === 'docs/slow.txt') return slow.promise;
     throw Error('Unexpected request');
   });
-  vi.stubGlobal('fetch', fetchMock);
+  stubLegacyAgentFetch(fetchMock);
   render(() => <Workspace projectId={projectId} onHome={() => {}} />);
 
   const toggle = () => screen.getByRole('button', { name: '文書ツリーを開閉' });

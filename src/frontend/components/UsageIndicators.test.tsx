@@ -1,3 +1,4 @@
+import { stubLegacyAgentFetch } from '../test/test-events';
 import { cleanup, render, screen } from '@solidjs/testing-library';
 import { afterEach, expect, it, vi } from 'vitest';
 import { refreshProviderStatus, resetModelCache } from '../model-cache';
@@ -25,7 +26,7 @@ it('loads cached balances for detected providers and reflects a settings refresh
       : { installed: false, usage: 'unknown' };
     return new Response(JSON.stringify(status));
   });
-  vi.stubGlobal('fetch', fetchStatus);
+  stubLegacyAgentFetch(fetchStatus);
   render(() => <UsageIndicators />);
 
   const codex = await screen.findByRole('progressbar', { name: 'Codex の利用枠' });
@@ -52,7 +53,7 @@ it('loads cached balances for detected providers and reflects a settings refresh
 });
 
 it('uses a shared weekly balance as fallback and leaves unavailable percentages unknown', async () => {
-  vi.stubGlobal('fetch', vi.fn(async (path: string) => new Response(JSON.stringify({
+  stubLegacyAgentFetch(vi.fn(async (path: string) => new Response(JSON.stringify({
     installed: true,
     usage: path === '/api/codex/status'
       ? usage([{ label: '7日枠', usedPercent: 40 }])

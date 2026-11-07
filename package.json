@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "start": "bun run build && bun src/backend/server.ts",
-    "test": "bun run build && bun test src/backend/server.test.ts src/backend/store/index.test.ts src/backend/project-events.test.ts src/backend/chat.test.ts src/backend/claude.test.ts src/backend/terminal.test.ts && bun run test:ui",
+    "test": "bun run build && bun test src/backend/server.test.ts src/backend/store/index.test.ts src/backend/project-events.test.ts src/backend/chat.test.ts src/backend/claude.test.ts src/backend/agents/*.test.ts src/backend/terminal.test.ts && bun run test:ui",
     "build:css": "tailwindcss -i ./src/frontend/tailwind.css -o ./dist/frontend/generated.css --minify",
     "typecheck": "tsc -p tsconfig.json",
     "build:ui": "bun run typecheck && vite build",

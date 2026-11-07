@@ -4,7 +4,7 @@ import { createStore, reconcile } from 'solid-js/store';
 import { api, ApiError, loadDocumentProvenance } from './api';
 import { isTaskPhase, type TaskPhase } from '../shared/task-phase';
 import { communication } from './communication';
-import ChatPanel from './components/ChatPanel';
+import ChatPanel, { type ChatTabStatus } from './components/ChatPanel';
 import MarkdownPreview from './components/MarkdownPreview';
 import PromptTableMarkdownPreview from './components/PromptTableMarkdownPreview';
 import PhaseIndicator, { phaseDocuments } from './components/PhaseIndicator';
@@ -48,7 +48,43 @@ export default function Workspace(props: WorkspaceProps) {
   const [detailState, setDetailState] = createStore<{ value?: TaskDetail }>({});
   const detail = () => detailState.value;
   const setDetail = (value: TaskDetail | undefined) => setDetailState('value', value === undefined ? undefined : reconcile(value, { key: 'id' }));
-  const [activeTask, setActiveTask] = createSignal<string | undefined>(props.taskId);
+  const [activeTask, setActiveTaskId] = createSignal<string | undefined>(props.taskId);
+  const [chatTabStatus, setChatTabStatus] = createSignal<ChatTabStatus>();
+  const [pendingChatStatus, setPendingChatStatus] = createSignal<string>();
+  const activeChatTab = () => activeTask() ?? 'general';
+  function setActiveTask(id: string | undefined) {
+    if (id === untrack(activeTask)) return;
+    batch(() => { setPendingChatStatus(undefined); setChatTabStatus(undefined); setLoadError(''); setActiveTaskId(id); });
+  }
+  function registerChatTabStatus(taskId: string | undefined, status: ChatTabStatus, failed = false) {
+    if (taskId !== untrack(activeTask)) return;
+    batch(() => {
+      if (failed) setPendingChatStatus(undefined);
+      setChatTabStatus(status);
+    });
+  }
+  function actionsForChatTab(id: string) {
+    const task = taskOptions().find(item => item.id === id);
+    if (!projectId() || (task && !isTaskPhase(task.phase))) return undefined;
+    const active = id === activeChatTab();
+    const status = active ? chatTabStatus() : undefined;
+    return [{
+      id: 'status',
+      label: '状態を表示',
+      disabled: active && (!status || status.disabled),
+      run: () => {
+        if (id === activeChatTab()) {
+          chatTabStatus()?.open();
+          return;
+        }
+        // 非選択タブの履歴は状態表示を選んだときに読み込む。
+        batch(() => {
+          selectChatTab(id);
+          if (activeChatTab() === id) setPendingChatStatus(id);
+        });
+      },
+    }];
+  }
   const [viewPhase, setViewPhase] = createSignal<TaskPhase>();
   const actualPhase = createMemo(() => {
     const phase = detail()?.task.phase;
@@ -73,6 +109,20 @@ export default function Workspace(props: WorkspaceProps) {
   const [documentTreeOpen, setDocumentTreeOpen] = createSignal(false);
   const [loading, setLoading] = createSignal(true);
   const [loadError, setLoadError] = createSignal('');
+  createEffect(() => {
+    const id = pendingChatStatus();
+    if (id === undefined) return;
+    const task = detail()?.task;
+    const taskUnavailable = id !== 'general' && (loadError() || (task?.id === id && !isTaskPhase(task.phase)));
+    if (id !== activeChatTab() || taskUnavailable) {
+      setPendingChatStatus(undefined);
+      return;
+    }
+    const status = chatTabStatus();
+    if (!status || status.disabled) return;
+    setPendingChatStatus(undefined);
+    untrack(status.open);
+  });
   const [openDocuments, setOpenDocuments] = createSignal<string[]>([]);
   const [activeDocument, setActiveDocument] = createSignal<string>();
   const [openFiles, setOpenFiles] = createSignal<string[]>([]);
@@ -208,7 +258,6 @@ export default function Workspace(props: WorkspaceProps) {
       batch(() => { setDetail(undefined); restoreDocumentTabs(taskId); });
     }
     setLoading(true);
-    setLoadError('');
     const load = async () => {
       if (fetching) { reload = true; return } fetching = true;
       do {
@@ -275,9 +324,6 @@ export default function Workspace(props: WorkspaceProps) {
     const project = projectId();
     if (!project) throw Error('プロジェクトが見つかりません');
     const task = await api<Task>(`/api/tasks/${id}/rename`, { projectId: project, name });
-    applyRenamedTask(task);
-  }
-  function applyRenamedTask(task: Task) {
     if (!alive || deletedTasks.has(task.id)) return;
     batch(() => {
       setTasks(previous => previous.some(item => item.id === task.id) ? previous.map(item => item.id === task.id ? task : item) : [...previous, task]);
@@ -305,6 +351,10 @@ export default function Workspace(props: WorkspaceProps) {
     setOpenTasks(previous => previous.includes(id) ? previous : [...previous, id]);
     setActiveTask(id);
     props.onTaskChange?.(id, taskOptions().find(task => task.id === id));
+  }
+  function selectChatTab(id: string) {
+    if (id === 'general') { setActiveTask(undefined); props.onTaskChange?.(undefined); }
+    else openTask(id);
   }
   function closeTask(id: string) {
     const remaining = openTasks().filter(item => item !== id);
@@ -353,17 +403,17 @@ export default function Workspace(props: WorkspaceProps) {
   return <section ref={workspace} class="workspace mx-auto grid h-auto min-h-[34rem] min-w-0 gap-4 px-2 py-2" style={{ "--left-ratio": `${leftRatio()}fr`, "--right-ratio": `${100 - leftRatio()}fr` }}>
     <div ref={leftPanels} class="workspace-left grid min-h-0 min-w-0 gap-4" classList={{ "workspace-left-terminal": projectId() !== undefined }} style={{ "--chat-ratio": `${chatRatio()}fr`, "--terminal-ratio": `${100 - chatRatio()}fr` }}>
       <section class="card card-border border-base-300 bg-base-100 shadow-sm min-h-[20rem] min-w-0 overflow-hidden lg:min-h-0" aria-label="タスクチャット">
-        <TabBar onDelete={deleteTask} onRename={renameTask} label="チャット" tabs={[{ id: 'general', label: 'General', closable: false }, ...openTasks().map(id => ({ id: String(id), label: taskName(id), renameable: true, deletable: true }))]} activeId={activeTask() === undefined ? 'general' : String(activeTask())} onSelect={id => id === 'general' ? (setActiveTask(undefined), props.onTaskChange?.(undefined)) : openTask(id)} onClose={id => { if (id !== 'general') closeTask(id); }} left={toggle('タスクツリーを開閉', taskTreeOpen(), 'task-tree', () => setTaskTreeOpen(value => !value), element => { taskTreeToggle = element; })} />
+        <TabBar onDelete={deleteTask} onRename={renameTask} label="チャット" tabs={[{ id: 'general', label: 'General', closable: false }, ...openTasks().map(id => ({ id: String(id), label: taskName(id), renameable: true, deletable: true }))]} activeId={activeChatTab()} onSelect={selectChatTab} contextActions={actionsForChatTab} onClose={id => { if (id !== 'general') closeTask(id); }} left={toggle('タスクツリーを開閉', taskTreeOpen(), 'task-tree', () => setTaskTreeOpen(value => !value), element => { taskTreeToggle = element; })} />
         <div class="relative flex min-h-0 flex-1 flex-col overflow-auto">
-          <Show when={taskTreeOpen()}><TreeView id="task-tree" label="タスク" nodes={[{ id: 'general', label: 'General' }, ...taskOptions().map(task => ({ id: String(task.id), label: taskLabel(task) })), ...(props.taskId !== undefined && !deletedTasks.has(props.taskId) && !taskOptions().some(task => task.id === props.taskId) ? [{ id: String(props.taskId), label: taskName(props.taskId) }] : [])]} onSelect={id => { if (id === 'general') { setActiveTask(undefined); props.onTaskChange?.(undefined); } else openTask(id); setTaskTreeOpen(false); }} /></Show>
+          <Show when={taskTreeOpen()}><TreeView id="task-tree" label="タスク" nodes={[{ id: 'general', label: 'General' }, ...taskOptions().map(task => ({ id: String(task.id), label: taskLabel(task) })), ...(props.taskId !== undefined && !deletedTasks.has(props.taskId) && !taskOptions().some(task => task.id === props.taskId) ? [{ id: String(props.taskId), label: taskName(props.taskId) }] : [])]} onSelect={id => { selectChatTab(id); setTaskTreeOpen(false); }} /></Show>
           <Show when={taskTreeOpen() && treeError()}><p role="alert" class="relative z-20 m-2 text-sm text-error">{treeError()}</p></Show>
-          <Show when={activeTask() === undefined && projectId() !== undefined}><ChatPanel projectId={projectId()!} /></Show>
+          <Show when={activeTask() === undefined && projectId() !== undefined}><ChatPanel projectId={projectId()!} onTabStatusChange={registerChatTabStatus} /></Show>
           <Show when={activeTask() !== undefined}>
             <Show when={loadError()}><div role="alert" class="alert alert-error text-sm">{loadError()}</div></Show>
             <Show when={loading() && !detail()}><p class="p-4 text-sm text-base-content/60">読み込み中...</p></Show>
             <Show when={detail() && detail()?.task.id === activeTask()}>
-              <PhaseIndicator phase={detail()!.task.phase} viewPhase={chatPhase()} onViewPhaseChange={setViewPhase} advancing={advancing()} canStart={!!detail()?.canStart && implementationAvailable()} canComplete={canComplete()} completed={detail()?.task.status === 'completed'} busy={chatBusy()} modelSelect={<select class="select select-bordered select-sm w-auto min-w-0" style={{ 'field-sizing': 'content' }} aria-label="実装担当モデル" value={implementationModel() ? modelValue(implementationModel()!) : ''} disabled={advancing() || !availableModels().length} onChange={event => { const model = availableModels().find(item => modelValue(item) === event.currentTarget.value); if (model) chooseModel(implementationScope(), model); }}>
-                <Show when={implementationModel() && !implementationAvailable()}><option value={modelValue(implementationModel()!)} disabled>⚠️ {modelLabel(implementationModel()!.name, implementationModel()!.provider)}</option></Show>
+              <PhaseIndicator phase={detail()!.task.phase} viewPhase={chatPhase()} onViewPhaseChange={setViewPhase} advancing={advancing()} canStart={!!detail()?.canStart && implementationAvailable()} canComplete={canComplete()} completed={detail()?.task.status === 'completed'} busy={chatBusy()} modelSelect={<select class="select select-bordered select-sm w-auto min-w-0" style={{ 'field-sizing': 'content' }} aria-label="実装担当モデル" value={implementationModel() ? modelValue(implementationModel()!) : ''} disabled={advancing() || !availableModels().length} onChange={event => { const model = availableModels().find(item => modelValue(item) === event.currentTarget.value); if (model && providerReady(model.provider)) chooseModel(implementationScope(), model); }}>
+                <Show when={implementationModel() && !implementationAvailable()}><option value={modelValue(implementationModel()!)} selected disabled>⚠️ {modelLabel(implementationModel()!.name, implementationModel()!.provider)}</option></Show>
                 <Show when={!implementationModel()}><option value="">未確認</option></Show>
                 <For each={availableModels().filter(item => implementationAvailable() || modelValue(item) !== (implementationModel() ? modelValue(implementationModel()!) : ''))}>{item => <option value={modelValue(item)} selected={modelValue(item) === (implementationModel() ? modelValue(implementationModel()!) : '')} disabled={!providerReady(item.provider)}>{modelLabel(item.name, item.provider)}</option>}</For>
               </select>} onChange={async target => {
@@ -413,7 +463,7 @@ export default function Workspace(props: WorkspaceProps) {
                   </Show>
                 </div>
               }</Show>
-              <Show when={isTaskPhase(detail()?.task.phase)}><ChatPanel onTaskRename={applyRenamedTask} readOnly={chatPhase() === 'execution' || actualPhase() === 'finalization' || detail()?.task.status === 'completed' || reviewInProgress()} onBusyChange={setChatBusy} onModelUnavailable={(model, provider) => { if (detail()?.task.phase === 'execution') rejectModel(implementationScope(), model, provider); }} projectId={detail()!.task.projectId} taskId={activeTask()} phase={chatPhase()} /></Show>
+              <Show when={isTaskPhase(detail()?.task.phase)}><ChatPanel onTabStatusChange={registerChatTabStatus} readOnly={chatPhase() === 'execution' || actualPhase() === 'finalization' || detail()?.task.status === 'completed' || reviewInProgress()} onBusyChange={setChatBusy} onModelUnavailable={(model, provider) => { if (detail()?.task.phase === 'execution') rejectModel(implementationScope(), model, provider); }} projectId={detail()!.task.projectId} taskId={activeTask()} phase={chatPhase()} /></Show>
             </Show>
           </Show>
         </div>

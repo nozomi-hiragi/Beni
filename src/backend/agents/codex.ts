@@ -1,0 +1,552 @@
+import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { createInterface } from 'node:readline';
+import { toolResult, type EmbeddedToolResult } from '../embedded-tools';
+import { codexRateLimits } from '../rate-limits';
+import { contextUsageFromCounts, type ContextUsage } from '../../shared/agent';
+import type {
+ Agent, AgentCommand, AgentFailureCode, AgentHost, AgentModel, AgentOutcome, AgentRequest,
+ AgentSession, AgentStatus, AgentToolEvent, AgentUsage,
+} from './agent';
+
+const modelErrors = ['model_not_found', 'model_not_supported', 'model_not_available', 'unsupported_model'];
+const modelRejected = (error: any) => modelErrors.includes(error?.data?.code) || modelErrors.includes(error?.code);
+const toolTypes = new Set(['commandExecution', 'fileChange', 'mcpToolCall', 'dynamicToolCall', 'functionCallOutput', 'webSearch', 'imageView', 'imageGeneration']);
+const disabledFeatures = ['apps', 'plugins', 'multi_agent', 'browser_use', 'computer_use', 'hooks', 'skill_mcp_dependency_install'];
+const scopedFeatures = ['shell_tool', 'code_mode_host'];
+const workspaceSandbox = {
+ network_access: false,
+ exclude_slash_tmp: true,
+ exclude_tmpdir_env_var: true,
+ writable_roots: [],
+};
+const now = () => new Date().toISOString();
+const nonempty = (value: unknown): value is string => typeof value === 'string' && value.length > 0;
+const encode = (value: unknown) => typeof value === 'string' ? value : JSON.stringify(value);
+const failed = (code: AgentFailureCode): AgentOutcome => ({ status: 'failed', code });
+const unknown: AgentOutcome = { status: 'unknown' };
+const interrupted: AgentOutcome = { status: 'interrupted' };
+
+class Rejected extends Error {
+ constructor(readonly code: AgentFailureCode) { super('Codex request rejected'); }
+}
+
+class CodexRpc {
+ private child: ChildProcessWithoutNullStreams;
+ private next = 0;
+ private closing = false;
+ private pending = new Map<number, {
+  resumeThreadId?: string;
+  resolve: (value: any) => void;
+  reject: (error: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+ }>();
+ readonly closed: Promise<void>;
+ onEvent: (method: string, params: any) => void = () => {};
+ onToolCall: (params: any) => Promise<EmbeddedToolResult> = async () => toolResult({ error: 'Unsupported tool' }, false);
+
+ constructor(executable: string, config?: { servers?: readonly string[]; toolsEnabled?: boolean }) {
+  const args = config ? [
+   '-c', 'forced_login_method="chatgpt"',
+   ...scopedFeatures.flatMap(name => [config.toolsEnabled ? '--enable' : '--disable', name]),
+   ...disabledFeatures.flatMap(name => ['--disable', name]),
+   '-c', 'web_search="disabled"',
+   '-c', 'sandbox_mode="read-only"',
+   // Native review inherits the thread sandbox instead of receiving a turn policy.
+   ...Object.entries(workspaceSandbox).flatMap(([key, value]) => ['-c', `sandbox_workspace_write.${key}=${JSON.stringify(value)}`]),
+   ...(config.servers ?? []).flatMap(name => ['-c', `mcp_servers.${name}.enabled=false`]),
+   'app-server',
+  ] : ['app-server'];
+  this.child = spawn(executable, args, { stdio: ['pipe', 'pipe', 'pipe'] });
+  this.child.stderr.resume();
+  this.child.stdin.on('error', () => {});
+  createInterface({ input: this.child.stdout }).on('line', line => this.receive(line));
+  this.child.on('error', () => {});
+  // close follows stdout, so a final notification flushed before exit is still processed.
+  this.closed = new Promise(resolve => this.child.once('close', () => {
+   this.closing = true;
+   for (const request of this.pending.values()) {
+    clearTimeout(request.timer);
+    request.reject(Error('Connection closed'));
+   }
+   this.pending.clear();
+   resolve();
+  }));
+ }
+
+ private receive(line: string) {
+  if (this.closing) return;
+  let message: any;
+  try { message = JSON.parse(line); } catch { return; }
+  if (!message || typeof message !== 'object') return;
+  const { id, method, params } = message;
+  if ((typeof id === 'string' || typeof id === 'number') && typeof method === 'string') {
+   if (method === 'item/tool/call') {
+    void this.onToolCall(params)
+     .then(result => this.write({ id, result }))
+     .catch(() => this.write({ id, result: toolResult({ error: 'Embedded tool failed' }, false) }));
+   } else {
+    this.write({ id, error: { code: -32601, message: 'Unsupported request' } });
+   }
+   return;
+  }
+  if (typeof id === 'number') {
+   const request = this.pending.get(id);
+   if (!request) return;
+   this.pending.delete(id);
+   clearTimeout(request.timer);
+   const { error, result } = message;
+   if (!error) {
+    request.resolve(result);
+    return;
+   }
+   const { resumeThreadId } = request;
+   const missing = resumeThreadId !== undefined && (error?.data?.code === 'thread_not_found' ||
+    error?.code === -32600 && error?.message === `no rollout found for thread id ${resumeThreadId}`);
+   request.reject(new Rejected(modelRejected(error) ? 'model-unavailable' : missing ? 'session-missing' : 'rejected'));
+   return;
+  }
+  if (typeof method === 'string') this.onEvent(method, params);
+ }
+
+ private write(message: object) {
+  if (!this.closing) this.child.stdin.write(JSON.stringify(message) + '\n');
+ }
+
+ request(method: string, params: any, timeout = 15000): Promise<any> {
+  if (this.closing) return Promise.reject(Error('Connection closed'));
+  return new Promise((resolve, reject) => {
+   const id = ++this.next;
+   const timer = setTimeout(() => {
+    this.pending.delete(id);
+    reject(Error('Request timed out'));
+   }, timeout);
+   this.pending.set(id, { resolve, reject, timer, resumeThreadId: method === 'thread/resume' ? params.threadId : undefined });
+   this.child.stdin.write(JSON.stringify({ id, method, params }) + '\n', error => {
+    if (!error) return;
+    clearTimeout(timer);
+    this.pending.delete(id);
+    reject(Error('Connection closed'));
+   });
+  });
+ }
+
+ async init() {
+  await this.request('initialize', {
+   clientInfo: { name: 'beni', title: 'Beni', version: '0.2.0' },
+   capabilities: { experimentalApi: true },
+  });
+  this.write({ method: 'initialized', params: {} });
+ }
+
+ close() {
+  if (this.closing) return this.closed;
+  this.closing = true;
+  this.child.kill();
+  const timeout = setTimeout(() => this.child.kill('SIGKILL'), 3000);
+  timeout.unref();
+  return this.closed.finally(() => clearTimeout(timeout));
+ }
+}
+
+async function readAccount(rpc: CodexRpc): Promise<Pick<AgentStatus, 'auth' | 'accountKey'>> {
+ const { account } = await rpc.request('account/read', { refreshToken: false });
+ const auth = account?.type === 'chatgpt' ? 'subscription' : account?.type === 'apiKey' ? 'api-key' : account ? 'other' : 'none';
+ const accountKey = auth === 'subscription' && nonempty(account.email)
+  ? createHash('sha256').update(account.email).digest('hex') : undefined;
+ return { auth, ...(accountKey === undefined ? {} : { accountKey }) };
+}
+
+function usageSnapshot(params: unknown, accountKey?: string): AgentUsage {
+ const windows = codexRateLimits(params);
+ return { accountKey, kind: 'snapshot', usage: windows.length ? { observedAt: now(), windows } : 'unknown' };
+}
+
+async function withRestrictedRpc<T>(
+ executable: string,
+ request: AgentRequest,
+ signal: AbortSignal,
+ run: (rpc: CodexRpc, accountKey?: string) => Promise<T>,
+): Promise<T> {
+ const { cwd } = request;
+ const toolsEnabled = request.access === 'workspace-write' && request.builtInTools === 'phase-default';
+ let rpc = new CodexRpc(executable, {});
+ const stopSetup = () => { void rpc.close(); };
+ signal.addEventListener('abort', stopSetup, { once: true });
+ try {
+  signal.throwIfAborted();
+  await rpc.init();
+  const { config: probe } = await rpc.request('config/read', { cwd });
+  const servers = Object.keys(probe.mcp_servers ?? {});
+  if (!servers.every(name => /^[A-Za-z0-9_-]+$/.test(name))) throw Error('Unsafe configuration');
+  await rpc.close();
+  signal.throwIfAborted();
+  rpc = new CodexRpc(executable, { servers, toolsEnabled });
+  await rpc.init();
+  const { config } = await rpc.request('config/read', { cwd });
+  const workspace = config.sandbox_workspace_write;
+  if ((config.model_provider != null && config.model_provider !== 'openai') ||
+   Object.values(config.mcp_servers ?? {}).some((server: any) => server?.enabled !== false) ||
+   disabledFeatures.some(name => config.features?.[name] !== false) ||
+   scopedFeatures.some(name => config.features?.[name] !== toolsEnabled) ||
+   config.web_search !== 'disabled' || config.sandbox_mode !== 'read-only' ||
+   workspace?.network_access !== false || workspace.exclude_slash_tmp !== true ||
+   workspace.exclude_tmpdir_env_var !== true ||
+   !Array.isArray(workspace.writable_roots) || workspace.writable_roots.length !== 0) throw Error('Unsafe configuration');
+  const { auth, accountKey } = await readAccount(rpc);
+  if (auth !== 'subscription') throw Error('Unavailable authentication');
+  signal.throwIfAborted();
+  signal.removeEventListener('abort', stopSetup);
+  return await run(rpc, accountKey);
+ } finally {
+  signal.removeEventListener('abort', stopSetup);
+  await rpc.close();
+ }
+}
+
+function toolEvent(item: any, started: boolean): AgentToolEvent {
+ const name = item.type === 'commandExecution' ? 'command' : item.tool ?? item.name ?? item.type;
+ const state = started ? 'running' :
+  item.status === 'completed' ? 'completed' : item.status === 'interrupted' ? 'interrupted' :
+  item.status === 'failed' || item.status === 'declined' ? 'failed' : 'unknown';
+ const targetPaths = [
+  ...(Array.isArray(item.changes) ? item.changes.map((change: any) => change?.path) : []),
+  item.arguments?.file_path, item.arguments?.path,
+ ].filter((path): path is string => typeof path === 'string');
+ return {
+  type: 'tool', itemId: item.id, name: typeof name === 'string' ? name : item.type, state, targetPaths,
+  input: encode(item.command ?? item.arguments ?? item.changes ?? null),
+  output: encode(item.aggregatedOutput ?? item.contentItems ?? item.output ?? item.result ?? item.error ?? null),
+  ...(Number.isInteger(item.exitCode) ? { exitCode: item.exitCode } : {}),
+ };
+}
+
+function completedTurn(turn: any, compact: boolean, compacted: boolean): AgentOutcome {
+ if (turn.status === 'completed') return !compact || compacted ? { status: 'completed' } : unknown;
+ if (turn.status === 'interrupted') return interrupted;
+ if (turn.status !== 'failed') return unknown;
+ if (compact && turn.error?.code === 'COMPACTION_UNAVAILABLE') return failed('compaction-unavailable');
+ if (compact && turn.error?.code === 'COMPACTION_NOT_NEEDED') return failed('nothing-to-compact');
+ return failed(modelRejected(turn.error) ? 'model-unavailable' : 'execution-failed');
+}
+
+async function runTurn(rpc: CodexRpc, request: AgentRequest, host: AgentHost, accountKey?: string): Promise<AgentOutcome> {
+ const { access, cwd, instructions, modelId, operation, target, tools } = request;
+ const name = operation.kind === 'command' ? operation.name : undefined;
+ const args = operation.kind === 'command' ? operation.args.trim() : '';
+ const compact = name === 'compact';
+ const review = name === 'review';
+ let dispatched = false;
+ let acknowledged = false;
+ let threadId: string | undefined;
+ let turnId: string | undefined;
+ let session: AgentSession | null = null;
+ let compacted = false;
+ let compactingItem: string | undefined;
+ let contextUsage: ContextUsage | undefined;
+ let outcome: AgentOutcome | undefined;
+ let queue = Promise.resolve();
+ const result = Promise.withResolvers<AgentOutcome>();
+ const accepted = Promise.withResolvers<boolean>();
+ const registeredTools = new Set(tools.map(tool => tool.name));
+ const reviewMessages = new Map<string, { text: string; complete: boolean }>();
+ let reviewCompleted = false;
+ let completionTimer: ReturnType<typeof setTimeout> | undefined;
+ let interruptTimer: ReturnType<typeof setTimeout> | undefined;
+ let interruptSent = false;
+
+ const finish = (value: AgentOutcome) => {
+  if (outcome) return;
+  outcome = value;
+  accepted.resolve(false);
+  result.resolve(value);
+ };
+ const enqueue = (job: () => Promise<void>) => {
+  queue = queue.then(async () => { if (!outcome) await job(); }).catch(() => finish(unknown));
+  return queue;
+ };
+ const interrupt = () => {
+  if (outcome || interruptSent) return;
+  if (!dispatched) {
+   finish(interrupted);
+   void rpc.close();
+  } else if (turnId && threadId) {
+   interruptSent = true;
+   interruptTimer = setTimeout(() => finish(unknown), 15000);
+   // Completion is authoritative even if the interrupt request itself fails.
+   void rpc.request('turn/interrupt', { threadId, turnId }).catch(() => {});
+  } else if (acknowledged && compact) {
+   finish(unknown);
+  }
+ };
+ const accept = () => {
+  enqueue(async () => { await host.emit({ type: 'accepted', session }); });
+  accepted.resolve(true);
+  if (host.signal.aborted) interrupt();
+ };
+
+ // Keep wire order for notifications and tool calls, even before the start response.
+ // A separate queue allows acceptance to be published before draining early activity.
+ let events = Promise.resolve();
+ const enqueueEvent = (job: () => Promise<void>) => {
+  events = events.then(async () => {
+   if (await accepted.promise && !outcome) await enqueue(job);
+  });
+  return events;
+ };
+
+ rpc.onEvent = (method, params) => {
+  if (outcome) return;
+  if (method === 'account/rateLimits/updated') {
+   const data = usageSnapshot(params, accountKey);
+   const emit = () => host.emit({ type: 'usage', data });
+   if (data.usage !== 'unknown') {
+    if (turnId) enqueueEvent(emit);
+    else enqueue(emit);
+   }
+   return;
+  }
+  if (!dispatched || params?.threadId !== threadId) return;
+  if (compact && method === 'turn/started' && !turnId && nonempty(params.turn?.id)) {
+   turnId = params.turn.id;
+   if (acknowledged) accept();
+  }
+  enqueueEvent(async () => {
+   if (method === 'turn/completed' && params.turn?.id === turnId &&
+    (params.turnId === undefined || params.turnId === turnId)) {
+    const value = completedTurn(params.turn, compact, compacted);
+    if (value.status === 'completed' && session && contextUsage) {
+     await host.emit({ type: 'context.usage', data: contextUsage });
+    }
+    finish(value);
+    return;
+   }
+   if (params.turnId !== turnId) return;
+   const item = params.item;
+   if (method === 'thread/tokenUsage/updated') {
+    if (!compactingItem && (!compact || compacted)) {
+     contextUsage = contextUsageFromCounts(params.tokenUsage?.last?.totalTokens, params.tokenUsage?.modelContextWindow);
+    }
+    return;
+   }
+   if (item?.type === 'contextCompaction' && nonempty(item.id)) {
+    if (method === 'item/started') {
+     compactingItem = item.id;
+     contextUsage = undefined;
+    } else if (method === 'item/completed' && (!compactingItem || compactingItem === item.id)) {
+     compactingItem = undefined;
+     compacted = true;
+     // Earlier reports can include the compaction request's input, rather than the new context.
+     contextUsage = undefined;
+    }
+    return;
+   }
+   if (compact) return;
+   if (method === 'item/agentMessage/delta' && nonempty(params.itemId) && typeof params.delta === 'string') {
+    if (review) {
+     const previous = reviewMessages.get(params.itemId);
+     if (previous?.complete) return;
+     const text = (previous?.text ?? '') + params.delta;
+     if (text.length <= 1048576) reviewMessages.set(params.itemId, { text, complete: false });
+    }
+    await host.emit({ type: 'text.delta', itemId: params.itemId, delta: params.delta });
+    return;
+   }
+   if ((method !== 'item/started' && method !== 'item/completed') || !nonempty(item?.id)) return;
+   const started = method === 'item/started';
+   if (item.type === 'agentMessage') {
+    if (started) await host.emit({ type: 'text.started', itemId: item.id });
+    else if (typeof item.text === 'string') {
+     if (review) {
+      const previous = reviewMessages.get(item.id);
+      if (previous?.complete && previous.text === item.text) return;
+      reviewMessages.set(item.id, { text: item.text, complete: true });
+     }
+     await host.emit({ type: 'text.completed', itemId: item.id, text: item.text });
+    }
+   } else if (review && !started && item.type === 'exitedReviewMode' && typeof item.review === 'string' && !reviewCompleted) {
+    reviewCompleted = true;
+    const streamed = [...reviewMessages].find(([, message]) => message.text === item.review);
+    if (!streamed?.[1].complete) {
+     const itemId = streamed?.[0] ?? item.id;
+     reviewMessages.set(itemId, { text: item.review, complete: true });
+     await host.emit({ type: 'text.completed', itemId, text: item.review });
+    }
+   } else if (toolTypes.has(item.type)) {
+    await host.emit(toolEvent(item, started));
+   }
+  });
+ };
+ rpc.onToolCall = async params => {
+  let reply = toolResult({ error: 'Unsupported tool' }, false);
+  if (!dispatched || outcome || compact || params?.threadId !== threadId ||
+   params.namespace != null || !nonempty(params.turnId) ||
+   !nonempty(params.callId) || !registeredTools.has(params.tool)) return reply;
+  await enqueueEvent(async () => {
+   if (params.turnId !== turnId || host.signal.aborted) return;
+   try {
+    const { ok, text } = await host.callTool({ id: params.callId, name: params.tool, input: params.arguments });
+    reply = { success: ok, contentItems: [{ type: 'inputText', text }] };
+   } catch {
+    reply = toolResult({ error: 'Embedded tool failed' }, false);
+   }
+  });
+  return reply;
+ };
+ void rpc.closed.then(async () => {
+  if (acknowledged && turnId) await events;
+  finish(dispatched ? unknown : failed('unavailable'));
+ });
+ host.signal.addEventListener('abort', interrupt, { once: true });
+
+ try {
+  host.signal.throwIfAborted();
+  const options = {
+   cwd, model: modelId, approvalPolicy: 'never', sandbox: access,
+   ...(instructions ? { developerInstructions: instructions } : {}),
+  };
+  const opened = target.mode === 'resume'
+   ? await rpc.request('thread/resume', { ...options, threadId: target.session.id, excludeTurns: true })
+   : await rpc.request('thread/start', {
+    ...options, ...(target.mode === 'ephemeral' ? { ephemeral: true } : {}),
+    ...(tools.length ? { dynamicTools: tools.map(tool => ({ ...tool, type: 'function' })) } : {}),
+   });
+  threadId = opened?.thread?.id;
+  if (!nonempty(threadId) || target.mode === 'resume' && threadId !== target.session.id) return failed('unavailable');
+  if (target.mode === 'ephemeral' && opened.thread.ephemeral !== true) return failed('unsupported');
+  if (target.mode !== 'ephemeral') {
+   const legacySessionId = opened.thread.sessionId ?? (target.mode === 'resume' ? target.session.legacySessionId : undefined);
+   session = { agentId: 'codex', id: threadId, ...(nonempty(legacySessionId) ? { legacySessionId } : {}) };
+  }
+  if (outcome) return outcome;
+  dispatched = true;
+  let response;
+  if (compact) {
+   completionTimer = setTimeout(() => finish(unknown), 60000);
+   response = await rpc.request('thread/compact/start', { threadId });
+  } else if (review) {
+   response = await rpc.request('review/start', {
+    threadId, delivery: 'inline',
+    target: args ? { type: 'custom', instructions: args } : { type: 'uncommittedChanges' },
+   });
+   if (response?.reviewThreadId !== undefined && response.reviewThreadId !== threadId) return unknown;
+  } else {
+   const recap = '会話のここまでの目的、決定事項、未解決事項、次の作業を簡潔に日本語で要約してください。';
+   const text = operation.kind === 'send' ? operation.text : recap + (args ? '\n' + args : '');
+   response = await rpc.request('turn/start', {
+    threadId, model: modelId, cwd, approvalPolicy: 'never',
+    sandboxPolicy: access === 'workspace-write'
+     ? { type: 'workspaceWrite', writableRoots: [cwd], networkAccess: false, excludeTmpdirEnvVar: true, excludeSlashTmp: true }
+     : { type: 'readOnly', networkAccess: false },
+    input: [text, ...request.references].map(text => ({ type: 'text', text, text_elements: [] })),
+   });
+  }
+  const responseTurn = response?.turn?.id;
+  if ((!compact || responseTurn !== undefined) && (!nonempty(responseTurn) || turnId && turnId !== responseTurn)) return unknown;
+  turnId ??= responseTurn;
+  acknowledged = true;
+  if (!outcome && turnId) accept();
+  else if (host.signal.aborted) interrupt();
+  return await result.promise;
+ } catch (error) {
+  if (outcome) return outcome;
+  if (!dispatched && host.signal.aborted) return interrupted;
+  if (error instanceof Rejected) return failed(error.code);
+  return dispatched ? unknown : failed('unavailable');
+ } finally {
+  host.signal.removeEventListener('abort', interrupt);
+  clearTimeout(completionTimer);
+  clearTimeout(interruptTimer);
+  accepted.resolve(false);
+  await events;
+  await queue;
+ }
+}
+
+export class CodexAgent implements Agent {
+ readonly id = 'codex';
+ readonly name = 'Codex';
+ readonly accessModes = ['read-only', 'workspace-write'] as const;
+ readonly supportsEmbeddedTools = true;
+ readonly commands: readonly AgentCommand[] = [
+  { name: 'compact', description: '会話を圧縮', kind: 'maintenance', requiresSession: true },
+  { name: 'review', description: '変更をレビュー', kind: 'generation', requiresSession: false, argumentHint: '[対象]' },
+  { name: 'recap', description: '会話を要約', kind: 'generation', requiresSession: false },
+ ];
+
+ constructor(private readonly executable: () => string | null = () => Bun.which('codex')) {}
+
+ async getStatus(): Promise<AgentStatus> {
+  const executable = this.executable();
+  const status: AgentStatus = { availability: 'not-installed', auth: 'unknown', models: null, checkedAt: now() };
+  if (!executable) return status;
+  status.executablePath = executable;
+  status.availability = 'unavailable';
+  const version = await new Promise<string | undefined>(resolve => {
+   execFile(executable, ['--version'], { timeout: 5000, maxBuffer: 4096 }, (error, stdout) => {
+    resolve(!error ? stdout.match(/^codex-cli\s+([\w.+-]+)/m)?.[1] : undefined);
+   });
+  });
+  if (version !== undefined) status.version = version;
+  const rpc = new CodexRpc(executable);
+  try {
+   await rpc.init();
+   Object.assign(status, await readAccount(rpc));
+   const models: AgentModel[] = [];
+   const seen = new Set<string>();
+   let cursor: string | null = null;
+   do {
+    const page = await rpc.request('model/list', { cursor });
+    for (const model of page.data ?? []) {
+     if (nonempty(model?.model)) models.push({ id: model.model, name: typeof model.displayName === 'string' ? model.displayName : model.model });
+    }
+    cursor = nonempty(page.nextCursor) ? page.nextCursor : null;
+    if (cursor) {
+     if (seen.has(cursor)) throw Error('Repeated model cursor');
+     seen.add(cursor);
+    }
+   } while (cursor);
+   status.models = models;
+   if (status.auth === 'subscription') status.availability = 'ready';
+  } catch { /* Connection or model discovery failed. */ }
+  finally { await rpc.close(); }
+  return status;
+ }
+
+ async getUsage(): Promise<AgentUsage> {
+  const executable = this.executable();
+  if (!executable) return usageSnapshot(undefined);
+  const rpc = new CodexRpc(executable);
+  let accountKey: string | undefined;
+  try {
+   await rpc.init();
+   const account = await readAccount(rpc);
+   accountKey = account.accountKey;
+   if (account.auth === 'subscription') {
+    return usageSnapshot(await rpc.request('account/rateLimits/read', undefined, 5000), accountKey);
+   }
+  } catch { /* Keep the same account's last known usage if refreshing failed. */ }
+  finally { await rpc.close(); }
+  return usageSnapshot(undefined, accountKey);
+ }
+
+ async run(request: AgentRequest, host: AgentHost): Promise<AgentOutcome> {
+  if (host.signal.aborted) return interrupted;
+  if (!this.accessModes.includes(request.access)) return failed('unsupported');
+  const { target, operation } = request;
+  const compact = operation.kind === 'command' && operation.name === 'compact';
+  if (operation.kind === 'command') {
+   if (!this.commands.some(command => command.name === operation.name)) return failed('unsupported');
+   if (compact && (operation.args.trim() || target.mode !== 'resume')) return failed('rejected');
+  }
+  if (target.mode === 'resume' && (target.session.agentId !== this.id || !nonempty(target.session.id) ||
+   !compact && request.resumeToolsChanged)) return failed('session-incompatible');
+  const executable = this.executable();
+  if (!executable) return failed('unavailable');
+  try {
+   return await withRestrictedRpc(executable, request, host.signal, (rpc, accountKey) => runTurn(rpc, request, host, accountKey));
+  } catch {
+   return host.signal.aborted ? interrupted : failed('unavailable');
+  }
+ }
+}

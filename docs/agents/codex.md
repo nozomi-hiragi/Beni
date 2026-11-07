@@ -22,6 +22,8 @@
 
 `read-only` と `workspace-write` を提供する。書き込みは Beni が指定した作業場所の範囲とし、ネットワークと権限昇格を無効にする。外部 MCP、アプリ、プラグイン、フックなどは現行の制限付き起動設定に従う。サーバーからの要求は、登録済みの埋め込みツールの呼び出しだけを受け付ける。
 
+ターンのコンテキスト使用量は、App Server の `thread/tokenUsage/updated` に含まれる `last.totalTokens` と `modelContextWindow` を使う。対象スレッド・ターンの値を正常終了時に渡す。圧縮時は圧縮項目の完了後に届いた値を採用する。 [Codex App Server](https://learn.chatgpt.com/docs/app-server#turn-events)
+
 ## コマンド
 
 | 登録名 | 種別 | 処理 |
@@ -30,6 +32,6 @@
 | `review` | 生成 | `review/start` を `inline` で呼ぶ。対象省略時は未コミット差分、引数ありなら検証済みのレビュー指示を指定する |
 | `recap` | 生成 | 要約用の依頼として通常のターンを開始する |
 
-レビューの最終本文は `exitedReviewMode.review` から取得して本文イベントに変換する。同じレビュー本文を差分でも受け取った場合は一つの結果にまとめる。現行の Beni はこの項目を本文に変換していないため、移行時の接続テストは通常のテキスト通知に加えてこのレビュー専用項目も使う。 [レビューの通知](https://learn.chatgpt.com/docs/app-server#review)
+レビューの最終本文は `exitedReviewMode.review` から取得して本文イベントに変換する。同じレビュー本文を差分でも受け取った場合は一つの結果にまとめる。接続テストは通常のテキスト通知に加えてこのレビュー専用項目も使う。 [レビューの通知](https://learn.chatgpt.com/docs/app-server#review)
 
 今後の拡張では、実行中の追加入力を `turn/steer`、会話分岐を `thread/fork` に対応づけられる。 [ターンとスレッドの操作](https://learn.chatgpt.com/docs/app-server)

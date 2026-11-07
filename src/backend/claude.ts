@@ -1,8 +1,9 @@
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { createInterface } from 'node:readline';
-import { createSdkMcpServer, query, type Query, type Options as SdkOptions } from '@anthropic-ai/claude-agent-sdk';
+import { createSdkMcpServer, query, type Query, type Options as SdkOptions, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import { contextUsageFromCounts, type ContextUsage } from '../shared/agent';
 import { type EmbeddedTool, type EmbeddedToolResult, toolResult } from './embedded-tools';
 import type { RateLimitUsage } from './rate-limits';
 
@@ -40,19 +41,28 @@ export async function claudeStatus(executable:string|null, onAccount?:(identity:
  return status;
 }
 
-type Options={builtinTools?:false;ephemeral?:true;cwd:string;model:string|null;sandbox:'read-only'|'workspace-write';developerInstructions?:string;dynamicTools?:EmbeddedTool[]};
+type Options={builtinTools?:false;ephemeral?:true;authoritativeText?:true;cwd:string;model:string|null;sandbox:'read-only'|'workspace-write';developerInstructions?:string;dynamicTools?:EmbeddedTool[]};
 const generationCommands=['code-review','simplify','security-review','recap'] as const;
 const localCommands=['context','usage'] as const;
+const modelError=(error:any)=>['model_not_found','model_not_supported','model_not_available','unsupported_model'].includes(typeof error==='string'?error:error?.code);
+export const claudeGenerationArgumentsAllowed=(name:string,args:string)=>
+ args.length<=16384&&!/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(args)&&
+ (name!=='code-review'||!/(?:^|[\s"'`])(?:ultra|--(?:post|comment))(?:$|[\s="'`])/i.test(args));
 const maxCommandOutput=64*1024;
+const contextUsageTimeoutMs=1000;
 type Block={id:string;type:'text'|'tool_use';text:string;name?:string;input?:unknown;partial?:string;complete:boolean};
 
-// ChatService が使う内部通知に SDK のメッセージを変換する。ローカル保守コマンドだけ CLI を直接起動する。
+// SDK のメッセージを内部通知へ変換する。ローカル保守コマンドだけ CLI を直接起動する。
 export class ClaudeRpc {
  onEvent:(method:string,params:any)=>void=()=>{};
- onClose:()=>void=()=>{};
+ onAccepted:()=>void=()=>{};
+ onClose:(exitCode:number|null)=>void=()=>{};
  onToolCall:(params:any)=>Promise<EmbeddedToolResult>=async()=>toolResult({error:'Unsupported tool'},false);
+ waitForEvents:()=>void|Promise<void>=()=>{};
  private child:ChildProcessWithoutNullStreams|null=null;
  private sdkQuery:Query|null=null;
+ private sdkResultReceived=false;
+ private endPrompt:(()=>void)|undefined;
  private session:string|null=null;
  private resumed=false;
  private options:Options|null=null;
@@ -65,18 +75,22 @@ export class ClaudeRpc {
  private blocks=new Map<string,Block>();
  private currentMessage='';
  private partials=new Map<number,Block>();
+ private streamedTextByMessage=new Map<string,{blocks:Block[];nextCompletion:number}>();
  private sawText=false;
  private initialized=false;
  private sawWork=false;
+ private earlyToolCall=false;
  private compacting=false;
  private compactBoundary=false;
  private localCommand:'context'|'usage'|null=null;
  private commandFallback=false;
  private commandOutput:string|null=null;
  private usageReport:unknown;
+ private commandContextUsage:ContextUsage|undefined;
  private commandUnavailable=false;
  private generationCommand:string|null=null;
  private pending:{resolve:()=>void;reject:(error:Error)=>void;timer:ReturnType<typeof setTimeout>}|null=null;
+ private acceptance:Promise<void>|null=null;
  constructor(private executable:string){}
  async init(){}
  async request(method:string,params:any):Promise<any>{
@@ -94,8 +108,8 @@ export class ClaudeRpc {
    if(!params||typeof params!=='object')throw new ClaudeRejected();
    if(local&&!localCommands.includes(params.command))throw new ClaudeRejected();
    const generation=!maintenance&&params.command!==undefined?params.command:null;
-   if(!maintenance&&params.command!==undefined&&(!generation||typeof generation!=='object'||Array.isArray(generation)||!generationCommands.includes(generation.name)||typeof generation.args!=='string'||generation.args.length>16384||/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(generation.args)||Object.keys(generation).some(key=>key!=='name'&&key!=='args')))throw new ClaudeRejected();
-   if(generation?.name==='code-review'&&/(?:^|[\s"'`])(?:ultra|--(?:post|comment))(?:$|[\s="'`])/i.test(generation.args))throw new ClaudeRejected(false,false,'COMMAND_ARGUMENTS_UNSUPPORTED');
+   if(!maintenance&&params.command!==undefined&&(!generation||typeof generation!=='object'||Array.isArray(generation)||!generationCommands.includes(generation.name)||typeof generation.args!=='string'||Object.keys(generation).some(key=>key!=='name'&&key!=='args')))throw new ClaudeRejected();
+   if(generation&&!claudeGenerationArgumentsAllowed(generation.name,generation.args))throw new ClaudeRejected(false,false,'COMMAND_ARGUMENTS_UNSUPPORTED');
    if(!this.session||!this.options||this.child||params.threadId!==this.session)throw new ClaudeRejected();
    if(maintenance&&!this.resumed&&!(local&&params.command==='usage'&&this.options.ephemeral))throw new ClaudeRejected();
    const model=params.model??this.options.model;
@@ -114,7 +128,7 @@ export class ClaudeRpc {
    const context=generation?params.input.slice(1).map((item:any)=>item.text).join('\n\n'):'';
    const instructions=[this.options.developerInstructions,context].filter(Boolean).join('\n\n');
    const prompt=compacting?'/compact':local?`/${this.localCommand}`:generation?`/${generation.name}${generation.args?' '+generation.args:''}`:params.input.map((item:any)=>item.text).join('\n\n');
-   const acceptance=new Promise<void>((resolve,reject)=>{const timer=setTimeout(()=>{this.rejectPending(Error('Claude acceptance timed out'));this.close()},60000);timer.unref();this.pending={resolve,reject,timer}});
+   const acceptance=this.acceptance=new Promise<void>((resolve,reject)=>{const timer=setTimeout(()=>{this.rejectPending(Error('Claude acceptance timed out'));this.close()},60000);timer.unref();this.pending={resolve,reject,timer}});
    // spawn 失敗時にも acceptance の rejection を未処理にしない。
    void acceptance.catch(()=>{});
    if(!maintenance){
@@ -141,12 +155,13 @@ export class ClaudeRpc {
    child.stdin.on('error',()=>{});
    await new Promise<void>((resolve,reject)=>{child.once('spawn',resolve);child.once('error',()=>reject(Error('Claude unavailable')))});
    this.emit('turn/started',{turn:{id:this.turn}});
-   child.stdin.end(prompt);
+   child.stdin.end(this.interrupted?undefined:prompt);
    await acceptance;
    return maintenance?{}:{turn:{id:this.turn}};
   }
   if(method==='turn/interrupt'){
    if(!this.child||params.threadId!==this.session||params.turnId!==this.turn)throw new ClaudeRejected();
+   if(this.sdkResultReceived)return {};
    this.interrupted=true;
    if(this.sdkQuery)void this.sdkQuery.interrupt().catch(()=>this.close());
    else this.child.kill('SIGINT');
@@ -156,7 +171,7 @@ export class ClaudeRpc {
   throw new ClaudeRejected();
  }
  private emit(method:string,params:Record<string,unknown>){this.onEvent(method,{threadId:this.session,turnId:this.turn,...params})}
- private accept(){if(!this.initialized||!this.pending)return;const pending=this.pending;this.pending=null;clearTimeout(pending.timer);pending.resolve()}
+ private accept(){if(!this.initialized||!this.pending||this.interrupted)return;const pending=this.pending;this.pending=null;clearTimeout(pending.timer);pending.resolve();this.onAccepted()}
  private rejectPending(error:Error){if(!this.pending)return;const pending=this.pending;this.pending=null;clearTimeout(pending.timer);pending.reject(error)}
  private text(block:Block,text:string){if(!text)return;this.sawText=true;block.text+=text;this.emit('item/agentMessage/delta',{itemId:block.id,delta:text})}
  private item(block:Block){let input=block.input??{};if(block.partial){try{input=JSON.parse(block.partial)}catch{input=block.partial}}return {id:block.id,type:'dynamicToolCall',name:block.name,arguments:input,status:'inProgress'}}
@@ -166,7 +181,7 @@ export class ClaudeRpc {
   return this.resumed&&!this.compacting&&!this.localCommand&&!this.initialized&&!this.sawWork&&!this.interrupted;
  }
  private missingSessionDiagnostic(text:unknown){return text===`No conversation found with session ID: ${this.session}`}
- private receive(message:any){
+ private receive(message:any,contextUsage?:ContextUsage){
   if(message.type==='assistant'||message.type==='stream_event'||message.type==='user'||message.type==='control_request'&&message.request?.message?.method==='tools/call')this.sawWork=true;
   if(message.type==='result'&&message.is_error===true&&this.canRetryMissingSession()&&
    (message.session_id===undefined||message.session_id===this.session)&&
@@ -196,7 +211,7 @@ export class ClaudeRpc {
    if(requestedCommand&&Array.isArray(message.slash_commands)&&!message.slash_commands.includes(requestedCommand)){
     this.rejectPending(new ClaudeRejected());this.finish('failed',false,'COMMAND_UNAVAILABLE');this.close();return;
    }
-   if(this.compacting||this.localCommand)this.accept();
+   if(this.compacting||this.localCommand||this.earlyToolCall)this.accept();
   }
   if(this.localCommand){
    // CLI が生成するローカル結果だけを収集し、モデル応答やツールには変換しない。
@@ -209,6 +224,7 @@ export class ClaudeRpc {
     else {
      this.commandOutput=(this.commandOutput??'')+text;
      if(this.localCommand==='usage'&&this.options?.ephemeral&&message.usage_report!==undefined)this.usageReport=message.usage_report;
+     if(this.localCommand==='context')this.commandContextUsage=contextUsageFromCounts(message.context_usage?.total_tokens,message.context_usage?.raw_max_tokens);
     }
    }
    if(message.type==='stream_event')this.commandFallback=true;
@@ -226,6 +242,7 @@ export class ClaudeRpc {
      this.accept();
      if(!this.interrupted){
       if(this.usageReport!==undefined)this.emit('account/usage/report',{report:this.usageReport});
+      if(this.commandContextUsage)this.emit('thread/context/usage',{usage:this.commandContextUsage});
       this.emit('thread/command/output',{output});
      }
     }
@@ -249,15 +266,22 @@ export class ClaudeRpc {
    }
    return;
   }
-  if(message.type==='stream_event')this.accept();
+  if(message.session_id!==undefined&&message.session_id!==this.session)return;
   if(message.type==='stream_event'){
    const event=message.event;
+   if(event?.type==='message_start'||event?.type==='content_block_start'||event?.type==='content_block_delta')this.accept();
    if(event?.type==='message_start'){this.currentMessage=event.message?.id??randomUUID();this.partials.clear()}
    if(event?.type==='content_block_start'){
     const content=event.content_block;if(content?.type!=='text'&&content?.type!=='tool_use')return;
     const block:Block={id:content.type==='tool_use'?content.id:`${this.currentMessage}:${event.index}`,type:content.type,text:'',name:content.name,input:content.input,complete:false};
     this.blocks.set(block.id,block);this.partials.set(event.index,block);
     if(block.type==='text'){
+     let streamed=this.streamedTextByMessage.get(this.currentMessage);
+     if(!streamed){
+      streamed={blocks:[],nextCompletion:0};
+      this.streamedTextByMessage.set(this.currentMessage,streamed);
+     }
+     streamed.blocks.push(block);
      this.emit('item/started',{item:{id:block.id,type:'agentMessage'}});
      this.text(block,content.text??'');
     }else this.emit('item/started',{item:this.item(block)});
@@ -267,15 +291,26 @@ export class ClaudeRpc {
     if(block.type==='text'&&event.delta?.type==='text_delta')this.text(block,event.delta.text??'');
     if(block.type==='tool_use'&&event.delta?.type==='input_json_delta')block.partial=(block.partial??'')+(event.delta.partial_json??'');
    }
-   if(event?.type==='content_block_stop'){const block=this.partials.get(event.index);if(block?.type==='text')this.completeText(block)}
+   if(event?.type==='content_block_stop'&&!this.options?.authoritativeText){const block=this.partials.get(event.index);if(block?.type==='text')this.completeText(block)}
   }
   if(message.type==='assistant'){
-   if(message.error){this.rejectPending(new ClaudeRejected(message.error==='model_not_found'));this.finish('failed',message.error==='model_not_found');return}
+   if(message.error){const modelUnavailable=modelError(message.error);this.rejectPending(new ClaudeRejected(modelUnavailable,this.interrupted));this.finish(this.interrupted?'interrupted':'failed',modelUnavailable);return}
    this.accept();
-   for(const [index,content] of (message.message?.content??[]).entries()){
+   const streamed=this.streamedTextByMessage.get(message.message?.id);
+   // SDK は同じ message.id の確定ブロックを一つずつ送るため、本文を受信順に対応づける。
+   for(const content of message.message?.content??[]){
     if(content.type==='text'){
-     const id=`${message.message.id}:${index}`;let block=this.blocks.get(id);
-     if(!block){block={id,type:'text',text:'',complete:false};this.blocks.set(id,block);this.text(block,content.text??'')}
+     let block:Block|undefined;
+     if(streamed){
+      block=streamed.blocks[streamed.nextCompletion];
+      streamed.nextCompletion++;
+     }
+     if(!block){
+      block={id:randomUUID(),type:'text',text:'',complete:false};
+      this.blocks.set(block.id,block);
+      this.text(block,content.text??'');
+     }
+     else if(this.options?.authoritativeText&&typeof content.text==='string'){block.text=content.text;this.sawText||=!!content.text}
      this.completeText(block);
     }else if(content.type==='tool_use'){
      let block=this.blocks.get(content.id);if(!block){block={id:content.id,type:'tool_use',text:'',name:content.name,input:content.input,complete:false};this.blocks.set(block.id,block);this.emit('item/started',{item:this.item(block)})}else{block.input=content.input;block.partial=undefined}
@@ -287,12 +322,13 @@ export class ClaudeRpc {
    block.complete=true;this.emit('item/completed',{item:{...this.item(block),output:content.content,status:content.is_error?'failed':'completed'}});
   }
   if(message.type==='result'){
-   if(!message.is_error&&message.subtype==='success'&&!this.sawText&&typeof message.result==='string'&&message.result){const block:Block={id:randomUUID(),type:'text',text:'',complete:false};this.blocks.set(block.id,block);this.text(block,message.result)}
    const failed=message.is_error===true||message.subtype!=='success';
    // 成功本文や自由記述の失敗文からモデル利用可否を推測しない。
    const errors=[message.error,...(Array.isArray(message.errors)?message.errors:[])];
-   const modelUnavailable=failed&&errors.some(error=>['model_not_found','model_not_supported','model_not_available','unsupported_model'].includes(typeof error==='string'?error:error?.code));
+   const modelUnavailable=failed&&errors.some(modelError);
    if(failed)this.rejectPending(new ClaudeRejected(modelUnavailable,this.interrupted));else this.accept();
+   if(!failed&&!this.sawText&&typeof message.result==='string'&&message.result){const block:Block={id:randomUUID(),type:'text',text:'',complete:false};this.blocks.set(block.id,block);this.text(block,message.result)}
+   if(contextUsage)this.emit('thread/context/usage',{usage:contextUsage});
    this.finish(this.interrupted?'interrupted':failed?'failed':'completed',modelUnavailable);
   }
  }
@@ -306,14 +342,22 @@ export class ClaudeRpc {
    server.instance.server.registerCapabilities({tools:{}});
    server.instance.server.setRequestHandler(ListToolsRequestSchema,async()=>({tools:dynamicTools.map(({name,description,inputSchema})=>({name,description,inputSchema}))}));
    server.instance.server.setRequestHandler(CallToolRequestSchema,async request=>{
-    if(this.closed||this.closing||this.completed||this.interrupted||!dynamicTools.some(tool=>tool.name===request.params.name))return {content:[{type:'text',text:JSON.stringify({error:'Embedded tool request rejected or unavailable'})}],isError:true};
-    const output=await this.onToolCall({threadId:this.session,turnId:this.turn,callId:randomUUID(),tool:request.params.name,arguments:request.params.arguments??{}});
-    return {content:output.contentItems.map(item=>({type:'text',text:item.text})),isError:!output.success};
+    const available=()=>!this.closed&&!this.closing&&!this.completed&&!this.interrupted;
+    const rejected={content:[{type:'text' as const,text:JSON.stringify({error:'Embedded tool request rejected or unavailable'})}],isError:true};
+    if(!available()||!dynamicTools.some(tool=>tool.name===request.params.name))return rejected;
+    this.sawWork=this.earlyToolCall=true;
+    this.accept();
+    try{
+     await this.acceptance;
+     if(!available())return rejected;
+     const output=await this.onToolCall({threadId:this.session,turnId:this.turn,callId:randomUUID(),tool:request.params.name,arguments:request.params.arguments??{}});
+     return available()?{content:output.contentItems.map(item=>({type:'text',text:item.text})),isError:!output.success}:rejected;
+    }catch{return rejected}
    });
    servers.beni=server;
   }
   try{
-   this.sdkQuery=query({prompt,options:{
+   this.sdkQuery=query({prompt:this.options!.ephemeral?prompt:this.streamPrompt(prompt),options:{
     pathToClaudeCodeExecutable:this.executable,cwd:this.options!.cwd,model,
     ...(this.resumed?{resume:this.session!}:{sessionId:this.session!}),
     persistSession:!this.options!.ephemeral,
@@ -339,11 +383,40 @@ export class ClaudeRpc {
    void this.consumeQuery(this.sdkQuery,()=>stderr);
   }catch{this.rejectPending(Error('Claude unavailable'));this.close()}
  }
+ private async *streamPrompt(prompt:string):AsyncGenerator<SDKUserMessage>{
+  // A string prompt closes SDK input on result. Keep the control channel open for the summary.
+  const ended=Promise.withResolvers<void>();
+  this.endPrompt=ended.resolve;
+  yield {type:'user',session_id:'',message:{role:'user',content:[{type:'text',text:prompt}]},parent_tool_use_id:null};
+  await ended.promise;
+ }
+ private async readContextUsage(stream:Query):Promise<ContextUsage|undefined>{
+  let timer:ReturnType<typeof setTimeout>|undefined;
+  try{
+   const usage=await Promise.race([
+    stream.getContextUsage({detail:'summary'}),
+    new Promise<undefined>(resolve=>{timer=setTimeout(()=>resolve(undefined),contextUsageTimeoutMs)}),
+   ]);
+   return contextUsageFromCounts(usage?.totalTokens,usage?.rawMaxTokens);
+  }catch{
+   // Unavailable on older CLIs. A missing report does not affect the turn result.
+  }finally{clearTimeout(timer)}
+ }
  private async consumeQuery(stream:Query,stderr:()=>string){
   try{
    for await(const message of stream){
     if(this.closed||this.closing||this.completed)break;
-    this.receive(message);
+    let usage:ContextUsage|undefined;
+    if(message.type==='result'&&message.session_id===this.session&&
+     !('parent_tool_use_id' in message&&message.parent_tool_use_id)){
+     this.sdkResultReceived=true;
+     if(this.initialized&&!this.interrupted&&!this.options?.ephemeral&&!message.is_error&&message.subtype==='success'){
+      usage=await this.readContextUsage(stream);
+     }
+    }
+    if(this.closed||this.closing)break;
+    this.receive(message,usage);
+    await this.waitForEvents();
     if(this.completed){this.close();break}
    }
   }catch{
@@ -355,6 +428,6 @@ export class ClaudeRpc {
    this.close();
   }
  }
- private signalClose(){if(this.closed)return;if((this.compacting||this.localCommand)&&this.interrupted&&!this.completed)this.finish('interrupted');this.closed=true;setImmediate(()=>this.onClose())}
- close(){if(this.closing||this.closed)return;this.closing=true;this.sdkQuery?.close();this.rejectPending(this.interrupted?new ClaudeRejected(false,true):Error('Connection closed'));if(this.termination)clearTimeout(this.termination);this.termination=null;if(this.child&&this.child.exitCode===null&&this.child.signalCode===null){this.child.kill('SIGTERM');this.termination=setTimeout(()=>this.child?.kill('SIGKILL'),3000);this.termination.unref()}else this.signalClose()}
+ private signalClose(){if(this.closed)return;if((this.compacting||this.localCommand)&&this.interrupted&&!this.completed)this.finish('interrupted');this.closed=true;setImmediate(()=>this.onClose(this.child?.exitCode??null))}
+ close(){if(this.closing||this.closed)return;this.closing=true;this.endPrompt?.();this.sdkQuery?.close();this.rejectPending(this.interrupted?new ClaudeRejected(false,true):Error('Connection closed'));if(this.termination)clearTimeout(this.termination);this.termination=null;if(this.child&&this.child.exitCode===null&&this.child.signalCode===null){this.child.kill('SIGTERM');this.termination=setTimeout(()=>this.child?.kill('SIGKILL'),3000);this.termination.unref()}else this.signalClose()}
 }

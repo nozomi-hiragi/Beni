@@ -11,10 +11,16 @@ Beni/
 │   │   ├── server.ts                 サーバー起動、API、フロントエンド配信、保存先設定
 │   │   ├── server.test.ts            API・配信・文書管理・変更通知・保存先のテスト
 │   │   ├── instructions.ts           指示テンプレートの初期値と変数の置換
-│   │   ├── chat.ts                   エージェント通信、会話の保存・再開・受信・中断
+│   │   ├── chat.ts                   会話の保存・再開・イベント配信・中断
+│   │   ├── chat-history.ts           会話 JSON の変換と旧形式の読み取り
 │   │   ├── claude.ts                 Claude の SDK 送信、CLI 操作、状態確認とストリーム変換
 │   │   ├── claude.test.ts            Claude の受信・権限設定・中断・接続失敗のテスト
 │   │   ├── chat.test.ts              会話の保存・再開・中断・分離、接続エラーのテスト
+│   │   ├── agents/                   Agent の共通契約、標準の登録、接続先アダプター
+│   │   │   ├── agent.ts              実行・セッション・イベント・利用枠の型
+│   │   │   ├── index.ts              標準の Agent 一覧
+│   │   │   ├── codex.ts              Codex App Server との接続
+│   │   │   └── claude.ts             Claude の SDK・CLI 通信と共通型の変換
 │   │   ├── data.ts                   メタデータ検証・保存と旧 Markdown が残ったタスクの復元
 │   │   ├── documents.ts              旧 Markdown の検出・取り込み補助と変更監視
 │   │   ├── document-table.ts         文書の項目・根拠と版の保存
@@ -31,11 +37,13 @@ Beni/
 │   │   │   ├── index.ts              プロジェクト・タスク・文書・指示・更新ジョブの管理
 │   │   │   └── index.test.ts         メタデータ・復元のテスト
 │   │   └── test/                     バックエンドのテスト補助
+│   │       ├── dummy-agent.ts         Agent の共通処理を検証する実行先
 │   │       ├── fake-codex.ts          実サービスを使わず Codex 通信を模擬する実行ファイル
 │   │       └── fake-claude.ts         SDK の起動先と保守コマンドで使うテスト用 Claude CLI
 │   ├── shared/                       FE・BE 共通の通信定義
 │   │   ├── ids.ts                    プロジェクト・タスクIDの生成と種別検証
 │   │   ├── task-phase.ts             共通のフェーズ識別子と検証
+│   │   ├── agent.ts                  Agent ID・登録情報・接続状態の共通型
 │   │   ├── chat-commands.ts          コマンドの一覧・接続先別の対応・入力解析
 │   │   ├── communication.ts          パック・WS メッセージの型、受信検証、ハッシュ
 │   │   └── project-files.ts          プロジェクトファイル一覧・プレビューの型
@@ -54,8 +62,14 @@ Beni/
 │       ├── assets.d.ts               CSS importの型宣言
 │       ├── types.ts                  プロジェクト・タスク・文書・会話などの型
 │       ├── tailwind.css              Tailwind CSS の探索対象、daisyUI のテーマ、共通スタイル
-│       ├── *.test.tsx                画面の表示・操作のテスト
-│       ├── test-events.ts            WS とパックを模擬するテスト補助
+│       ├── *.test.tsx                画面実装と同じ場所に置く表示・操作のテスト
+│       ├── test/                     対応する実装がないテストとテスト補助
+│       │   ├── WorkspaceTrees.test.tsx  タスク・文書ツリーのテスト
+│       │   ├── test-events.ts        WS とパックを模擬するテスト補助
+│       │   ├── ChatCommands.test.tsx  スラッシュコマンドのテスト
+│       │   ├── ClaudeChat.test.tsx     Claude チャットのテスト
+│       │   ├── CodexChat.test.tsx      Codex チャットのテスト
+│       │   └── RegisteredAgents.test.tsx 登録済み Agent のテスト
 │       └── components/               画面を構成する部品
 │           ├── ResizeHandle.tsx      作業領域の左右・上下比率を調整するハンドル
 │           ├── TerminalPanel.tsx     ターミナルタブ・描画・操作権・再接続
@@ -71,7 +85,10 @@ Beni/
 │           ├── ProjectCreateDialog.tsx  プロジェクトの名前・フォルダーを指定するダイアログ
 │           ├── FolderPicker.tsx      バックエンドが動く環境のフォルダー選択
 │           ├── ChatPanel.tsx         Codex・Claude との会話、モデル選択、送信・中断、履歴表示
-│           ├── CodexSettings.tsx     Codex・Claude の CLI 状態と利用枠の確認
+│           ├── ContextGauge.tsx      コンテキスト使用率と圧縮メニュー
+│           ├── ModelPicker.tsx       チャット用モデルの選択と接続先アイコン
+│           ├── chat-popup.ts         チャット内のポップアップの表示可能な高さ
+│           ├── CodexSettings.tsx     登録済み Agent の接続状態と利用枠の確認
 │           ├── ChatComposer.tsx      テキスト入力と送信フォーム
 │           ├── PhaseIndicator.tsx    フェーズ表示と実装開始・停止・タスク完了・再開
 │           ├── TabBar.tsx            タブの選択と閉じる操作

@@ -6,13 +6,15 @@ import { ChatSync } from '../chat-sync';
 import { followChatBottom } from '../chat-scroll';
 import type { Pack, TaskPhase } from '../../shared/communication';
 import { isTaskPhase } from '../../shared/task-phase';
-import { commandsForProvider, findChatCommand, parseChatCommand, type ChatCommand, type ChatCommandDefinition } from '../../shared/chat-commands';
-import { availableModels, chooseModel, loadModels, modelIsAvailable, modelLabel, modelScope, modelStatus, modelValue, providerName, providerReady, rejectModel, selectedModel } from '../model-cache';
-import type { ChatMessage, Conversation, Model, Task } from '../types';
-import ChatGPTPopIcon from './icons/ChatGPTPopIcon';
-import ClaudePopIcon from './icons/ClaudePopIcon';
+import { findChatCommand, parseChatCommand, type ChatCommand, type ChatCommandDefinition } from '../../shared/chat-commands';
+import { availableModels, chooseModel, loadModels, modelIsAvailable, modelLabel, modelScope, modelStatus, modelValue, providerCommands, providerName, providerReady, providerSupportsCompaction, registeredAgents, rejectModel, selectedModel } from '../model-cache';
+import type { ChatMessage, Conversation, Model } from '../types';
+import { popupHeight } from './chat-popup';
+import ModelPicker from './ModelPicker';
+import AgentIcon from './icons/AgentIcon';
+import ContextGauge from './ContextGauge';
 
-interface Draft { text: string; version: number; sending: boolean; commandSending?: boolean; commandName?: ChatCommand['name']; error: string; listeners: Set<() => void>; refresh?: () => void; pending?: {content: string; version: number; sendId?: string}; restored: Set<string> }
+interface Draft { text: string; version: number; sending: boolean; commandSending?: boolean; commandName?: ChatCommand['name']; error: string; listeners: Set<() => void>; refresh?: () => void; pending?: {content: string; fromComposer: boolean; sendId?: string}; restored: Set<string> }
 const drafts = new Map<string, Draft>();
 const draftFor = (key: string) => {
   let draft = drafts.get(key);
@@ -23,7 +25,11 @@ const restoreDraft = (draft: Draft, content: string) => {
   if (!draft.text.startsWith(content)) draft.text = draft.text ? `${content}\n${draft.text}` : content;
 };
 const commandLabels: Partial<Record<ChatCommand['name'], string>> = {compact:'圧縮',clear:'会話リセット',context:'コンテキスト',usage:'使用量'};
-const commandLabel = (name: ChatCommand['name']) => commandLabels[name] ?? `/${name}`;
+const commandLabel = (name: ChatCommand['name']) => Object.hasOwn(commandLabels, name) ? commandLabels[name] : `/${name}`;
+const commandCategories = [
+  {kind: 'operation', label: '会話操作'},
+  {kind: 'message', label: '生成'},
+] as const;
 const stateLabel: Record<ChatMessage['status'], string> = { pending: '送信待ち', streaming: '応答中', completed: '完了', failed: '失敗', interrupted: '中断', unknown: '結果不明' };
 
 const chatDateFormatter = new Intl.DateTimeFormat('ja-JP', {
@@ -46,31 +52,44 @@ function packFooter(pack: Pack) {
   return `${Math.floor(seconds / 60)}分${remainder ? `${remainder}秒` : ''}`;
 }
 
-export default function ChatPanel(props: { projectId: string; taskId?: string; phase?: TaskPhase; readOnly?: boolean; instructionFocus?: string | null; instructionFocusLabel?: string; onModelUnavailable?: (model: string, provider?: Model['provider']) => void; onBusyChange?: (busy: boolean) => void; onModelChange?: (model: Model | null) => void; onTaskRename?: (task: Task) => void }) {
-  const [conversationState,setConversationState]=createStore<{value?:Conversation}>({});
-  const conversation=()=>conversationState.value;
-  const setConversation=(value:Conversation|undefined)=>setConversationState('value',value===undefined?undefined:reconcile(value,{key:'id'}));
+export type ChatTabStatus = { disabled: boolean; open: () => void };
+
+export default function ChatPanel(props: { projectId: string; taskId?: string; phase?: TaskPhase; readOnly?: boolean; instructionFocus?: string | null; onModelUnavailable?: (model: string, provider?: Model['provider']) => void; onBusyChange?: (busy: boolean) => void; onModelChange?: (model: Model | null) => void; onTabStatusChange?: (taskId: string | undefined, status: ChatTabStatus, failed?: boolean) => void }) {
+  const key = () => modelScope(props.projectId, props.taskId, props.phase);
+  const [conversationState, setConversationState] = createStore<{scope?: string; value?: Conversation}>({});
+  const conversation = () => conversationState.scope === key() ? conversationState.value : undefined;
+  const setConversation = (value: Conversation) => setConversationState('value', reconcile(value, {key:'id'}));
   const [packState, setPackState] = createStore<{value: Pack[]}>({value: []});
   const [syncError, setSyncError] = createSignal('');
-  const status = () => modelStatus();
   const models = createMemo(availableModels);
   const [text, setText] = createSignal('');
   const [commandSending, setCommandSending] = createSignal(false);
   const [pendingCommandName, setPendingCommandName] = createSignal<ChatCommand['name']>('compact');
-  const [localResult, setLocalResult] = createSignal<{name: string; output: string}>();
   const [dismissedCommandIds, setDismissedCommandIds] = createSignal<ReadonlySet<string>>(new Set());
-  let localConversationId: string | undefined;
+  const statusTitleId = createUniqueId();
+  let statusDialog: HTMLDialogElement | undefined;
+  let visibleConversationId: string | undefined;
   createEffect(() => {
     const id = conversation()?.id;
-    if (id !== localConversationId) { setLocalResult(undefined); setDismissedCommandIds(new Set<string>()); localConversationId = id; }
+    if (id !== visibleConversationId) {
+      closeStatus();
+      setDismissedCommandIds(new Set<string>());
+      visibleConversationId = id;
+    }
   });
   const [connected, setConnected] = createSignal(false);
   const [suggestionsDismissed, setSuggestionsDismissed] = createSignal(false);
   const [commandInputFocused, setCommandInputFocused] = createSignal(false);
   const [activeSuggestion, setActiveSuggestion] = createSignal(-1);
   const [suggestionHeight, setSuggestionHeight] = createSignal(256);
+  const [commandMenuOpen, setCommandMenuOpen] = createSignal(false);
+  const [commandMenuHeight, setCommandMenuHeight] = createSignal(320);
   const commandListId = createUniqueId();
+  const commandMenuId = createUniqueId();
   let textarea: HTMLTextAreaElement | undefined;
+  let commandDropdown: HTMLDivElement | undefined;
+  let commandMenuTrigger: HTMLButtonElement | undefined;
+  let composerActions!: HTMLDivElement;
   const commandInput = () => parseChatCommand(text());
   function updateText(value: string) {
     const draft = draftFor(key()); draft.text = value; draft.version++; setText(value);
@@ -97,20 +116,30 @@ export default function ChatPanel(props: { projectId: string; taskId?: string; p
     event.preventDefault();
     if (!event.repeat && !submitDisabled()) void send();
   }
-  const key = () => modelScope(props.projectId, props.taskId, props.phase);
   const selection = () => selectedModel(key());
-  const model = () => selection() ? modelValue(selection()!) : '';
   const modelAvailable = () => modelIsAvailable(key());
   const selectedProvider = () => selection() ? selection()!.provider ?? 'codex' : undefined;
-  const permittedCommands = () => commandsForProvider(modelAvailable() ? selectedProvider() : undefined).filter(item => (item.name !== 'rename' || !!props.taskId) && (item.kind !== 'message' || props.projectId !== 'instructions'));
+  const connectionId = () => selectedProvider() ?? registeredAgents()[0]?.id;
+  const connectionNotice = () => {
+    const provider = connectionId();
+    if (!provider) return;
+    const status = modelStatus(provider), name = providerName(provider);
+    if (status?.availability === 'not-installed') return `${name}${provider === 'codex' || provider === 'claude' ? ' CLI' : ''} をインストールしてください。`;
+    if (status?.availability === 'unsupported-version') return `${name} を対応バージョンに更新してください。`;
+    if (status?.availability !== 'unavailable') return;
+    if (status.auth === 'none') return `${name} にログインしてください。`;
+    if ((provider === 'codex' || provider === 'claude') && (status.auth === 'api-key' || status.auth === 'other')) return `${name} はサブスクリプション以外の認証方式です。設定を確認してください。`;
+    return `${name} の接続状態を設定で確認してください。`;
+  };
+  const commandFor = (name: string, provider = selectedProvider()) => findChatCommand(name, provider, providerCommands(provider));
+  const permittedCommands = () => providerCommands(modelAvailable() ? selectedProvider() : undefined)
+    .filter(item => item.name !== 'compact' && (item.kind !== 'message' || props.projectId !== 'instructions'));
   createEffect(() => { selectedProvider(); setActiveSuggestion(-1); });
   createEffect(() => props.onModelChange?.(modelAvailable() ? selection()! : null));
   function selectModel(value: string) {
     const available = models().find(item => modelValue(item) === value);
-    if (available) chooseModel(key(), available);
+    if (available && providerReady(available.provider)) chooseModel(key(), available);
   }
-  let modelSelect: HTMLSelectElement | undefined;
-  createEffect(() => { model(); models(); queueMicrotask(() => { if(modelSelect)modelSelect.value=model(); }); });
   const [sending, setSending] = createSignal(false);
   const [error, setError] = createSignal('');
   const [loadError, setLoadError] = createSignal('');
@@ -119,12 +148,7 @@ export default function ChatPanel(props: { projectId: string; taskId?: string; p
   let scrollport!: HTMLDivElement, scrollContent!: HTMLDivElement;
   let bottomFollow: ReturnType<typeof followChatBottom> | undefined;
   const sizeSuggestions = () => {
-    if (!textarea) return;
-    let top = 8;
-    for (let ancestor = textarea.parentElement; ancestor; ancestor = ancestor.parentElement) {
-      if (/^(hidden|auto|scroll|clip)$/.test(window.getComputedStyle(ancestor).overflowY)) top = Math.max(top,ancestor.getBoundingClientRect().top);
-    }
-    setSuggestionHeight(Math.max(40,Math.min(256,textarea.getBoundingClientRect().top - top - 8)));
+    if (textarea) setSuggestionHeight(Math.max(40, popupHeight(textarea, 256)));
   };
   onMount(() => {
     bottomFollow = followChatBottom(scrollport, scrollContent);
@@ -137,12 +161,13 @@ export default function ChatPanel(props: { projectId: string; taskId?: string; p
     const currentKey = key(), url = query(), draft = draftFor(currentKey);
     const controller = new AbortController();
     let modelRefreshRequested = !untrack(() => selectedModel(currentKey)) || untrack(() => !modelIsAvailable(currentKey));
-    const hadModels = !!untrack(() => status() || modelStatus('claude'));
+    const hadModels = untrack(() => registeredAgents().some(agent => modelStatus(agent.id)));
     let active = true, sequence = 0,fetching=false,reload=false;
     const sync = new ChatSync({ projectId: props.projectId, taskId: props.taskId ?? null, ...(props.taskId === undefined ? {} : { phase: props.phase }) }, packs => { if (active) setPackState('value', reconcile(packs, {key: 'packId'})); }, message => { if (active) setSyncError(message); });
     const updateDraft = () => { setText(draft.text); setSending(draft.sending); setCommandSending(!!draft.commandSending); setPendingCommandName(draft.commandName ?? 'compact'); setError(draft.error); };
     draft.listeners.add(updateDraft);
-    setConversation(undefined); setLocalResult(undefined); setConnected(false); setSuggestionsDismissed(false); setActiveSuggestion(-1); updateDraft(); setLoadError(''); setSyncError(''); setInterrupting(false);
+    setConversationState({scope: currentKey, value: undefined});
+    closeStatus(); setConnected(false); setSuggestionsDismissed(false); setActiveSuggestion(-1); setCommandMenuOpen(false); updateDraft(); setLoadError(''); setSyncError(''); setInterrupting(false);
     const load = async () => {
       if(fetching){reload=true;return}fetching=true;
       do {reload=false;
@@ -195,7 +220,7 @@ export default function ChatPanel(props: { projectId: string; taskId?: string; p
       if (message.model) rejectModel(scope, message.model, message.provider);
       const content = value?.messages.find(item => item.sendId === message.sendId && item.role === 'user')?.content;
       if (content && draft.pending?.content === content) {
-        restoreDraft(draft, content);
+        if (draft.pending.fromComposer) restoreDraft(draft, content);
         draft.pending = undefined;
         draft.error = '選択したモデルを利用できません。別のモデルを選択してください。';
         draft.listeners.forEach(listener => listener());
@@ -216,6 +241,83 @@ export default function ChatPanel(props: { projectId: string; taskId?: string; p
   const visibleCommandId = () => commandOutcome() && !dismissedCommandIds().has(conversation()!.command!.id) ? conversation()!.command!.id : undefined;
   const dismissCommand = (id: string) => setDismissedCommandIds(previous => new Set([...previous,id]));
   const busy = () => sending() || compacting() || !!conversation()?.messages.some(message => message.status === 'pending' || message.status === 'streaming');
+  const selectedSessionKey = () => selection() ? `${selectedProvider()}/${selection()!.id}` : undefined;
+  const contextSession = () => {
+    const value = conversation(), selected = selection(), provider = selectedProvider(), sessionKey = selectedSessionKey();
+    if (!value || !selected || !provider || !sessionKey) return undefined;
+    if (value.sessionProvider === provider && value.selectedModel?.id === selected.id && (value.selectedModel.provider ?? 'codex') === provider && value.threadId) return value;
+    return value.sessions?.[sessionKey];
+  };
+  const contextUsage = () => contextSession()?.contextUsage;
+  const canCompact = () => {
+    const session = contextSession(), provider = selectedProvider();
+    return !!session?.threadId && !props.readOnly && !busy() && modelAvailable() && providerSupportsCompaction(provider);
+  };
+  const commandMenuDisabled = () => props.readOnly || busy() || !conversation() || !!loadError() || !permittedCommands().length;
+
+  createEffect(() => {
+    const report = props.onTabStatusChange;
+    if (!report) return;
+    const taskId = props.taskId, scope = key();
+    const disabled = !conversation();
+    const failed = disabled && !!loadError();
+    let active = true;
+    const status = {
+      disabled,
+      open: () => {
+        if (active && !disabled && scope === key()) openStatus();
+      },
+    };
+    onCleanup(() => { active = false; });
+    untrack(() => report(taskId, status, failed));
+  });
+  createEffect(() => {
+    if (commandMenuDisabled()) setCommandMenuOpen(false);
+  });
+  createEffect(() => {
+    if (!commandMenuOpen() || !commandDropdown) return;
+    const size = () => { if (commandDropdown) setCommandMenuHeight(popupHeight(commandDropdown, 320)); };
+    const dismiss = (event: PointerEvent) => {
+      if (event.target instanceof Node && !commandDropdown?.contains(event.target)) setCommandMenuOpen(false);
+    };
+    const observer = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(size) : undefined;
+    observer?.observe(scrollport);
+    observer?.observe(commandDropdown);
+    size();
+    window.addEventListener('resize', size);
+    document.addEventListener('pointerdown', dismiss, true);
+    onCleanup(() => {
+      observer?.disconnect();
+      window.removeEventListener('resize', size);
+      document.removeEventListener('pointerdown', dismiss, true);
+    });
+  });
+  function runMenuCommand(definition: ChatCommandDefinition) {
+    if (commandMenuDisabled()) return;
+    setCommandMenuOpen(false);
+    commandMenuTrigger?.focus();
+    void send(definition.command);
+  }
+  async function executeOperation(name: string, args = '', clearDraft = false) {
+    const currentKey = key(), draft = draftFor(currentKey), sentModel = selection(), version = draft.version;
+    if (props.readOnly || draft.sending || busy() || !conversation() || loadError() || !sentModel || !modelAvailable()) return;
+    if (name === 'clear' && !window.confirm('現在の会話をリセットしますか？履歴はアーカイブに残ります。')) return;
+    draft.sending = true; draft.commandSending = true; draft.commandName = name; draft.error = ''; draft.listeners.forEach(listener => listener());
+    try {
+      const accepted = await api<{command: ChatCommand}>('/api/chat/commands', { projectId: props.projectId, taskId: props.taskId ?? null, ...(props.taskId === undefined ? {} : {phase: props.phase}), command: name, args, provider: sentModel.provider ?? 'codex', model: sentModel.id });
+      if (clearDraft && draft.version === version) draft.text = '';
+      if (name === 'clear') draft.pending = undefined;
+      if (key() === currentKey && conversation()) setConversation({...conversation()!, command: accepted.command});
+      draft.refresh?.();
+    } catch (error) {
+      draft.error = error instanceof ApiError && error.status >= 400 && error.status < 500 ? `${commandLabel(name)}できませんでした: ${error.message}` : `${commandLabel(name)}を確認できませんでした。状態を確認してください。`;
+      draft.refresh?.();
+    } finally { draft.sending = false; draft.commandSending = false; draft.listeners.forEach(listener => listener()); }
+  }
+  function compactSelectedSession() {
+    if (!canCompact()) return;
+    void executeOperation('compact');
+  }
   const suggestions = createMemo(() => {
     const prefix = text().trimStart();
     return commandInputFocused() && !suggestionsDismissed() && !props.readOnly && !busy() && /^\/[A-Za-z0-9_-]*$/.test(prefix)
@@ -235,102 +337,50 @@ export default function ChatPanel(props: { projectId: string; taskId?: string; p
   });
   createEffect(() => props.onBusyChange?.(busy()));
   const validInstructionFocus = () => props.projectId !== 'instructions' || props.instructionFocus === 'common' || props.instructionFocus === 'editor' || isTaskPhase(props.instructionFocus);
-  async function runClientCommand(definition: ChatCommandDefinition, args: string): Promise<string> {
-    if (args && !['model','rename'].includes(definition.name)) throw new Error(`${definition.command} に引数は指定できません。`);
-    const value = conversation()!;
-    switch (definition.name) {
-      case 'help': return permittedCommands().map(item => `${item.command}${item.argumentHint ? ` ${item.argumentHint}` : ''} · ${item.description}${item.aliases?.length ? ` (別名: ${item.aliases.map(alias => `/${alias}`).join(', ')})` : ''}`).join('\n');
-      case 'status': return `選択: ${selection() ? modelLabel(selection()!.id, selectedProvider()) : '未選択'}\n保存された接続先: ${value.sessionProvider ? providerName(value.sessionProvider) : '未開始'}\nメッセージ数: ${value.messages.length}\nモデル接続: ${selection() && providerReady(selectedProvider()) ? '利用可能' : '利用不可'}\n更新接続: ${connected() ? '接続済み' : '未接続'}`;
-      case 'model': {
-        if (!args) return 'モデルを選択してください。';
-        const explicitProvider = args.match(/^(codex|claude)[/:]/i)?.[1]?.toLowerCase();
-        const requestedName = explicitProvider ? args.slice(explicitProvider.length + 1) : args;
-        const candidates = models().filter(item => providerReady(item.provider) && (explicitProvider ? item.provider === explicitProvider : !selectedProvider() || item.provider === selectedProvider()) && [item.id,item.name].includes(requestedName));
-        if (candidates.length !== 1) throw new Error(candidates.length ? 'モデル名が曖昧です。接続先/モデルIDで指定してください。' : '指定したモデルを利用できません。');
-        chooseModel(key(),candidates[0]); return `モデルを ${modelLabel(candidates[0].name,candidates[0].provider)} に変更しました。`;
-      }
-      case 'copy': {
-        const message = value.messages.findLast(item => item.role === 'assistant' && item.status === 'completed' && item.content.trim());
-        if (!message) throw new Error('コピーできる完了した回答がありません。');
-        try { await navigator.clipboard.writeText(message.content); } catch { throw new Error('回答をコピーできませんでした。'); }
-        return '最後の回答をコピーしました。';
-      }
-      case 'export': {
-        const markdown = value.messages.map(message => `## ${message.role === 'user' ? 'あなた' : 'アシスタント'} · ${stateLabel[message.status]}\n\n${message.content}`).join('\n\n');
-        const url = URL.createObjectURL(new Blob([markdown],{type:'text/markdown;charset=utf-8'}));
-        try { const link = document.createElement('a'); link.href = url; link.download = `chat-${value.id}.md`; link.click(); }
-        finally { URL.revokeObjectURL(url); }
-        return '会話を書き出しました。';
-      }
-      case 'rename': {
-        if (!props.taskId) throw new Error('タスクの会話でのみ名前を変更できます。');
-        if (!args) throw new Error('/rename に名前を指定してください。');
-        const task = await api<Task>(`/api/tasks/${encodeURIComponent(props.taskId)}/rename`,{projectId:props.projectId,name:args});
-        props.onTaskRename?.(task); return `名前を「${task.name}」に変更しました。`;
-      }
-      default: throw new Error('不明なコマンドです。');
-    }
+  function openStatus() {
+    if (conversation() && statusDialog && !statusDialog.open) statusDialog.showModal();
+  }
+  function closeStatus() {
+    if (statusDialog?.open) statusDialog.close();
   }
   const submitBlocked = () => {
     const parsed = commandInput();
     if (!parsed) return !validInstructionFocus() || !modelAvailable();
-    const definition = findChatCommand(parsed.name,selectedProvider()) ?? (!selection() ? findChatCommand(parsed.name,'codex') ?? findChatCommand(parsed.name,'claude') : undefined);
+    if (parsed.name === 'compact') return true;
+    const definition = commandFor(parsed.name) ?? (!selection() ? registeredAgents().map(agent => commandFor(parsed.name, agent.id)).find(Boolean) : undefined);
     return definition?.kind === 'operation' ? !modelAvailable() : definition?.kind === 'message' ? props.projectId === 'instructions' || !validInstructionFocus() || !modelAvailable() : false;
   };
   const submitDisabled = () => submitBlocked() || busy() || !text().trim() || !conversation() || !!loadError();
-  async function send() {
-    const currentKey = key(), draft = draftFor(currentKey), content = draft.text, version = draft.version, sentModel = selection(), sentInstructionFocus = props.instructionFocus;
+  async function send(explicitContent?: string) {
+    const currentKey = key(), draft = draftFor(currentKey), content = explicitContent ?? draft.text, version = draft.version, sentModel = selection(), sentInstructionFocus = props.instructionFocus;
+    const fromComposer = explicitContent === undefined;
+    const clearSubmittedText = () => { if (fromComposer && draft.version === version) draft.text = ''; };
     if (props.readOnly || draft.sending || busy() || !conversation() || loadError() || !content.trim()) return;
     const command = parseChatCommand(content);
     if (command) {
-      const definition = findChatCommand(command.name, selectedProvider());
-      if (!definition || definition.name === 'rename' && !props.taskId || definition.kind === 'message' && props.projectId === 'instructions') {
+      if (command.name === 'compact') { draft.error = '不明なコマンドです。'; draft.listeners.forEach(listener => listener()); return; }
+      const definition = commandFor(command.name);
+      if (!definition || definition.kind === 'message' && props.projectId === 'instructions') {
         draft.error = '不明なコマンドです。'; draft.listeners.forEach(listener => listener()); return;
       }
-      if (definition.kind === 'client') {
-        draft.sending = true; draft.error = ''; draft.listeners.forEach(listener => listener());
-        try {
-          const output = await runClientCommand(definition, command.args);
-          if (draft.version === version) draft.text = '';
-          if (key() === currentKey) setLocalResult({name:definition.command, output});
-        } catch (error) { draft.error = error instanceof Error ? error.message : 'コマンドを実行できませんでした。'; }
-        finally {
-          draft.sending = false; draft.listeners.forEach(listener => listener());
-          if (key() === currentKey && definition.name === 'model' && !command.args) { modelSelect?.focus(); try { modelSelect?.showPicker?.(); } catch { /* 未対応の環境ではフォーカスのみ移す。 */ } }
-        }
-        return;
-      }
       if (definition.kind === 'operation') {
-        if (command.args) { draft.error = `${definition.command} に引数は指定できません。`; draft.listeners.forEach(listener => listener()); return; }
+        if (command.args && !definition.argumentHint) { draft.error = `${definition.command} に引数は指定できません。`; draft.listeners.forEach(listener => listener()); return; }
         if (!sentModel || !modelAvailable()) return;
-        if (definition.name === 'clear' && !window.confirm('現在の会話をリセットしますか？履歴はアーカイブに残ります。')) return;
-        draft.sending = true; draft.commandSending = true; draft.commandName = definition.name; draft.error = ''; draft.listeners.forEach(listener => listener());
-        try {
-          const accepted = await api<{command: ChatCommand}>('/api/chat/commands', { projectId: props.projectId, taskId: props.taskId ?? null, ...(props.taskId === undefined ? {} : {phase: props.phase}), command: definition.name, args:'', provider:sentModel.provider ?? 'codex', model:sentModel.id });
-          if (draft.version === version) draft.text = '';
-          if (definition.name === 'clear') draft.pending = undefined;
-          if (key() === currentKey && conversation()) setConversation({...conversation()!, command: accepted.command});
-          draft.refresh?.();
-        } catch (error) {
-          draft.error = error instanceof ApiError && error.status >= 400 && error.status < 500 ? `${commandLabel(definition.name)}できませんでした: ${error.message}` : `${commandLabel(definition.name)}を確認できませんでした。状態を確認してください。`;
-          draft.refresh?.();
-        } finally {
-          draft.sending = false; draft.commandSending = false; draft.listeners.forEach(listener => listener());
-        }
+        await executeOperation(definition.name, command.args, fromComposer);
         return;
       }
     }
     if (!validInstructionFocus() || !modelAvailable()) return;
     draft.sending = true; draft.error = ''; draft.listeners.forEach(listener => listener());
     try {
-      draft.pending = {content, version};
+      draft.pending = {content, fromComposer};
       const accepted = await api<Conversation>('/api/chat/send', { projectId: props.projectId, taskId: props.taskId ?? null, ...(props.taskId === undefined ? {} : { phase: props.phase }), ...(props.projectId === 'instructions' ? {instructionFocus: sentInstructionFocus} : {}), content, model: sentModel!.id, provider: sentModel!.provider ?? 'codex' });
-      if (draft.pending) { draft.pending.sendId = accepted.messages?.findLast(message => message.role === 'user')?.sendId; if (draft.version === version) draft.text = ''; }
+      if (draft.pending) { draft.pending.sendId = accepted.messages?.findLast(message => message.role === 'user')?.sendId; clearSubmittedText(); }
       draft.listeners.forEach(listener => listener());
       draft.refresh?.();
     } catch (error) {
       draft.pending = undefined;
-      if (error instanceof ApiError && error.code === 'MODEL_UNAVAILABLE') { rejectModel(currentKey, sentModel!.id, sentModel!.provider); restoreDraft(draft, content); }
+      if (error instanceof ApiError && error.code === 'MODEL_UNAVAILABLE') { rejectModel(currentKey, sentModel!.id, sentModel!.provider); if (fromComposer) restoreDraft(draft, content); }
       draft.error = error instanceof ApiError && error.status >= 400 && error.status < 500 ? `送信できませんでした: ${error.message}` : '送信を確認できませんでした。履歴を確認してから再送してください。';
       draft.listeners.forEach(listener => listener());
       draft.refresh?.();
@@ -346,9 +396,7 @@ export default function ChatPanel(props: { projectId: string; taskId?: string; p
     finally { if (key() === currentKey) { setInterrupting(false); refresh(); } }
   }
   return <>
-    <Show when={status()?.auth === 'none'}><p class="px-4 pt-3 text-sm">Codex にログインしてください。</p></Show>
-    <Show when={status() && !status()!.installed}><p class="px-4 pt-3 text-sm">Codex CLI をインストールしてください。</p></Show>
-    <Show when={status()?.auth === 'apiKey' || status()?.auth === 'other'}><p class="px-4 pt-3 text-sm">Codex はサブスクリプション以外の認証方式です。設定を確認してください。</p></Show>
+    <Show when={connectionNotice()}>{notice => <p class="px-4 pt-3 text-sm">{notice()}</p>}</Show>
     <Show when={loadError()}><p role="alert" class="px-4 pt-3 text-sm text-error">{loadError()}</p></Show>
     <Show when={syncError()}><p role="alert" class="px-4 pt-3 text-sm text-error">{syncError()} <button class="btn btn-xs" onClick={() => refresh()}>更新</button></p></Show>
     <div ref={scrollport} class="min-h-0 flex-1 overflow-y-auto p-5" role="log" aria-label="チャット履歴" aria-live="polite">
@@ -357,7 +405,7 @@ export default function ChatPanel(props: { projectId: string; taskId?: string; p
         <Show when={pack.role === 'assistant'}>
           <div class="chat-image avatar">
             <div class="grid size-8 place-items-center rounded-full bg-base-200">
-              {pack.provider === 'claude' ? <ClaudePopIcon /> : <ChatGPTPopIcon />}
+              <AgentIcon provider={pack.provider} />
             </div>
           </div>
         </Show>
@@ -373,10 +421,6 @@ export default function ChatPanel(props: { projectId: string; taskId?: string; p
           </Show>
           <button type="button" class="btn btn-ghost btn-xs shrink-0" aria-label="コマンド結果を閉じる" onClick={() => dismissCommand(id)}><span aria-hidden="true">×</span></button>
         </div>}</Show>
-        <Show when={localResult()} keyed>{result => <div class="flex min-w-0 items-start gap-2 rounded-box border border-base-300 px-3 py-2 text-sm">
-          <details class="min-w-0 flex-1"><summary class="cursor-pointer truncate">{result.name} · 結果</summary><pre class="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words">{result.output}</pre></details>
-          <button type="button" class="btn btn-ghost btn-xs shrink-0" aria-label="ローカルコマンド結果を閉じる" onClick={() => setLocalResult(undefined)}><span aria-hidden="true">×</span></button>
-        </div>}</Show>
       </div>
     </div>
     <Show when={busy()}><div role="status" class="mx-4 mb-3 self-start"><div class="aura text-primary motion-reduce:animate-none"><div class="card bg-base-100 px-4 py-2 text-sm text-base-content">{compacting() ? `${commandProgress()}…` : '作業中…'}</div></div></div></Show>
@@ -387,7 +431,61 @@ export default function ChatPanel(props: { projectId: string; taskId?: string; p
         <textarea ref={textarea} class="textarea textarea-bordered block min-h-24 w-full resize-y" aria-label="希望や回答を入力" placeholder="希望や回答を入力" aria-autocomplete="list" aria-controls={suggestions().length ? commandListId : undefined} aria-expanded={!!suggestions().length} aria-activedescendant={suggestions().length && activeSuggestion() >= 0 ? `${commandListId}-${activeSuggestion()}` : undefined} required value={text()} onInput={event => { setCommandInputFocused(true); updateText(event.currentTarget.value); }} onKeyDown={composerKeyDown} onFocus={() => { setCommandInputFocused(true); setSuggestionsDismissed(false); }} onBlur={() => setCommandInputFocused(false)} />
         <Show when={suggestions().length}><ul id={commandListId} role="listbox" aria-label="スラッシュコマンド" style={{'max-height':`${suggestionHeight()}px`}} class="absolute bottom-full left-0 z-50 mb-2 w-72 max-w-full overflow-y-auto overscroll-contain rounded-box border border-base-300 bg-base-100 p-1 shadow-lg"><For each={suggestions()}>{(item, index) => <li role="none"><button id={`${commandListId}-${index()}`} role="option" aria-selected={activeSuggestion() === index()} type="button" class={`w-full rounded px-3 py-2 text-left text-sm hover:bg-base-200 ${activeSuggestion() === index() ? 'bg-base-200' : ''}`} onMouseDown={event => event.preventDefault()} onClick={() => acceptSuggestion(index())}>{item.command} · {item.description}</button></li>}</For></ul></Show>
       </div>
-      <div class="mt-2 flex flex-wrap items-center justify-end gap-2"><Show when={props.projectId==='instructions'}><span class="mr-auto text-xs text-base-content/70">フォーカス: {props.instructionFocusLabel ?? '未選択'}</span></Show><select ref={modelSelect} class="select select-bordered select-sm w-auto" style={{ 'field-sizing': 'content' }} aria-label="モデル" value={model()} disabled={busy() || !models().length} onChange={event => selectModel(event.currentTarget.value)}><Show when={model() && !modelAvailable()}><option value={model()} selected disabled>⚠️ {modelLabel(selection()?.name ?? model(), selection()?.provider)}</option></Show><Show when={models().length} fallback={<Show when={!model()}><option value="">未確認</option></Show>}><For each={models().filter(item => modelAvailable() || modelValue(item) !== model())}>{item => <option value={modelValue(item)} selected={modelValue(item) === model()} disabled={!providerReady(item.provider)}>{modelLabel(item.name, item.provider)}</option>}</For></Show></select><Show when={busy()}><button type="button" class="btn btn-sm" disabled={interrupting()} onClick={interrupt}>中断</button></Show><button class="btn btn-primary btn-sm" type="submit" disabled={submitDisabled()}>{busy() ? (compacting() ? `${commandProgress()}...` : '応答中...') : '送信'}</button></div>
+      <div ref={composerActions} class="@container relative mt-2 flex flex-wrap items-center justify-between gap-2">
+        <div ref={commandDropdown} class="dropdown dropdown-top dropdown-start"
+          classList={{'dropdown-open': commandMenuOpen()}}
+          onFocusOut={event => {
+            if (event.relatedTarget instanceof Node && !event.currentTarget.contains(event.relatedTarget)) setCommandMenuOpen(false);
+          }}
+          onKeyDown={event => {
+            if (event.key === 'Escape' && commandMenuOpen()) {
+              event.preventDefault(); event.stopPropagation(); setCommandMenuOpen(false); commandMenuTrigger?.focus();
+            }
+          }}>
+          <button ref={commandMenuTrigger} type="button" class="btn btn-sm" disabled={commandMenuDisabled()}
+            aria-expanded={commandMenuOpen()} aria-controls={commandMenuOpen() ? commandMenuId : undefined}
+            onClick={event => { event.currentTarget.focus(); setCommandMenuOpen(open => !open); }}>コマンド</button>
+          <Show when={commandMenuOpen()}>
+            <ul id={commandMenuId} aria-label="チャットコマンド" style={{'max-height': `${commandMenuHeight()}px`}}
+              class="dropdown-content menu menu-sm mb-2 w-[min(20rem,100cqw)] flex-nowrap overflow-y-auto overscroll-contain rounded-box border border-base-300 bg-base-100 shadow-lg">
+              <For each={commandCategories}>{category => {
+                const commands = createMemo(() => permittedCommands().filter(command => command.kind === category.kind));
+                return <Show when={commands().length}><li><details>
+                  <summary>{category.label}</summary>
+                  <ul><For each={commands()}>{command => <li>
+                    <button type="button" class="min-w-0" onClick={() => runMenuCommand(command)}>
+                      <span class="min-w-0 whitespace-normal wrap-anywhere">{command.command} · {command.description}</span>
+                    </button>
+                  </li>}</For></ul>
+                </details></li></Show>;
+              }}</For>
+            </ul>
+          </Show>
+        </div>
+        <div class="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-2">
+          <Show when={key()} keyed>
+            <ContextGauge usage={contextUsage()} compactAvailable={canCompact()} onCompact={compactSelectedSession} />
+            <ModelPicker models={models()} selection={selection()} available={modelAvailable()} busy={busy()} anchor={() => composerActions} onSelect={selectModel} />
+          </Show>
+          <Show when={busy()}><button type="button" class="btn btn-sm" disabled={interrupting()} onClick={interrupt}>中断</button></Show>
+          <button class="btn btn-primary btn-sm" type="submit" disabled={submitDisabled()}>{busy() ? (compacting() ? `${commandProgress()}...` : '応答中...') : '送信'}</button>
+        </div>
+      </div>
     </form></Show>
+    <Show when={props.onTabStatusChange}>
+      <dialog ref={statusDialog} class="modal" aria-labelledby={statusTitleId}>
+        <div class="modal-box">
+          <h2 id={statusTitleId} class="text-lg font-bold">チャットの状態</h2>
+          <Show when={conversation()}>{value => <dl class="mt-3 grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1 text-sm">
+            <dt>選択</dt><dd class="wrap-anywhere">{selection() ? modelLabel(selection()!.id, selectedProvider()) : '未選択'}</dd>
+            <dt>保存された接続先</dt><dd class="wrap-anywhere">{value().sessionProvider ? providerName(value().sessionProvider) : '未開始'}</dd>
+            <dt>メッセージ数</dt><dd>{value().messages.length}</dd>
+            <dt>モデル接続</dt><dd>{selection() && providerReady(selectedProvider()) ? '利用可能' : '利用不可'}</dd>
+            <dt>更新接続</dt><dd>{connected() ? '接続済み' : '未接続'}</dd>
+          </dl>}</Show>
+          <div class="modal-action"><button type="button" class="btn" onClick={closeStatus}>閉じる</button></div>
+        </div>
+      </dialog>
+    </Show>
   </>;
 }
