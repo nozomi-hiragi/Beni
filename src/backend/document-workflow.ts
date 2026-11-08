@@ -3,15 +3,14 @@ import type { ChatService, WorkflowToolContext } from './chat';
 import type { DocumentItemInput, DocumentSource, DocumentVersion } from './document-table';
 import type { EmbeddedTool } from './embedded-tools';
 import { withDatabase } from './project-events';
+import { retrospectiveSignals } from './retrospective-signals';
 import type { Store } from './store';
 import { isInstructionKey, type InstructionKey } from './instructions';
 import { taskPhases, type TaskPhase } from '../shared/task-phase';
 
 const maxText = 4096;
 const maxPage = 20;
-const endOfReview = 2 ** 31 - 1;
 const knowledgeName = 'knowledge.md';
-const reviewPhases = taskPhases.filter(phase => phase !== 'finalization');
 const docName = /^[a-z][a-z0-9-]{0,95}\.md$/;
 const value = { type: 'string' };
 const cursor = { type: 'integer', minimum: 0 };
@@ -34,16 +33,14 @@ const editSchema = { type: 'object', properties: {
 const editTool = tool('edit_document', '文書に項目を挿入・更新・移動・削除する。新規は id を省略、既存は id を指定。空白以外の項目を追加・変更するときは reason と原文引用 sources が必須。見出しは独立した項目にし、その見出しを置く理由と引用を付ける。見出しや構成への指摘には実際の発言を引用する。index は挿入・移動位置。',
  { name: value, revision: { type: ['string', 'null'] }, update_id: value, edits: { type: 'array', items: editSchema, minItems: 1, maxItems: 32 } },
  ['name', 'revision', 'update_id', 'edits']);
-const reviewTools = [
- tool('review_next', '反省会の未精査資料を一件読む。長い資料は offset を辿って全文を確認し、必要な発見を文書に書いてから record_review を呼ぶ。', { offset: cursor }),
- tool('record_review', 'review_next の確認を記録する。発見がある場合は先に反省会文書へ記録する。', { id: cursor, finding: value }, ['id', 'finding'])
-];
+const reviewSignals = tool('get_retrospective_signals', '反省会で調べる対象を選ぶための手がかりを取得する。documents は文書項目の引用状況、execution は実装中の手戻りの候補。必要に応じて next を辿り、原文やイベントを確認する。', { area: { enum: ['documents', 'execution'] }, offset: cursor }, ['area']);
+const finishRetrospective = tool('finish_retrospective', '反省会の分析完了を申告する。通常の反省会チャットでは、自動分析が失敗または停止し、ユーザーが完了を依頼した場合だけ使う。反省会文書の最新版と、確認した根拠に基づく判断理由を指定する。追記すべき発見がない場合は既存の版を指定できる。', { revision: value, reason: value }, ['revision', 'reason']);
 const finishExecution = tool('finish_execution', '仕様と実装手順の作業・検証がすべて終わった場合は completed、続行不能なら blocked を記録する。理由に検証結果や未達項目を含める。', { outcome: { enum: ['completed', 'blocked'] }, reason: value }, ['outcome', 'reason']);
 const finishKnowledge = tool('finish_knowledge', 'ナレッジの確定版を指定する。変更不要の場合も既存の版を指定して判断理由を書く。', { revision: value, reason: value }, ['revision', 'reason']);
 const finishInstructions = tool('finish_instruction_update', '準備した指示の変更を確定する。変更不要の場合はその理由を記録する。', { reason: value }, ['reason']);
 
 type ChatReference = { kind: 'message' | 'result'; id: string; text: string; role?: 'user' | 'assistant' };
-type ReviewEntry = { id: number; label: string; text: string; source: string | null; read_to: number };
+type ReviewRun = { sendId?: string };
 type Job = NonNullable<ReturnType<Store['pendingInstructionJob']>>;
 type InstructionEdit = { key: InstructionKey; base: string; items: DocumentItemInput[] };
 type JobDraft = { job: Job; edits: Map<InstructionKey, InstructionEdit>; reason?: string };
@@ -70,8 +67,8 @@ function chunk(text: string, offset: number) {
 }
 
 export class DocumentWorkflow {
- private readonly running = new Set<string>();
- private readonly scheduledReview = new Set<string>();
+ private readonly reviewRuns = new Map<string, ReviewRun>();
+ private readonly reviewCompletions = new Map<string, string>();
  private readonly drafts = new Map<string, JobDraft>();
  private workingJobs = false;
  private jobsRequested = false;
@@ -85,10 +82,6 @@ export class DocumentWorkflow {
   return withDatabase(this.folder(projectId), db => {
    db.exec(`
     CREATE TABLE IF NOT EXISTS document_review (task_id TEXT PRIMARY KEY, state TEXT NOT NULL, error TEXT);
-    CREATE TABLE IF NOT EXISTS document_review_items (
-     task_id TEXT NOT NULL, id INTEGER NOT NULL, label TEXT NOT NULL, text TEXT NOT NULL,
-     source TEXT, read_to INTEGER NOT NULL DEFAULT -1, finding TEXT, PRIMARY KEY (task_id,id)
-    );
     CREATE TABLE IF NOT EXISTS document_send_inputs (
      task_id TEXT NOT NULL, send_id TEXT NOT NULL, phase TEXT NOT NULL, instructions TEXT NOT NULL,
      versions TEXT NOT NULL, documents TEXT NOT NULL, PRIMARY KEY (task_id,send_id)
@@ -110,7 +103,7 @@ export class DocumentWorkflow {
   if (!task || !phase) return [];
   return [...reads, ...(phase === 'execution' ? [] : [editTool]),
    ...(phase === 'execution' ? [finishExecution] : []),
-   ...(phase === 'retrospective' ? reviewTools : []), ...(phase === 'finalization' ? [finishKnowledge] : [])];
+   ...(phase === 'retrospective' ? [reviewSignals, finishRetrospective] : []), ...(phase === 'finalization' ? [finishKnowledge] : [])];
  }
 
  context(p: string, task: string | null, phase: TaskPhase | null, jobId?: string) {
@@ -119,7 +112,7 @@ export class DocumentWorkflow {
   const preparation = phase === 'documents' ? '最初に requirements.md を全項目読み、要件の原文を引用して仕様を整理する。' :
    phase === 'implementation' ? '最初に documents.md と仕様文書を全項目読み、仕様の原文を引用して手順を書く。' :
    phase === 'execution' ? '最初に仕様と implementation.md の固定版をすべて読み、実装と検証が完了するまで作業する。リポジトリへ納める仕様はツールから読んだ版を使う。すべて完了したか、続行できない場合は finish_execution で結果を確定する。' :
-   phase === 'retrospective' ? '全件精査を実行中なら review_next を空になるまで続ける。各原文、原因の根拠、改善策を retrospective.md へ記録し、確認した資料を record_review で確定する。見出しや文書構成に関する指摘も、実際の発言を引用して改善策とともに記録する。' :
+   phase === 'retrospective' ? 'get_retrospective_signals で文書の引用状況と実装中の手戻りの候補を調べ、影響が大きそうな箇所を選ぶ。引用数や再編集だけで原因を断定せず、必要に応じて list_documents、read_document、read_source、list_events、get_event、get_file_change、get_execution_output で根拠を確認する。確認できたことと未確認の推測を区別し、原因と改善策を引用付きで retrospective.md に記録する。見出しや文書構成に関する指摘も実際の発言を引用する。' :
    phase === 'finalization' ? 'retrospective.md を読み、その原文を引用して knowledge.md に再利用可能な知識をまとめる。見出しや文書構成に関する改善策も、今後の指示に反映できる形で残す。最後に finish_knowledge で完成した版と理由を記録する。' :
    'ユーザーの要求を原文として引用し、解釈と要件を requirements.md にまとめる。';
   return { knowledge: chunk(this.store.managedDocument(p, null, knowledgeName)?.content ?? '', 0).text, text:
@@ -128,6 +121,10 @@ export class DocumentWorkflow {
 
  sent(c: WorkflowToolContext, instructions: string) {
   if (!c.taskId || !c.phase || c.jobId) return;
+  if (c.phase === 'retrospective' && c.systemGenerated) {
+   const run = this.reviewRuns.get(c.taskId);
+   if (run) run.sendId = c.sendId;
+  }
   const versions = ['common', c.phase].map(key => ({ key, revision: this.store.instructionDocument(key)?.revision }))
    .filter((entry): entry is {key: InstructionKey; revision: string} => typeof entry.revision === 'string');
   const documents = this.store.managedDocuments(c.projectId, c.taskId).map(({ name, revision }) => ({ name, revision }));
@@ -281,8 +278,23 @@ export class DocumentWorkflow {
    return chunk(text, index(args.offset));
   }
   if (name === 'edit_document') return this.edit(c, args);
-  if (name === 'review_next') return this.nextReview(c, index(args.offset));
-  if (name === 'record_review') return this.recordReview(c, index(args.id), string(args.finding, 4096));
+  if (name === 'get_retrospective_signals') {
+   const area = args.area;
+   if (area !== 'documents' && area !== 'execution') throw Error('調査対象を確認してください');
+   return retrospectiveSignals(this.store, c.projectId, c.taskId!, area, index(args.offset));
+  }
+  if (name === 'finish_retrospective') {
+   const taskId = c.taskId!, state = this.review(c.projectId, taskId)?.state;
+   const available = c.systemGenerated
+    ? state === 'running' && this.reviewRuns.get(taskId)?.sendId === c.sendId
+    : this.reviewIsAvailable(taskId) && (state === 'failed' || state === 'stopped');
+   if (!available) throw Error('現在は分析の完了を申告できません');
+   const revision = string(args.revision), reason = string(args.reason, 4096);
+   if (!reason.trim()) throw Error('判断理由を指定してください');
+   if (this.read(c, 'retrospective.md')?.revision !== revision) throw Error('最新の反省会文書の版を指定してください');
+   this.reviewCompletions.set(c.sendId, revision);
+   return { revision };
+  }
   if (name === 'finish_execution') {
    const outcome = args.outcome;
    if (outcome !== 'completed' && outcome !== 'blocked') throw Error('実装結果を確認してください');
@@ -306,55 +318,8 @@ export class DocumentWorkflow {
  }
 
  review(p: string, t: string) {
-  return this.database(p, db => db.query(`SELECT state,error,
-   (SELECT COUNT(*) FROM document_review_items WHERE task_id=? AND finding IS NULL) AS remaining
-   FROM document_review WHERE task_id=?`).get(t, t)) as { state: 'pending' | 'running' | 'done' | 'failed'; error: string | null; remaining: number } | null;
- }
- private seedReview(p: string, t: string) {
-  const rows: { label: string; text: string; source?: DocumentSource }[] = [];
-  for (const doc of this.store.managedDocumentHistory(p, t)) {
-   for (const item of doc.items) {
-    if (!item.text.trim()) continue;
-    rows.push({ label: doc.name, text: item.text, source: { kind: 'document', id: doc.name + '/' + item.id, revision: doc.revision, text: '' } });
-    if (item.reason) rows.push({ label: doc.name + ' の根拠', text: item.reason + '\n' + JSON.stringify(item.sources) });
-   }
-  }
-  for (const phase of reviewPhases) for (const chatId of this.chat.workflowHistoryIds(p, t, phase)) for (const ref of this.chatReferences(p, t, phase, chatId)) {
-   rows.push({ label: phase, text: ref.text, source: { kind: ref.kind, id: ref.id, text: '' } });
-  }
-  this.database(p, db => db.transaction(() => {
-   const results = db.query('SELECT outcome,reason FROM document_execution_completion WHERE task_id=? ORDER BY rowid').all(t) as { outcome: string; reason: string }[];
-   for (const result of results) rows.push({ label: '実装の終了判定', text: result.outcome + ' ' + result.reason });
-   const instructions = db.query('SELECT DISTINCT instructions FROM document_send_inputs WHERE task_id=?').all(t) as {instructions: string}[];
-   for (const { instructions: text } of instructions) rows.push({ label: '適用した指示', text });
-   if (db.query('SELECT 1 FROM document_review_items WHERE task_id=? LIMIT 1').get(t)) return;
-   db.query("INSERT OR IGNORE INTO document_review VALUES (?, 'pending', NULL)").run(t);
-   const add = db.query('INSERT INTO document_review_items(task_id,id,label,text,source) VALUES (?,?,?,?,?)');
-   for (const [i, row] of rows.entries()) add.run(t, i + 1, row.label, row.source ? '' : row.text, row.source ? JSON.stringify(row.source) : null);
-  })());
- }
- private nextReview(c: WorkflowToolContext, offset: number) {
-  const row = this.database(c.projectId, db => db.query('SELECT id,label,text,source,read_to FROM document_review_items WHERE task_id=? AND finding IS NULL ORDER BY id LIMIT 1')
-    .get(c.taskId)) as ReviewEntry | null;
-  if (!row) return { done: true };
-  if (offset > Math.max(row.read_to, 0)) throw Error('精査資料を順番に読んでください');
-  const reference = row.source ? JSON.parse(row.source) as DocumentSource : null;
-  const text = reference ? this.source(c, reference) : row.text;
-  if (text === undefined) {
-   this.database(c.projectId, db => db.query('UPDATE document_review_items SET finding=? WHERE task_id=? AND id=?')
-    .run('確認不能：元の資料を取得できません', c.taskId, row.id));
-   return { id: row.id, label: row.label, unavailable: true };
-  }
-  const part = chunk(text, offset);
-  this.database(c.projectId, db => db.query('UPDATE document_review_items SET read_to=MAX(read_to,?) WHERE task_id=? AND id=?')
-   .run(part.next ?? endOfReview, c.taskId, row.id));
-  return { id: row.id, label: row.label, source: reference, ...part };
- }
- private recordReview(c: WorkflowToolContext, id: number, finding: string) {
-  const saved = this.database(c.projectId, db => db.query(`UPDATE document_review_items SET finding=?
-   WHERE task_id=? AND id=? AND finding IS NULL AND read_to=?`).run(finding, c.taskId, id, endOfReview));
-  if (!saved.changes) throw Error('未確認の精査資料を指定してください');
-  return { id };
+  return this.database(p, db => db.query('SELECT state,error FROM document_review WHERE task_id=?').get(t)) as
+   { state: 'pending' | 'running' | 'done' | 'failed' | 'stopped'; error: string | null } | null;
  }
 
  async prepare(p: string, t: string, phase: TaskPhase, provider?: import('../shared/communication').Provider, model?: string | null) {
@@ -364,51 +329,76 @@ export class DocumentWorkflow {
   await this.chat.send(p, t, '先行文書を読んで引用元と根拠を記録し、このフェーズの文書を作成または見直してください。',
    model ?? selection?.id ?? null, this.folder(p), this.store.taskDocumentFolder(p, t), phase, false, provider ?? this.chat.providerForModel(selection), undefined, true);
  }
+ private reviewIsAvailable(t: string) {
+  const task = this.store.task(t);
+  return task?.phase === 'retrospective' && task.status === 'idle';
+ }
+ async stopReview(p: string, t: string) {
+  await this.chat.stopTask(p, t, () => { this.reviewRuns.delete(t); }, () => {
+   if (!this.reviewIsAvailable(t)) throw Error('review unavailable');
+   const stopped = this.database(p, db => db.query(
+    "UPDATE document_review SET state='stopped',error=NULL WHERE task_id=? AND state IN ('pending','running')"
+   ).run(t));
+   if (!stopped.changes) throw Error('review unavailable');
+   this.changed(p, t);
+  });
+ }
+ retryReview(p: string, t: string) {
+  this.chat.withIdleTask(p, t, () => {
+   const state = this.review(p, t)?.state;
+   if (!this.reviewIsAvailable(t) || (state !== 'failed' && state !== 'stopped') || this.reviewRuns.has(t)) {
+    throw Error('review unavailable');
+   }
+   void this.runReview(p, t, true).catch(() => {});
+  });
+ }
  async runReview(p: string, t: string, retry = false) {
-  if (this.running.has(t) || this.scheduledReview.has(t)) return;
-  this.running.add(t);
+  if (!this.reviewIsAvailable(t) || this.reviewRuns.has(t)) return;
+  const review = this.review(p, t);
+  if (review?.state === 'done' || (!retry && (review?.state === 'failed' || review?.state === 'stopped'))) return;
+  this.database(p, db => db.query(`INSERT INTO document_review VALUES (?,'running',NULL)
+   ON CONFLICT(task_id) DO UPDATE SET state=excluded.state,error=NULL`).run(t));
+  const run: ReviewRun = {};
+  this.reviewRuns.set(t, run);
   let dispatched = false;
   try {
-   const review = this.review(p, t);
-   if (review?.state === 'done' || (review?.state === 'failed' && !retry)) return;
-   if (!review || (retry && review.remaining === 0)) this.seedReview(p, t);
-   this.database(p, db => db.query("UPDATE document_review SET state='running',error=NULL WHERE task_id=?").run(t));
-   if (retry) this.progress.delete(t);
    this.changed(p, t);
    const model = (await this.chat.get(p, t, 'retrospective')).selectedModel ?? (await this.chat.get(p, t, 'execution')).selectedModel;
-   await this.chat.send(p, t, '全フェーズの資料を順に精査し、過不足と根拠、改善策を反省会文書に記録してください。',
+   if (this.reviewRuns.get(t) !== run || this.review(p, t)?.state !== 'running') return;
+   await this.chat.send(p, t, '文書の引用状況と実装中の手戻りを手がかりに、調べる対象を選んで分析してください。コードの変更は行わず、確認した根拠と改善策を反省会文書に記録してください。最後に finish_retrospective で最新版と判断理由を指定してください。重要な発見がなければ既存の版を指定できます。',
     model?.id ?? null, this.folder(p), this.store.taskDocumentFolder(p, t), 'retrospective', false, this.chat.providerForModel(model), undefined, true);
    dispatched = true;
   } catch {
-   this.reviewFailed(p, t);
+   if (this.reviewRuns.get(t) === run) this.reviewFailed(p, t);
   } finally {
-   if (!dispatched) this.running.delete(t);
+   if (!dispatched && this.reviewRuns.get(t) === run) this.reviewRuns.delete(t);
   }
  }
  private reviewFailed(p: string, t: string) {
-  this.database(p, db => db.query("INSERT INTO document_review VALUES (?,'failed','精査を続行できませんでした') ON CONFLICT(task_id) DO UPDATE SET state=excluded.state,error=excluded.error").run(t));
-  this.changed(p, t);
+  const failed = this.database(p, db => db.query(`UPDATE document_review SET state='failed',error='反省会の分析を完了できませんでした'
+   WHERE task_id=? AND state='running'`).run(t));
+  if (failed.changes) this.changed(p, t);
  }
  finished(c: WorkflowToolContext, status: string) {
   this.capturedInstructions.delete(c.sendId);
   if (c.phase === 'execution' && c.taskId) return this.executionFinished(c,status);
-  if (c.phase !== 'retrospective' || !c.taskId || c.jobId) return;
+  if (c.phase !== 'retrospective' || !c.taskId) return;
   const { projectId: p, taskId: t } = c;
-  this.running.delete(t);
-  const review = this.review(p, t);
-  if (review?.state !== 'running') return;
-  if (status !== 'completed') return this.reviewFailed(p, t);
-  if (review.remaining === 0) {
-   this.progress.delete(t);
-   this.database(p, db => db.query("UPDATE document_review SET state='done',error=NULL WHERE task_id=?").run(t));
-   this.changed(p, t);
+  const revision = this.reviewCompletions.get(c.sendId);
+  this.reviewCompletions.delete(c.sendId);
+  if (c.systemGenerated) {
+   const run = this.reviewRuns.get(t);
+   if (!run || (run.sendId !== undefined && run.sendId !== c.sendId)) return;
+   this.reviewRuns.delete(t);
+  } else if (!revision || !this.reviewIsAvailable(t)) return;
+  const state = this.review(p, t)?.state;
+  if (!state || (c.systemGenerated ? state !== 'running' : state !== 'failed' && state !== 'stopped')) return;
+  if (status !== 'completed' || !revision || this.read(c, 'retrospective.md')?.revision !== revision) {
+   if (c.systemGenerated) this.reviewFailed(p, t);
    return;
   }
-  this.scheduledReview.add(t);
-  setTimeout(() => {
-   this.scheduledReview.delete(t);
-   void this.continueReview(p,t,c.sendId).catch(() => this.reviewFailed(p,t)).catch(() => {});
-  }, 0);
+  this.database(p, db => db.query("UPDATE document_review SET state='done',error=NULL WHERE task_id=? AND state=?").run(t, state));
+  this.changed(p, t);
  }
  private readonly continuedExecution = new Set<string>();
  isExecutionContinuing(taskId: string) { return this.continuedExecution.has(taskId); }
@@ -442,14 +432,6 @@ export class DocumentWorkflow {
    if(this.store.task(t)?.phase === 'execution')await this.chat.recoverExecution(p,t);
   }
  }
- private async continueReview(p: string, t: string, sendId: string) {
-  const recorded = this.database(p, db => db.query('SELECT COALESCE(SUM(MAX(0,read_to) + (finding IS NOT NULL)),0) AS total FROM document_review_items WHERE task_id=?').get(t)) as { total: number };
-  const previous = this.progress.get(t);
-  if (previous?.sendId !== sendId && previous?.total === recorded.total) return this.reviewFailed(p, t);
-  this.progress.set(t, { total: recorded.total, sendId });
-  if (this.store.task(t)?.phase === 'retrospective') await this.runReview(p, t);
- }
- private readonly progress = new Map<string, { total: number; sendId: string }>();
  private completion(p: string, t: string, chatId: string) {
   return this.database(p, db => db.query('SELECT revision,reason FROM document_knowledge_completion WHERE task_id=? AND chat_id=?').get(t, chatId)) as { revision: string; reason: string } | null;
  }

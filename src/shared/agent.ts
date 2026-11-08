@@ -18,6 +18,7 @@ export type AgentInfo = {
   name: string;
   commands: readonly AgentCommand[];
   supportsUsage: boolean;
+  supportsContextUsage?: boolean;
 };
 export type UsageWindow = {
   label: string;

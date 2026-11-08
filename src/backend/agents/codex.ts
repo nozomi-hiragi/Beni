@@ -1,5 +1,8 @@
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { constants } from 'node:fs';
+import { lstat, open, realpath } from 'node:fs/promises';
+import { basename, dirname, isAbsolute, join, relative } from 'node:path';
 import { createInterface } from 'node:readline';
 import { toolResult, type EmbeddedToolResult } from '../embedded-tools';
 import { codexRateLimits } from '../rate-limits';
@@ -13,7 +16,8 @@ const modelErrors = ['model_not_found', 'model_not_supported', 'model_not_availa
 const modelRejected = (error: any) => modelErrors.includes(error?.data?.code) || modelErrors.includes(error?.code);
 const toolTypes = new Set(['commandExecution', 'fileChange', 'mcpToolCall', 'dynamicToolCall', 'functionCallOutput', 'webSearch', 'imageView', 'imageGeneration']);
 const disabledFeatures = ['apps', 'plugins', 'multi_agent', 'browser_use', 'computer_use', 'hooks', 'skill_mcp_dependency_install'];
-const scopedFeatures = ['shell_tool', 'code_mode_host'];
+const scopedFeatures = ['shell_tool', 'code_mode_host'] as const;
+type ScopedFeatures = Record<(typeof scopedFeatures)[number], boolean>;
 const workspaceSandbox = {
  network_access: false,
  exclude_slash_tmp: true,
@@ -26,6 +30,10 @@ const encode = (value: unknown) => typeof value === 'string' ? value : JSON.stri
 const failed = (code: AgentFailureCode): AgentOutcome => ({ status: 'failed', code });
 const unknown: AgentOutcome = { status: 'unknown' };
 const interrupted: AgentOutcome = { status: 'interrupted' };
+const threadIdPattern = /^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i;
+const rolloutName = /^rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-/;
+const contextProbeTimeout = 2000;
+const rolloutTailLimit = 1024 * 1024;
 
 class Rejected extends Error {
  constructor(readonly code: AgentFailureCode) { super('Codex request rejected'); }
@@ -45,10 +53,10 @@ class CodexRpc {
  onEvent: (method: string, params: any) => void = () => {};
  onToolCall: (params: any) => Promise<EmbeddedToolResult> = async () => toolResult({ error: 'Unsupported tool' }, false);
 
- constructor(executable: string, config?: { servers?: readonly string[]; toolsEnabled?: boolean }) {
+ constructor(executable: string, config?: { servers?: readonly string[]; features?: ScopedFeatures }) {
   const args = config ? [
    '-c', 'forced_login_method="chatgpt"',
-   ...scopedFeatures.flatMap(name => [config.toolsEnabled ? '--enable' : '--disable', name]),
+   ...scopedFeatures.flatMap(name => [config.features?.[name] ? '--enable' : '--disable', name]),
    ...disabledFeatures.flatMap(name => ['--disable', name]),
    '-c', 'web_search="disabled"',
    '-c', 'sandbox_mode="read-only"',
@@ -131,12 +139,13 @@ class CodexRpc {
   });
  }
 
- async init() {
-  await this.request('initialize', {
+ async init(timeout?: number) {
+  const result = await this.request('initialize', {
    clientInfo: { name: 'beni', title: 'Beni', version: '0.2.0' },
    capabilities: { experimentalApi: true },
-  });
+  }, timeout);
   this.write({ method: 'initialized', params: {} });
+  return result;
  }
 
  close() {
@@ -162,6 +171,91 @@ function usageSnapshot(params: unknown, accountKey?: string): AgentUsage {
  return { accountKey, kind: 'snapshot', usage: windows.length ? { observedAt: now(), windows } : 'unknown' };
 }
 
+function latestRolloutUsage(lines: string, modelId: string): ContextUsage | undefined {
+ let turnId: string | undefined;
+ let model: string | undefined;
+ let usage: ContextUsage | undefined;
+ let complete = false;
+ for (const line of lines.split('\n')) {
+  if (!line.trim()) continue;
+  const record = JSON.parse(line);
+  const payload = record?.payload;
+  if (record?.type === 'turn_context') {
+   if (turnId !== undefined && payload?.turn_id === turnId) model = payload.model;
+  } else if (record?.type === 'compacted') {
+   // Usage recorded before Codex replaced the history no longer describes this context.
+   usage = undefined;
+  } else if (record?.type === 'event_msg') {
+   switch (payload?.type) {
+    case 'task_started':
+    case 'turn_started':
+     turnId = nonempty(payload.turn_id) ? payload.turn_id : undefined;
+     model = undefined;
+     usage = undefined;
+     complete = false;
+     break;
+    case 'task_complete':
+    case 'turn_complete':
+     complete = turnId !== undefined && payload.turn_id === turnId;
+     break;
+    case 'turn_aborted':
+    case 'thread_rolled_back':
+    case 'undo_completed':
+    case 'error':
+     turnId = undefined;
+     usage = undefined;
+     break;
+    case 'context_compacted':
+     usage = undefined;
+     break;
+    case 'token_count':
+     if (turnId !== undefined && !complete) {
+      usage = contextUsageFromCounts(payload.info?.last_token_usage?.total_tokens, payload.info?.model_context_window);
+     }
+     break;
+   }
+  }
+ }
+ return complete && model === modelId ? usage : undefined;
+}
+
+async function readRolloutUsage(home: unknown, path: unknown, id: string, modelId: string, signal: AbortSignal) {
+ if (!nonempty(home) || !isAbsolute(home) || !nonempty(path) || !isAbsolute(path)) return;
+ const localPath = relative(home, path);
+ const name = basename(localPath);
+ if (!rolloutName.test(name) || name.replace(rolloutName, '') !== `${id}.jsonl` ||
+     !/^(?:sessions[/\\]\d{4}[/\\]\d{2}[/\\]\d{2}|archived_sessions)$/.test(dirname(localPath)) ||
+     path !== join(home, localPath)) return;
+ const root = await realpath(home);
+ const canonicalPath = join(root, localPath);
+ // Only a regular file at the Codex-owned location is eligible. Reject symlinks and special files.
+ if (await realpath(canonicalPath) !== canonicalPath) return;
+ const entry = await lstat(canonicalPath);
+ if (!entry.isFile()) return;
+ signal.throwIfAborted();
+ const file = await open(canonicalPath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+ try {
+  const stat = await file.stat();
+  if (!stat.isFile() || stat.ino !== entry.ino || stat.dev !== entry.dev) return;
+  const header = Buffer.alloc(Math.min(stat.size, 64 * 1024));
+  const head = await file.read(header, 0, header.length, 0);
+  const headerEnd = header.indexOf(10);
+  if (headerEnd < 0 || headerEnd >= head.bytesRead) return;
+  const meta = JSON.parse(header.toString('utf8', 0, headerEnd));
+  if (meta?.type !== 'session_meta' || meta.payload?.id !== id) return;
+  const tail = Buffer.alloc(Math.min(stat.size, rolloutTailLimit));
+  const position = stat.size - tail.length;
+  const read = await file.read(tail, 0, tail.length, position);
+  const after = await file.stat();
+  if (read.bytesRead !== tail.length || tail.at(-1) !== 10 ||
+      stat.size !== after.size || stat.mtimeMs !== after.mtimeMs || signal.aborted) return;
+  const start = position === 0 ? 0 : tail.indexOf(10) + 1;
+  return latestRolloutUsage(tail.toString('utf8', start), modelId);
+ } finally {
+  await file.close();
+ }
+}
+
 async function withRestrictedRpc<T>(
  executable: string,
  request: AgentRequest,
@@ -169,7 +263,11 @@ async function withRestrictedRpc<T>(
  run: (rpc: CodexRpc, accountKey?: string) => Promise<T>,
 ): Promise<T> {
  const { cwd } = request;
- const toolsEnabled = request.access === 'workspace-write' && request.builtInTools === 'phase-default';
+ const shellEnabled = request.access === 'workspace-write' && request.builtInTools === 'phase-default';
+ const features = {
+  shell_tool: shellEnabled,
+  code_mode_host: shellEnabled || request.tools.length > 0,
+ };
  let rpc = new CodexRpc(executable, {});
  const stopSetup = () => { void rpc.close(); };
  signal.addEventListener('abort', stopSetup, { once: true });
@@ -181,14 +279,14 @@ async function withRestrictedRpc<T>(
   if (!servers.every(name => /^[A-Za-z0-9_-]+$/.test(name))) throw Error('Unsafe configuration');
   await rpc.close();
   signal.throwIfAborted();
-  rpc = new CodexRpc(executable, { servers, toolsEnabled });
+  rpc = new CodexRpc(executable, { servers, features });
   await rpc.init();
   const { config } = await rpc.request('config/read', { cwd });
   const workspace = config.sandbox_workspace_write;
   if ((config.model_provider != null && config.model_provider !== 'openai') ||
    Object.values(config.mcp_servers ?? {}).some((server: any) => server?.enabled !== false) ||
    disabledFeatures.some(name => config.features?.[name] !== false) ||
-   scopedFeatures.some(name => config.features?.[name] !== toolsEnabled) ||
+   scopedFeatures.some(name => config.features?.[name] !== features[name]) ||
    config.web_search !== 'disabled' || config.sandbox_mode !== 'read-only' ||
    workspace?.network_access !== false || workspace.exclude_slash_tmp !== true ||
    workspace.exclude_tmpdir_env_var !== true ||
@@ -528,6 +626,28 @@ export class CodexAgent implements Agent {
   } catch { /* Keep the same account's last known usage if refreshing failed. */ }
   finally { await rpc.close(); }
   return usageSnapshot(undefined, accountKey);
+ }
+
+ async getContextUsage({ session, modelId }: Pick<AgentRequest, 'cwd' | 'modelId'> & { session: AgentSession },
+  signal: AbortSignal): Promise<ContextUsage | undefined> {
+  if (session.agentId !== this.id || !threadIdPattern.test(session.id) || signal.aborted) return;
+  const executable = this.executable();
+  if (!executable) return;
+  const rpc = new CodexRpc(executable, {});
+  const stop = () => { void rpc.close(); };
+  signal.addEventListener('abort', stop, { once: true });
+  try {
+   const initialized = await rpc.init(contextProbeTimeout);
+   // A resume can load and persist thread state. Read only the path and model metadata here.
+   const { thread } = await rpc.request('thread/read', { threadId: session.id, includeTurns: false }, contextProbeTimeout);
+   if (thread?.id !== session.id || thread.model !== modelId || thread.ephemeral !== false ||
+       thread.status?.type === 'active') return;
+   return await readRolloutUsage(initialized?.codexHome, thread.path, session.id, modelId, signal);
+  } catch { /* This CLI version or thread has no usable local measurement. */ }
+  finally {
+   signal.removeEventListener('abort', stop);
+   await rpc.close();
+  }
  }
 
  async run(request: AgentRequest, host: AgentHost): Promise<AgentOutcome> {

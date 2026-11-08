@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -68,6 +68,27 @@ test('Codex review refuses an effective configuration that allows network access
  } finally { delete process.env.FAKE_CODEX_UNSAFE_SANDBOX; }
 });
 
+test('Codex enables the code mode host for embedded tools independently of the shell', async () => {
+ const tools = [{ name: 'echo', description: 'Echoes text.', inputSchema: { type: 'object' } }];
+ for (const [access, builtInTools, hasEmbeddedTools, shell, host] of [
+  ['read-only', 'phase-default', false, false, false],
+  ['read-only', 'phase-default', true, false, true],
+  ['read-only', 'disabled', true, false, true],
+  ['workspace-write', 'phase-default', false, true, true],
+  ['workspace-write', 'disabled', false, false, false],
+  ['workspace-write', 'disabled', true, false, true],
+ ] as const) {
+  const { events, outcome } = await run({
+   access, builtInTools, tools: hasEmbeddedTools ? tools : [],
+   operation: { kind: 'send', text: 'report tool features' },
+  });
+  expect(outcome).toEqual({ status: 'completed' });
+  expect(events).toContainEqual({
+   type: 'text.delta', itemId: 'message-1', delta: JSON.stringify({ shell_tool: shell, code_mode_host: host }),
+  });
+ }
+});
+
 test('Codex calls registered tools in the accepted turn even when the request arrived early', async () => {
  const types: string[] = [];
  process.env.FAKE_EMBEDDED_CALLS = JSON.stringify([
@@ -76,7 +97,8 @@ test('Codex calls registered tools in the accepted turn even when the request ar
  ]);
  try {
   const outcome = await agent.run({
-   ...request, tools: [{ name: 'echo', description: 'Echoes text.', inputSchema: { type: 'object' } }],
+   ...request, builtInTools: 'disabled',
+   tools: [{ name: 'echo', description: 'Echoes text.', inputSchema: { type: 'object' } }],
   }, {
    signal: new AbortController().signal,
    emit: async event => { types.push(event.type); },
@@ -142,6 +164,64 @@ test('Codex reports only active context usage from the matching turn and session
   process.env.FAKE_CODEX_CONTEXT = 'missing-window';
   expect((await run()).events.some(event => event.type === 'context.usage')).toBe(false);
  } finally { delete process.env.FAKE_CODEX_CONTEXT; }
+});
+
+test('Codex recovers only the latest completed context measurement through a local thread read', async () => {
+ const cwd = await mkdtemp(join(tmpdir(), 'beni-codex-usage-'));
+ const root = join(cwd, 'sessions', '2026', '10', '15');
+ const id = '01936ef3-0000-7000-8000-000000000001';
+ const path = join(root, `rollout-2026-10-15T12-00-00-${id}.jsonl`);
+ const log = join(cwd, 'rpc.jsonl');
+ const signal = new AbortController().signal;
+ const probe = { session: { ...session, id }, modelId: 'model-a', cwd };
+ const record = (type: string, payload: object) => JSON.stringify({ type, payload }) + '\n';
+ const event = (type: string, payload: object = {}) => record('event_msg', { type, ...payload });
+ const tokenCount = (total_tokens: number, model_context_window: number | null = 100_000) => event('token_count', {
+  info: { last_token_usage: { total_tokens }, total_token_usage: { total_tokens: 330_000 }, model_context_window },
+ });
+ const meta = record('session_meta', { id });
+ const start = event('task_started', { turn_id: 'turn-1' }) +
+  record('turn_context', { turn_id: 'turn-1', model: 'model-a' });
+ const complete = event('task_complete', { turn_id: 'turn-1' });
+ const normal = meta + start + tokenCount(22_000) + complete;
+ const compacted = meta + start + tokenCount(22_000) + record('compacted', {});
+ await mkdir(root, { recursive: true });
+ process.env.FAKE_CODEX_ROLLOUT_HOME = cwd;
+ process.env.FAKE_CODEX_ROLLOUT_PATH = path;
+ process.env.FAKE_CODEX_LOG = log;
+ try {
+  await writeFile(path, normal);
+  expect(await agent.getContextUsage(probe, signal)).toEqual({ usedTokens: 22_000, maxTokens: 100_000 });
+  expect(await readFile(path, 'utf8')).toBe(normal);
+  const requests = (await readFile(log, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+  expect(requests.map(row => row.method)).toEqual(['initialize', 'initialized', 'thread/read']);
+  expect(requests.at(-1).params).toEqual({ threadId: id, includeTurns: false });
+  expect(await agent.getContextUsage({ ...probe, modelId: 'model-b' }, signal)).toBeUndefined();
+  const longRecord = record('response_item', { text: 'x'.repeat(1024 * 1024) });
+  for (const [contents, usage] of [
+   [meta + longRecord + start + tokenCount(21_000) + complete, { usedTokens: 21_000, maxTokens: 100_000 }],
+   [meta + start + longRecord + tokenCount(21_000) + complete, undefined],
+   [compacted + complete, undefined],
+   [compacted + tokenCount(7_000) + complete, { usedTokens: 7_000, maxTokens: 100_000 }],
+   [meta + start + tokenCount(22_000, null) + complete, undefined],
+   [normal + event('task_started', { turn_id: 'newer-turn' }), undefined],
+   [normal + '{', undefined],
+   [record('session_meta', { id: 'different' }) + start + tokenCount(22_000) + complete, undefined],
+  ] as const) {
+   await writeFile(path, contents);
+   expect(await agent.getContextUsage(probe, signal)).toEqual(usage);
+  }
+  await writeFile(path, normal);
+  const unrelated = join(cwd, 'other.jsonl');
+  await rename(path, unrelated);
+  await symlink(unrelated, path);
+  expect(await agent.getContextUsage(probe, signal)).toBeUndefined();
+ } finally {
+  delete process.env.FAKE_CODEX_ROLLOUT_HOME;
+  delete process.env.FAKE_CODEX_ROLLOUT_PATH;
+  delete process.env.FAKE_CODEX_LOG;
+  await rm(cwd, { recursive: true, force: true });
+ }
 });
 
 test('Codex compaction ignores old context usage and only reports a fresh measurement on success', async () => {

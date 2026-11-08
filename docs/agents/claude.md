@@ -1,6 +1,6 @@
 # ClaudeAgent 仕様
 
-[Agent インターフェース](README.md) の実装仕様。登録 ID は `claude`。通常送信・生成は TypeScript の Claude Agent SDK を使い、検出済みの公式 Claude Code CLI を `pathToClaudeCodeExecutable` に指定する。移行の基準は現行の SDK `0.3.292` と CLI `2.1.292` 以降。保守コマンドは CLI の非対話モードを使う。 [SDK リファレンス](https://code.claude.com/docs/en/agent-sdk/typescript)
+[Agent インターフェース](README.md) の実装仕様。登録 ID は `claude`。通常送信・生成は TypeScript の Claude Agent SDK `0.3.319` を使い、検出済みの公式 Claude Code CLI `2.1.292` 以降を `pathToClaudeCodeExecutable` に指定する。保守コマンドは CLI の非対話モードを使う。 [SDK リファレンス](https://code.claude.com/docs/en/agent-sdk/typescript)
 
 ## 接続状態と利用枠
 
@@ -22,14 +22,14 @@
 
 `read-only` と `workspace-write` を提供する。`restricted`・`safe-mode`、設定読み込みの制限、許可ツールの絞り込みを維持する。組み込みツールを無効にした実行では Beni が渡した埋め込みツールのみ使う。保守コマンドではツールを無効にする。書き込みとコマンド実行は CLI のサンドボックスで制限し、サンドボックスが使えなければコマンド実行を拒否する。 [Claude の接続方式と隔離範囲](../features/llm-chat.md#claude-code)
 
-ターンが正常終了したら、SDK の `getContextUsage({ detail: 'summary' })` が返す `totalTokens` と `rawMaxTokens` を使う。サマリーは最後の応答とローカルの推計に基づく。Claude の `/context` が構造化データを返した場合も使用量を更新できる。 [SDK リファレンス](https://code.claude.com/docs/en/agent-sdk/typescript#sdkcontrolgetcontextusageresponse)
+コンテキスト使用量には、SDK の `getContextUsage({ detail: 'summary' })` が返す `totalTokens` と `rawMaxTokens` を使う。サマリーは最後の応答とローカルの推計に基づく。ターンの正常終了後に取得するほか、保存済みセッションの計測値を更新するときは、入力を送らずセッションを読み込んでサマリーを取得する。 [SDK リファレンス](https://code.claude.com/docs/en/agent-sdk/typescript#sdkcontrolgetcontextusageresponse)
 
 ## コマンド
 
 | 登録名 | 種別 | 処理 |
 | --- | --- | --- |
 | `compact` | 保守、既存セッション必須 | CLI の `/compact` を実行し、手動の `compact_boundary` と正常終了を確認する |
-| `context` / `usage` | 保守、既存セッション必須 | CLI のローカル出力と正常終了を確認し、結果本文を返す。`cost`・`stats` は `usage` の別名 |
+| `usage` | 保守、既存セッション必須 | CLI のローカル出力と正常終了を確認し、結果本文を返す。`cost`・`stats` は `usage` の別名 |
 | `review` / `code-review` | 生成 | SDK で `/code-review` を実行する |
 | `simplify` / `security-review` / `recap` | 生成 | SDK で対応する組み込みコマンドを実行する |
 
@@ -37,4 +37,4 @@
 
 生成コマンドには通常送信と同じ作業範囲を適用し、クラウド実行や外部投稿を指定する引数は拒否する。通常送信では組み込みのスラッシュコマンドを無効にする。 [SDK でのコマンド実行](https://code.claude.com/docs/en/agent-sdk/slash-commands)
 
-今後の拡張では、会話分岐を SDK の `forkSession()` に対応づけられる。コンテキストの構造化データを画面で使う場合は、対応する SDK バージョンの `getContextUsage()` を候補とする。 [SDK リファレンス](https://code.claude.com/docs/en/agent-sdk/typescript)
+今後の拡張では、会話分岐を SDK の `forkSession()` に対応づけられる。 [SDK リファレンス](https://code.claude.com/docs/en/agent-sdk/typescript)

@@ -7,6 +7,7 @@ import { Store } from './store/index';
 import { ChatService, type TaskEventsProvider } from './chat';
 import { createHandler, createServerOptions, dataPaths } from './server';
 import { withDatabase } from './project-events';
+import { DummyAgent } from './test/dummy-agent';
 import { mkdtemp, mkdir, realpath, rm, symlink, writeFile, readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -582,7 +583,7 @@ test('Claude の状態・送信と実装開始は接続先を検証して引き�
  }finally{store.close();await rm(folder,{recursive:true,force:true})}
 });
 
-test('文書の引用を照合し、精査から終了後のインストラクション更新まで実行する',async()=>{
+test('文書の引用を照合し、自動分析から終了後のインストラクション更新まで実行する',async()=>{
  const folder=await mkdtemp(join(tmpdir(),'beni-doc-workflow-')),store=new Store(':memory:');
  const project=store.createProject('Example',folder),task=store.createTask(project.id,'Task');
  const chat=new ChatService(()=>folder,()=>fakeCodex),handle=createHandler(store,folder,chat);
@@ -619,11 +620,13 @@ test('文書の引用を照合し、精査から終了後のインストラク�
   await waitUntil(async()=>(await detail()).workflow.review?.state==='done');
   const review=await detail();
   expect(review.task.phase).toBe('retrospective');
-  expect(review.workflow.review.remaining).toBe(0);
+  expect(review.workflow.review).toEqual({state:'done',error:null});
   expect(document('retrospective.md').content).toContain('検証の根拠を見直す。');
   const reviewPacks=chat.workflowSources(project.id,task.id,'retrospective')!.packs;
-  expect(reviewPacks.some(pack=>pack.tool?.name==='review_next'&&pack.tool.output.includes(fixtureRequest))).toBe(true);
-  expect(reviewPacks.some(pack=>pack.tool?.name==='record_review'&&pack.status==='completed')).toBe(true);
+  expect(reviewPacks.some(pack=>pack.tool?.name==='get_retrospective_signals'&&pack.status==='completed')).toBe(true);
+  expect(reviewPacks.some(pack=>pack.tool?.name==='read_source'&&pack.tool.output.includes(fixtureRequest))).toBe(true);
+  expect(reviewPacks.some(pack=>pack.tool?.name==='finish_retrospective'&&pack.status==='completed')).toBe(true);
+  expect(document('retrospective.md').items.at(-1)?.sources[0]).toMatchObject({kind:'message',text:fixtureRequest});
 
   process.env.FAKE_CODEX_WORKFLOW='without-finish';
   expect((await post(taskPath+'/complete',{phase:'retrospective'})).status).toBe(200);
@@ -661,6 +664,226 @@ test('文書の引用を照合し、精査から終了後のインストラク�
   expect((await knowledgeLookup(knowledge.revision,knowledgeItem.id)).status).toBe(404);
  }finally{unsubscribe();delete process.env.FAKE_CODEX_WORKFLOW;store.close();await rm(folder,{recursive:true,force:true})}
 },15000);
+
+test('反省会の自動分析では完了申告があっても停止が勝ち、再起動後は手動で再開できる', async () => {
+ const folder=await mkdtemp(join(tmpdir(),'beni-review-stop-')),store=new Store(':memory:');
+ const project=store.createProject('Example',folder),task=store.createTask(project.id,'Task');
+ const entered=Promise.withResolvers<void>(),aborted=Promise.withResolvers<void>(),release=Promise.withResolvers<void>();
+ const agent=new DummyAgent({supportsEmbeddedTools:true,scenario:async(request,host,accept)=>{
+  await accept();
+  const revision=store.managedDocument(project.id,task.id,'retrospective.md')!.revision;
+  const finish=(reason='追記する発見なし')=>host.callTool({id:'finish',name:'finish_retrospective',input:{revision,reason}});
+  if(request.operation.kind==='send'&&request.operation.text==='検証について相談する。'){
+   expect(request.access).toBe('workspace-write');
+   expect(request.tools).toEqual(agent.requests[0]?.tools);
+   expect(request.resumeToolsChanged).toBe(false);
+   expect(request.instructions).not.toContain('finish_retrospective');
+   expect((await finish(' ')).ok).toBe(false);
+   expect((await host.callTool({id:'signals',name:'get_retrospective_signals',input:{area:'documents'}})).ok).toBe(true);
+   await host.emit({type:'text.completed',itemId:'reply',text:'確認します。'});
+   return {status:'completed'};
+  }
+  expect(request.access).toBe('read-only');
+  expect((await finish()).ok).toBe(true);
+  if(agent.requests.length===1){
+   const interrupted=new Promise<void>(resolve=>host.signal.addEventListener('abort',()=>resolve(),{once:true}));
+   entered.resolve();
+   await interrupted;
+   aborted.resolve();
+   await release.promise;
+  }
+  return {status:'completed'};
+ }});
+ let chat=new ChatService(()=>folder,[agent]),handle=createHandler(store,folder,chat);
+ const address='http://127.0.0.1:3210',taskPath=`/api/tasks/${task.id}`;
+ const get=(path:string)=>handle(new Request(address+path));
+ const post=(path:string,input:object={})=>handle(new Request(address+path,{method:'POST',
+  headers:{origin:address,'content-type':'application/json'},body:JSON.stringify({projectId:project.id,...input})}));
+ const review=async()=>(await (await get(taskPath)).json()).workflow.review;
+ try{
+  expect((await post(taskPath+'/stop-review')).status).toBe(409);
+  expect((await post(taskPath+'/stop-review',{projectId:generateId('project')})).status).toBe(404);
+  store.selectTaskPhase(project.id,task.id,'requirements','retrospective');
+  await get(taskPath);
+  await entered.promise;
+  const running=await review();
+  expect(running).toEqual({state:'running',error:null});
+
+  const stop=post(taskPath+'/stop-review');
+  await aborted.promise;
+  expect((await post(taskPath+'/retry-review')).status).toBe(409);
+  expect((await post(taskPath+'/stop-review')).status).toBe(409);
+  release.resolve();
+  const stopped=await stop;
+  expect(stopped.status).toBe(200);
+  expect(await stopped.json()).toEqual({ok:true});
+  expect((await chat.get(project.id,task.id,'retrospective')).messages.at(-1)?.status).toBe('completed');
+
+  chat=new ChatService(()=>folder,[agent]);
+  handle=createHandler(store,folder,chat);
+  expect((await get('/api/state')).status).toBe(200);
+  expect(await review()).toEqual({...running,state:'stopped'});
+  expect((await post(taskPath+'/complete',{phase:'retrospective'})).status).toBe(409);
+  expect(agent.requests).toHaveLength(1);
+  expect((await post('/api/chat/send',{taskId:task.id,phase:'retrospective',content:'検証について相談する。',model:null})).status).toBe(202);
+  await waitUntil(async()=>(await chat.get(project.id,task.id,'retrospective')).messages.at(-1)?.status==='completed');
+  expect(await review()).toEqual({...running,state:'stopped'});
+
+  const retries=await Promise.all([post(taskPath+'/retry-review'),post(taskPath+'/retry-review')]);
+  expect(retries.map(response=>response.status).sort()).toEqual([202,409]);
+  await waitUntil(async()=>(await review()).state==='done');
+  expect(await review()).toEqual({state:'done',error:null});
+  expect(agent.requests).toHaveLength(3);
+  expect((await post(taskPath+'/stop-review')).status).toBe(409);
+ }finally{release.resolve();store.close();await rm(folder,{recursive:true,force:true})}
+});
+
+test('完了申告のない反省会の自動分析は失敗し、再送しない',async()=>{
+ const folder=await mkdtemp(join(tmpdir(),'beni-review-stalled-')),store=new Store(':memory:');
+ const project=store.createProject('Example',folder),task=store.createTask(project.id,'Task');
+ const agent=new DummyAgent({supportsEmbeddedTools:true});
+ const handle=createHandler(store,folder,new ChatService(()=>folder,[agent]));
+ const detail=async()=>(await (await handle(new Request(`http://127.0.0.1:3210/api/tasks/${task.id}`))).json());
+ try{
+  store.selectTaskPhase(project.id,task.id,'requirements','retrospective');
+  await detail();
+  await waitForFailedReview(folder,task.id);
+  expect((await detail()).workflow.review).toMatchObject({state:'failed',error:'反省会の分析を完了できませんでした'});
+  expect(agent.requests).toHaveLength(1);
+ }finally{store.close();await rm(folder,{recursive:true,force:true})}
+});
+
+test('通常の反省会チャットでは有効な完了申告のターンが正常終了すると分析が完了する',async()=>{
+ const folder=await mkdtemp(join(tmpdir(),'beni-review-manual-finish-')),store=new Store(':memory:');
+ const project=store.createProject('Example',folder),task=store.createTask(project.id,'Task');
+ const entered=Promise.withResolvers<void>();
+ let oldRevision='';
+ const agent=new DummyAgent({supportsEmbeddedTools:true,scenario:async(request,host,accept)=>{
+  await accept();
+  if(request.access==='read-only')return {status:'completed'};
+  const text=request.operation.kind==='send'?request.operation.text:'';
+  const revision=store.managedDocument(project.id,task.id,'retrospective.md')!.revision;
+  const finish=()=>host.callTool({id:'finish',name:'finish_retrospective',
+   input:{revision:text==='古い版で完了を申告してください。'?oldRevision:revision,reason:'追記する発見なし'}});
+  if(text==='古い版で完了を申告してください。'){
+   expect((await finish()).ok).toBe(false);
+  }else{
+   expect((await finish()).ok).toBe(true);
+   if(text==='申告後に文書を追記してください。'){
+    writeTaskDocument(store,project.id,task.id,'retrospective.md','分析内容を追記する。');
+   }
+   if(text==='完了を申告してください。停止の確認用。'){
+    const interrupted=new Promise<void>(resolve=>host.signal.addEventListener('abort',()=>resolve(),{once:true}));
+    entered.resolve();
+    await interrupted;
+    return {status:'interrupted'};
+   }
+  }
+  return {status:'completed'};
+ }});
+ const chat=new ChatService(()=>folder,[agent]),handle=createHandler(store,folder,chat);
+ const address='http://127.0.0.1:3210',taskPath=`/api/tasks/${task.id}`;
+ const detail=async()=>(await (await handle(new Request(address+taskPath))).json());
+ const post=(path:string,input:object)=>handle(new Request(address+path,{method:'POST',
+  headers:{origin:address,'content-type':'application/json'},body:JSON.stringify({projectId:project.id,...input})}));
+ const send=async(content:string)=>{
+  expect((await post('/api/chat/send',{taskId:task.id,phase:'retrospective',content,model:null})).status).toBe(202);
+ };
+ const status=async()=>(await chat.get(project.id,task.id,'retrospective')).messages.at(-1)?.status;
+ try{
+  store.selectTaskPhase(project.id,task.id,'requirements','retrospective');
+  await detail();
+  await waitForFailedReview(folder,task.id);
+  oldRevision=store.managedDocument(project.id,task.id,'retrospective.md')!.revision;
+  writeTaskDocument(store,project.id,task.id,'retrospective.md','分析結果を記録する。');
+
+  for(const content of ['古い版で完了を申告してください。','申告後に文書を追記してください。']){
+   await send(content);
+   await waitUntil(async()=>await status()==='completed');
+   expect((await detail()).workflow.review.state).toBe('failed');
+  }
+
+  await send('完了を申告してください。停止の確認用。');
+  await entered.promise;
+  expect((await detail()).workflow.review.state).toBe('failed');
+  expect((await post(taskPath+'/retry-review',{})).status).toBe(409);
+  expect((await post('/api/chat/interrupt',{taskId:task.id,phase:'retrospective'})).status).toBe(200);
+  expect(await status()).toBe('interrupted');
+  expect((await detail()).workflow.review.state).toBe('failed');
+
+  await send('分析の完了を申告してください。');
+  await waitUntil(async()=>(await detail()).workflow.review.state==='done');
+  expect(await status()).toBe('completed');
+  expect((await detail()).workflow.review).toEqual({state:'done',error:null});
+  expect(store.task(task.id)).toMatchObject({phase:'retrospective',status:'idle'});
+  expect(agent.requests.map(request=>request.access)).toEqual(['read-only','workspace-write','workspace-write','workspace-write','workspace-write']);
+ }finally{store.close();await rm(folder,{recursive:true,force:true})}
+});
+
+test('モデル接続の確認中に自動分析を停止すると送信しない',async()=>{
+ const folder=await mkdtemp(join(tmpdir(),'beni-review-stop-before-send-')),store=new Store(':memory:');
+ const project=store.createProject('Example',folder),task=store.createTask(project.id,'Task');
+ const checking=Promise.withResolvers<void>(),release=Promise.withResolvers<void>();
+ const agent=new DummyAgent({supportsEmbeddedTools:true}),getStatus=agent.getStatus.bind(agent);
+ agent.getStatus=async()=>{
+  checking.resolve();
+  await release.promise;
+  return getStatus();
+ };
+ const handle=createHandler(store,folder,new ChatService(()=>folder,[agent]));
+ const address='http://127.0.0.1:3210',taskPath=`/api/tasks/${task.id}`;
+ const detail=async()=>(await (await handle(new Request(address+taskPath))).json());
+ try{
+  store.selectTaskPhase(project.id,task.id,'requirements','retrospective');
+  await detail();
+  await checking.promise;
+  const stop=handle(new Request(address+taskPath+'/stop-review',{method:'POST',
+   headers:{origin:address,'content-type':'application/json'},body:JSON.stringify({projectId:project.id})}));
+  await waitUntil(async()=>(await detail()).workflow.review.state==='stopped');
+  release.resolve();
+  expect((await stop).status).toBe(200);
+  expect((await detail()).workflow.review).toMatchObject({state:'stopped',error:null});
+  expect(agent.requests).toHaveLength(0);
+ }finally{release.resolve();store.close();await rm(folder,{recursive:true,force:true})}
+});
+
+test('旧反省会の状態を復旧し、旧資料キューは変更しない',async()=>{
+ const folder=await mkdtemp(join(tmpdir(),'beni-review-recovery-')),store=new Store(':memory:');
+ const project=store.createProject('Example',folder);
+ const tasks=(['pending','running','stopped','done','failed'] as const).map(state=>({state,task:store.createTask(project.id,state)}));
+ const agent=new DummyAgent({supportsEmbeddedTools:true,scenario:async(_request,host,accept)=>{
+  await accept();
+  const read=await host.callTool({id:'read',name:'read_document',input:{name:'retrospective.md'}});
+  expect(read.ok).toBe(true);
+  const {revision}=JSON.parse(read.text);
+  expect((await host.callTool({id:'finish',name:'finish_retrospective',input:{revision,reason:'追記する発見なし'}})).ok).toBe(true);
+  return {status:'completed'};
+ }});
+ const handle=createHandler(store,folder,new ChatService(()=>folder,[agent]));
+ const address='http://127.0.0.1:3210';
+ const review=async(id:string)=>(await (await handle(new Request(address+'/api/tasks/'+id))).json()).workflow.review;
+ try{
+  for(const {task} of tasks)store.selectTaskPhase(project.id,task.id,'requirements','retrospective');
+  withDatabase(folder,db=>{
+   db.exec(`CREATE TABLE document_review (task_id TEXT PRIMARY KEY,state TEXT NOT NULL,error TEXT);
+    CREATE TABLE document_review_items (task_id TEXT NOT NULL,id INTEGER NOT NULL,label TEXT NOT NULL,text TEXT NOT NULL,
+     source TEXT,read_to INTEGER NOT NULL DEFAULT -1,finding TEXT,PRIMARY KEY(task_id,id));`);
+   for(const {state,task} of tasks){
+    db.query('INSERT INTO document_review VALUES (?,?,?)').run(task.id,state,state==='failed'?'以前の分析エラー':null);
+    db.query('INSERT INTO document_review_items(task_id,id,label,text) VALUES (?,1,?,?)').run(task.id,'旧資料','確認待ち');
+   }
+  });
+  expect((await handle(new Request(address+'/api/state'))).status).toBe(200);
+  for(const {state,task} of tasks){
+   if(state==='pending'||state==='running')await waitUntil(async()=>(await review(task.id)).state==='done');
+   else expect((await review(task.id)).state).toBe(state);
+  }
+  expect(agent.requests).toHaveLength(2);
+  expect(withDatabase(folder,db=>db.query('SELECT text,read_to,finding FROM document_review_items ORDER BY task_id').all())).toEqual(
+   tasks.map(()=>({text:'確認待ち',read_to:-1,finding:null}))
+  );
+ }finally{store.close();await rm(folder,{recursive:true,force:true})}
+});
 
 test('終了中にサーバーが停止した場合は反省会に戻す', async () => {
  const folder=await mkdtemp(join(tmpdir(),'beni-finalization-recover-')),store=new Store(':memory:');

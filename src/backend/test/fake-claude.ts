@@ -22,6 +22,9 @@ const queued:any[]=[];
 let waiting:((value:IteratorResult<any>)=>void)|null=null;
 let inputEnded=false;
 let initialization:any=null;
+const probeMode=process.env.FAKE_CLAUDE_CONTEXT_PROBE;
+const session=args[args.indexOf(args.includes('--resume')?'--resume':'--session-id')+1];
+const log=(entry:object)=>{if(process.env.FAKE_CLAUDE_LOG)appendFileSync(process.env.FAKE_CLAUDE_LOG,JSON.stringify(entry)+'\n')};
 const input=args.includes('--input-format')?{next:()=>queued.length?Promise.resolve({done:false,value:queued.shift()}):inputEnded?Promise.resolve({done:true,value:undefined}):new Promise<IteratorResult<any>>(resolve=>{waiting=resolve}),return:()=>{}}:null;
 if(input)void(async()=>{
  for await(const line of createInterface({input:process.stdin})){
@@ -35,10 +38,12 @@ if(input)void(async()=>{
    send({type:'result',subtype:'error_during_execution',is_error:true,errors:['Interrupted']});process.exit(0);
   }
   if(message.type==='control_request'&&message.request.subtype==='get_context_usage'){
-   const mode=process.env.FAKE_CLAUDE_CONTEXT_SUMMARY;
+   const mode=probeMode??process.env.FAKE_CLAUDE_CONTEXT_SUMMARY;
+   if(probeMode)log({args,session,detail:message.request.detail,initialized:!!initialization,pid:process.pid,cwd:process.cwd()});
    if(mode==='silent')continue;
    const request_id=message.request_id;
-   const response=mode&&resultSent&&message.request.detail==='summary'
+   const ready=probeMode?initialization&&args.includes('--resume')&&!resultSent:resultSent;
+   const response=mode&&mode!=='unsupported'&&ready&&message.request.detail==='summary'
     ?{subtype:'success',request_id,response:{totalTokens:mode==='invalid'?-1:24_000,maxTokens:170_000,rawMaxTokens:200_000}}
     :{subtype:'error',request_id,error:'Summary unavailable'};
    send({type:'control_response',response});
@@ -61,8 +66,7 @@ if(input){
 let action=prompt.split('\n\n')[0];
 if(action==='stubborn'){process.on('SIGTERM',()=>{});setInterval(()=>{},1000)}
 const builtin=action.match(/^\/(context|usage|code-review|simplify|security-review|recap)(?: |$)/)?.[1];
-const session=args[args.indexOf(args.includes('--resume')?'--resume':'--session-id')+1];
-if(process.env.FAKE_CLAUDE_LOG)appendFileSync(process.env.FAKE_CLAUDE_LOG,JSON.stringify({args,rawArgs,initialization,pid:process.pid,cwd:process.cwd(),prompt,session,subprocessEnvScrub:process.env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB})+'\n');
+log({args,rawArgs,initialization,pid:process.pid,cwd:process.cwd(),prompt,session,subprocessEnvScrub:process.env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB});
 const tools=args[args.indexOf('--tools')+1]?.split(',')??[];
 const settings=JSON.parse(args[args.indexOf('--settings')+1]??'{}');
 if(tools.includes('Bash')&&process.env.FAKE_CLAUDE_SANDBOX_UNAVAILABLE==='1'&&settings.sandbox?.failIfUnavailable===true){console.error('Sandbox is required but unavailable');process.exit(1)}
@@ -112,7 +116,7 @@ if(builtin){
  const mode=process.env.FAKE_CLAUDE_COMMAND??'success';
  const result=(output:unknown,extra={})=>send({type:'result',subtype:'success',is_error:false,result:output,session_id:session,...extra});
  if(args.includes('--disable-slash-commands')||mode==='unavailable'){result(`/${builtin} isn't available in this environment.`);process.exit(0)}
- if(['context','usage'].includes(builtin)){
+ if(builtin==='usage'){
   if(mode==='wait'){process.on('SIGINT',()=>{send({type:'result',subtype:'error_during_execution',is_error:true,session_id:session});process.exit(0)});setInterval(()=>{},1000);await new Promise(()=>{})}
   if(mode==='disconnect')process.exit(1);
   if(mode==='fallback')send({type:'assistant',session_id:session,message:{id:'fallback',content:[{type:'text',text:'Model fallback must stay private'},{type:'tool_use',id:'private-tool',name:'Read',input:{}}]}});
@@ -121,13 +125,10 @@ if(builtin){
    send({type:'assistant',session_id:'20000000-0000-4000-8000-000000000002',parent_tool_use_id:'foreign',message:{id:'foreign',content:[{type:'text',text:'Private child response'}]}});
    result('Private child result',{parent_tool_use_id:'foreign'});
   }
-  const output=['oversize','legacy-oversize'].includes(mode)?'x'.repeat(65537):mode==='multibyte-oversize'?'界'.repeat(21846):mode==='limit'?'x'.repeat(65536):mode==='empty'?'':mode==='non-text'?{}:`${builtin==='context'?'Context usage: 12%':'Usage: 3 fictional requests'}\n`;
+  const output=['oversize','legacy-oversize'].includes(mode)?'x'.repeat(65537):mode==='multibyte-oversize'?'界'.repeat(21846):mode==='limit'?'x'.repeat(65536):mode==='empty'?'':mode==='non-text'?{}:'Usage: 3 fictional requests\n';
   if(!mode.startsWith('legacy')){
-   const synthetic:any={type:'assistant',session_id:session,parent_tool_use_id:null,local_command_run:{command:builtin,args:''},local_command_source:'<local-command-stdout>Raw fixture that must not be displayed</local-command-stdout>',message:{id:'local-result',role:'assistant',content:mode==='string-content'?output:[{type:'text',text:output}]},...(builtin==='usage'?{usage_report:{fictional:true}}:{context_usage:{fictional:true}})};
-   if(builtin==='context'&&process.env.FAKE_CLAUDE_CONTEXT_REPORT){
-    synthetic.context_usage={total_tokens:24_000,raw_max_tokens:200_000,percentage:12};
-   }
-   if (builtin === 'usage' && process.env.FAKE_CLAUDE_USAGE_REPORT && args.includes('--no-session-persistence')) {
+   const synthetic:any={type:'assistant',session_id:session,parent_tool_use_id:null,local_command_run:{command:builtin,args:''},local_command_source:'<local-command-stdout>Raw fixture that must not be displayed</local-command-stdout>',message:{id:'local-result',role:'assistant',content:mode==='string-content'?output:[{type:'text',text:output}]},usage_report:{fictional:true}};
+   if (process.env.FAKE_CLAUDE_USAGE_REPORT && args.includes('--no-session-persistence')) {
     synthetic.usage_report = {rate_limits:{limits:[
      {kind:'session',group:'session',percent:0,resets_at:null},
      {kind:'weekly_all',group:'weekly',percent:45,resets_at:new Date(2_000_000_100_000).toISOString()},
@@ -138,7 +139,7 @@ if(builtin){
    if(mode==='invalid-content')synthetic.message.content={text:output};
    if(mode==='missing-source')delete synthetic.local_command_source;
    if(mode==='non-string-source')synthetic.local_command_source={text:'Raw private source'};
-   if(mode==='different-command')synthetic.local_command_run.command=builtin==='usage'?'context':'usage';
+   if(mode==='different-command')synthetic.local_command_run.command='compact';
    if(mode==='alias-command')synthetic.local_command_run.command='/'+builtin;
    if(mode==='nonempty-args')synthetic.local_command_run.args='extra';
    if(mode==='missing-args')delete synthetic.local_command_run.args;

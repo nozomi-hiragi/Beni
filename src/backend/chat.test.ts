@@ -6,6 +6,7 @@ import {join} from 'node:path';
 import {ChatService} from './chat';
 import {CodexAgent} from './agents/codex';
 import {DummyAgent} from './test/dummy-agent';
+import type {Agent, ContextUsage} from './agents/agent';
 const projectFolder=(root:string,id:string)=>{const folder=join(root,id);mkdirSync(folder,{recursive:true});return folder};
 const fake=join(import.meta.dir,'test/fake-codex.ts');
 async function waitFor(fn:()=>Promise<boolean>){for(let i=0;i<100;i++){if(await fn())return;await Bun.sleep(20)}throw Error('timed out')}
@@ -13,15 +14,15 @@ test('コンテキスト使用量はモデルの再開セッションごとに�
  const root=await mkdtemp(join(tmpdir(),'beni-context-usage-')),p='019a0000-0000-7000-8000-000000000001';
  const models=[{id:'first',name:'First'},{id:'second',name:'Second'}];
  let usedTokens:number|undefined=200,fail=false;
- const agent=new DummyAgent({
+ const agent=Object.assign(new DummyAgent({
   status:()=>({models}),
-  commands:['context','compact'].map(name=>({name,description:name,kind:'maintenance',requiresSession:true})),
+  commands:['compact'].map(name=>({name,description:name,kind:'maintenance',requiresSession:true})),
   scenario:async(_request,host,accept)=>{
    await accept();
    if(usedTokens!==undefined)await host.emit({type:'context.usage',data:{usedTokens,maxTokens:1000}});
    return fail?{status:'failed',code:'execution-failed'}:{status:'completed'};
   },
- });
+ }),{getContextUsage:async()=>usedTokens===undefined?undefined:{usedTokens,maxTokens:1000}});
  const createChat=()=>new ChatService(()=>root,[agent]);
  const completed=async(chat:ChatService)=>waitFor(async()=>(await chat.get(p,null)).messages.at(-1)?.status==='completed');
  try{
@@ -56,7 +57,8 @@ test('コンテキスト使用量はモデルの再開セッションごとに�
   expect(conversation.sessions?.['dummy/first']?.contextUsage).toBeUndefined();
   expect(conversation.contextUsage?.usedTokens).toBe(500);
   usedTokens=50;
-  conversation=await command('context');
+  expect(await restarted.getContextUsage(p,null,null,'dummy','first',root)).toEqual({usedTokens:50,maxTokens:1000});
+  conversation=await restarted.get(p,null);
   expect(conversation.sessions?.['dummy/first']?.contextUsage?.usedTokens).toBe(50);
   expect(conversation.contextUsage?.usedTokens).toBe(500);
 
@@ -67,6 +69,75 @@ test('コンテキスト使用量はモデルの再開セッションごとに�
   expect(conversation.contextUsage).toBeUndefined();
   expect(conversation.sessions?.['dummy/first']?.contextUsage?.usedTokens).toBe(50);
  }finally{await rm(root,{recursive:true,force:true})}
+});
+
+test('コンテキスト取得 API は保存済みセッションに限定し、並行取得とリセットを処理する',async()=>{
+ const {Store}=await import('./store/index');
+ const {createHandler}=await import('./server');
+ const root=await mkdtemp(join(tmpdir(),'beni-context-probe-')),store=new Store(':memory:');
+ const project=store.createProject('Example',root) as {id:string};
+ const task=store.createTask(project.id,'Example task') as {id:string};
+ const requests:{id:string;model:string;resolve:(value:ContextUsage|undefined)=>void}[]=[];
+ const getContextUsage:NonNullable<Agent['getContextUsage']>=({session,modelId})=>
+  new Promise(resolve=>requests.push({id:session.id,model:modelId,resolve}));
+ const agent=Object.assign(new DummyAgent({
+  supportsEmbeddedTools:true,
+  status:()=>({models:[{id:'first',name:'First'},{id:'second',name:'Second'}]}),
+ }),{getContextUsage});
+ const chat=new ChatService(()=>root,[agent]),handler=createHandler(store,'/tmp',chat);
+ const post=(extra:Record<string,unknown>={})=>handler(new Request('http://127.0.0.1:3210/api/chat/context-usage',{
+  method:'POST',headers:{origin:'http://127.0.0.1:3210','content-type':'application/json'},
+  body:JSON.stringify({projectId:project.id,taskId:task.id,phase:'requirements',provider:'dummy',model:'first',...extra}),
+ }));
+ try{
+  expect(await (await post()).json()).toEqual({});
+  expect((await post({threadId:'client-thread'})).status).toBe(400);
+  await chat.send(project.id,task.id,'Saved session','first',root);
+  await waitFor(async()=>(await chat.get(project.id,task.id)).messages.at(-1)?.status==='completed');
+  const before=await chat.get(project.id,task.id);
+  expect(await (await post({model:'second'})).json()).toEqual({});
+  expect(await (await post({phase:'implementation'})).json()).toEqual({});
+  expect(requests).toHaveLength(0);
+
+  const first=post(), concurrent=post();
+  await waitFor(async()=>requests.length===1);
+  expect(requests[0]).toMatchObject({id:before.threadId,model:'first'});
+  expect(await chat.get(project.id,task.id)).toEqual(before);
+  const contextUsage={usedTokens:100,maxTokens:1000};
+  requests[0].resolve(contextUsage);
+  expect(await (await first).json()).toEqual({contextUsage});
+  expect(await (await concurrent).json()).toEqual({contextUsage});
+  expect(await (await post()).json()).toEqual({contextUsage});
+  expect(requests).toHaveLength(1);
+
+  const unavailable=post({refresh:true});
+  await waitFor(async()=>requests.length===2);
+  requests[1].resolve(undefined);
+  expect(await (await unavailable).json()).toEqual({});
+  expect(await chat.get(project.id,task.id)).toEqual({...before,contextUsage});
+
+  const updated=post({refresh:true});
+  await waitFor(async()=>requests.length===3);
+  const refreshedUsage={usedTokens:200,maxTokens:1000};
+  requests[2].resolve(refreshedUsage);
+  expect(await (await updated).json()).toEqual({contextUsage:refreshedUsage});
+  expect(await chat.get(project.id,task.id)).toEqual({...before,contextUsage:refreshedUsage});
+
+  const stale=post({refresh:true});
+  await waitFor(async()=>requests.length===4);
+  await chat.send(project.id,task.id,'Same session next turn','first',root);
+  await waitFor(async()=>(await chat.get(project.id,task.id)).messages.at(-1)?.status==='completed');
+  requests[3].resolve({usedTokens:700,maxTokens:1000});
+  expect(await (await stale).json()).toEqual({});
+  expect(await chat.get(project.id,task.id)).toMatchObject({threadId:before.threadId,contextUsage:refreshedUsage});
+
+  const reset=post({refresh:true});
+  await waitFor(async()=>requests.length===5);
+  await chat.command(project.id,task.id,'clear',root);
+  requests[4].resolve({usedTokens:800,maxTokens:1000});
+  expect(await (await reset).json()).toEqual({});
+  expect((await chat.get(project.id,task.id)).contextUsage).toBeUndefined();
+ }finally{store.close();await rm(root,{recursive:true,force:true})}
 });
 test('records subscription limits received during ordinary chats outside conversation history', async () => {
  const root = await mkdtemp(join(tmpdir(), 'beni-rate-limits-'));
@@ -667,14 +738,14 @@ test('同じ接続先のモデルを往復すると保存済みのモデル別�
   expect(reloaded.messages).toEqual(resumed.messages);
   expect(reloaded.packs).toEqual(resumed.packs);
 
-  await expect(restarted.command(projectId,null,'context',root,undefined,null,{provider:'claude',model:'opus'})).rejects.toThrow('no thread');
-  await restarted.command(projectId,null,'context',root,undefined,null,{provider:'claude',model:'sonnet'});
-  await waitFor(async()=>(await restarted.get(projectId,null)).command?.status==='completed');
-  const commandInvocation=JSON.parse((await readFile(log,'utf8')).trim().split('\n').at(-1)!);
-  expect(commandInvocation.args).toContain('--resume');
-  expect(commandInvocation.session).toBe(sonnet.sessionId);
+  process.env.FAKE_CLAUDE_CONTEXT_PROBE='valid';
+  expect(await restarted.getContextUsage(projectId,null,null,'claude','opus',root)).toBeUndefined();
+  expect(await restarted.getContextUsage(projectId,null,null,'claude','sonnet',root,{refresh:true})).toEqual({usedTokens:24_000,maxTokens:200_000});
+  const probeInvocation=JSON.parse((await readFile(log,'utf8')).trim().split('\n').at(-1)!);
+  expect(probeInvocation.args).toContain('--resume');
+  expect(probeInvocation.session).toBe(sonnet.sessionId);
   expect((await restarted.get(projectId,null)).sessionId).toBe(haiku.sessionId);
- }finally{delete process.env.FAKE_CLAUDE_LOG;await rm(root,{recursive:true,force:true})}
+ }finally{delete process.env.FAKE_CLAUDE_CONTEXT_PROBE;delete process.env.FAKE_CLAUDE_LOG;await rm(root,{recursive:true,force:true})}
 });
 
 test('v1 の接続先別セッションを対応する最新モデルに移し、既存のアーカイブを読み込む',async()=>{
@@ -1311,7 +1382,8 @@ test('選択中の接続先がセッションと違う操作や未対応操作�
  const base={projectId:project.id,taskId:task.id,phase:'requirements'};
  try{
   await chat.send(project.id,task.id,'hello',null,root);await waitFor(async()=>(await chat.get(project.id,task.id)).messages.at(-1)?.status==='completed');const before=await chat.get(project.id,task.id);
-  for(const command of ['compact','context','usage']){const result=await post({...base,command,provider:'claude'});expect(result.status).toBe(409);expect(await result.json()).toMatchObject({error:expect.stringContaining('接続先')})}
+  const compact=await post({...base,command:'compact',provider:'claude'});expect(compact.status).toBe(409);expect(await compact.json()).toMatchObject({error:expect.stringContaining('接続先')});
+  expect((await post({...base,command:'context',provider:'claude'})).status).toBe(400);
   expect((await post({...base,command:'context',provider:'codex'})).status).toBe(400);expect((await post({...base,command:'help'})).status).toBe(400);expect(await chat.get(project.id,task.id)).toEqual(before);
   await chat.send(project.id,task.id,'wait',null,root);await waitFor(async()=>(await chat.get(project.id,task.id)).messages.at(-1)?.status==='streaming');expect((await post({...base,command:'clear'})).status).toBe(409);await chat.interrupt(project.id,task.id);await waitFor(async()=>(await chat.get(project.id,task.id)).messages.at(-1)?.status==='interrupted');
   expect((await post({...base,command:'reset',provider:'claude'})).status).toBe(202);
@@ -1331,18 +1403,16 @@ test('Codex review はネイティブAPIを使い、recap は固定要約指示�
  }finally{delete process.env.FAKE_CODEX_LOG;await rm(root,{recursive:true,force:true})}
 });
 
-test('Claude context と usage は成功した操作出力だけを保存し、会話本文とパックを変更しない',async()=>{
+test('Claude usage は成功した操作出力だけを保存し、会話本文とパックを変更しない',async()=>{
  const root=await mkdtemp(join(tmpdir(),'beni-local-output-')),p='019a0000-0000-7000-8000-000000000001',chat=new ChatService(()=>root,()=>null,()=>fakeClaude);
  try{
   await chat.send(p,null,'hello','sonnet',root,undefined,null,false,'claude');await waitFor(async()=>(await chat.get(p,null)).messages.at(-1)?.status==='completed');const before=await chat.get(p,null);
-  for(const [command,output] of [['context','Context usage: 12%\n'],['usage','Usage: 3 fictional requests\n']] as const){
-   await chat.command(p,null,command,root,undefined,null,{provider:'claude',model:'sonnet'});await waitFor(async()=>(await chat.get(p,null)).command?.status==='completed');const current=await chat.get(p,null);expect(current.command?.output).toBe(output);expect(current.messages).toEqual(before.messages);expect(current.packs).toEqual(before.packs);expect(current.threadId).toBe(before.threadId);
-  }
-  for(const [action,status] of [['failure','failed'],['unavailable','failed'],['fallback','failed'],['oversize','failed'],['disconnect','unknown'],['foreign-session','unknown']] as const){process.env.FAKE_CLAUDE_COMMAND=action;await chat.command(p,null,'context',root);await waitFor(async()=>(await chat.get(p,null)).command?.status===status);const current=await chat.get(p,null);expect(current.command?.output).toBeUndefined();expect(current.command?.error).toBeString();expect(current.messages).toEqual(before.messages);expect(current.packs).toEqual(before.packs);expect(JSON.stringify(current)).not.toContain('Private')}
-  process.env.FAKE_CLAUDE_COMMAND='limit';await chat.command(p,null,'context',root);await waitFor(async()=>(await chat.get(p,null)).command?.status==='completed');expect(Buffer.byteLength((await chat.get(p,null)).command!.output!)).toBe(65536);
+  await chat.command(p,null,'usage',root,undefined,null,{provider:'claude',model:'sonnet'});await waitFor(async()=>(await chat.get(p,null)).command?.status==='completed');const current=await chat.get(p,null);expect(current.command?.output).toBe('Usage: 3 fictional requests\n');expect(current.messages).toEqual(before.messages);expect(current.packs).toEqual(before.packs);expect(current.threadId).toBe(before.threadId);
+  for(const [action,status] of [['failure','failed'],['unavailable','failed'],['fallback','failed'],['oversize','failed'],['disconnect','unknown'],['foreign-session','unknown']] as const){process.env.FAKE_CLAUDE_COMMAND=action;await chat.command(p,null,'usage',root);await waitFor(async()=>(await chat.get(p,null)).command?.status===status);const current=await chat.get(p,null);expect(current.command?.output).toBeUndefined();expect(current.command?.error).toBeString();expect(current.messages).toEqual(before.messages);expect(current.packs).toEqual(before.packs);expect(JSON.stringify(current)).not.toContain('Private')}
+  process.env.FAKE_CLAUDE_COMMAND='limit';await chat.command(p,null,'usage',root);await waitFor(async()=>(await chat.get(p,null)).command?.status==='completed');expect(Buffer.byteLength((await chat.get(p,null)).command!.output!)).toBe(65536);
   process.env.FAKE_CLAUDE_COMMAND='wait';await chat.command(p,null,'usage',root);await Bun.sleep(50);await chat.interrupt(p,null);await waitFor(async()=>(await chat.get(p,null)).command?.status==='interrupted');expect((await chat.get(p,null)).command?.output).toBeUndefined();
-  await chat.command(p,null,'context',root);await Bun.sleep(50);const restarted=new ChatService(()=>root,()=>null,()=>fakeClaude);expect((await restarted.get(p,null)).command?.status).toBe('unknown');await chat.interrupt(p,null);await waitFor(async()=>(await chat.get(p,null)).command?.status==='interrupted');
-  await expect(chat.command(p,null,'context',root,undefined,null,{args:'extra'})).rejects.toThrow('invalid command');
+  await chat.command(p,null,'usage',root);await Bun.sleep(50);const restarted=new ChatService(()=>root,()=>null,()=>fakeClaude);expect((await restarted.get(p,null)).command?.status).toBe('unknown');await chat.interrupt(p,null);await waitFor(async()=>(await chat.get(p,null)).command?.status==='interrupted');
+  await expect(chat.command(p,null,'usage',root,undefined,null,{args:'extra'})).rejects.toThrow('invalid command');
  }finally{delete process.env.FAKE_CLAUDE_COMMAND;await rm(root,{recursive:true,force:true})}
 });
 

@@ -37,7 +37,7 @@ type UsageAccount = { identity: string; usage: RateLimitUsage };
 const key = (p:string,t:string|null) => {if(!(validProjectId(p)||p===INSTRUCTIONS_CHAT_ID)||(p===INSTRUCTIONS_CHAT_ID&&t!==null)||(t!==null&&!validTaskId(t)))throw Error('Invalid chat scope');return JSON.stringify([p,t])};
 const conversationKey = (p:string,t:string|null,phase:TaskPhase|null) => {key(p,t);if(t===null?phase!==null:!isTaskPhase(phase))throw Error('Invalid chat phase');return JSON.stringify([p,t,phase])};
 export type TaskEventsProvider = {capture:(p:string,t:string|null,phase?:TaskPhase|null,operationId?:string)=>unknown;events:(p:string,t:string|null,after:number,through?:number,limit?:number,types?:string[])=>{events:any[];lastEventId:number;nextCursor?:number;through:number;hasMore:boolean};event?:(p:string,id:number)=>any;change?:(p:string,id:number)=>unknown;version?:(p:string,path:string,id:number)=>unknown;append?:(p:string,input:any)=>unknown};
-export type WorkflowToolContext = {projectId:string;taskId:string|null;phase:TaskPhase|null;chatId:string;sendId:string;jobId?:string};
+export type WorkflowToolContext = {projectId:string;taskId:string|null;phase:TaskPhase|null;chatId:string;sendId:string;jobId?:string;systemGenerated?:boolean};
 export type WorkflowToolsProvider = {
  tools:(p:string,t:string|null,phase:TaskPhase|null,jobId?:string)=>EmbeddedTool[];
  context:(p:string,t:string|null,phase:TaskPhase|null,jobId?:string)=>{text:string;knowledge:string;knowledgePath?:string}|undefined;
@@ -136,6 +136,7 @@ export class ChatService {
  setWorkflowTools(provider:WorkflowToolsProvider){this.workflowTools=provider}
  private busy(p:string,t:string|null){const k=key(p,t);return this.preparing.has(k)||[...this.active.keys()].some(value=>{const [project,task,,jobId]=JSON.parse(value);return jobId===undefined&&project===p&&task===t})}
  private active=new Map<string,ActiveRun>();
+ private contextProbes=new Map<string,Promise<ContextUsage|undefined>>();
  withIdleTask<T>(p:string,t:string,change:()=>T):T{key(p,t);if(this.stopping.has(key(p,t))||this.busy(p,t)||[...this.locks.keys()].some(value=>{const [project,task]=JSON.parse(value);return project===p&&task===t}))throw Error('busy');return change();}
  async startTask<T>(p:string,t:string,change:()=>T,rollback:()=>void,model:string|null,cwd:string,documents:string,provider:Provider=this.defaultAgentId):Promise<T>{
   const task=this.withIdleTask(p,t,change),taskKey=key(p,t);
@@ -231,6 +232,7 @@ export class ChatService {
  agentList():AgentInfo[] {
   return [...this.agents.values()].map(agent=>({
    id:agent.id,name:agent.name,commands:agent.commands,supportsUsage:!!agent.getUsage,
+   ...(agent.getContextUsage?{supportsContextUsage:true}:{}),
   }));
  }
  hasAgent(id:Provider){return this.agents.has(id)}
@@ -328,6 +330,53 @@ export class ChatService {
   }
  }
  async get(p:string,t:string|null,phase:TaskPhase|null=t===null?null:'requirements'){const k=conversationKey(p,t,phase);return this.locked(k,async()=>{const c=await this.load(p,t,phase);if(!this.active.has(k)){let changed=false;if(c.command?.status==='running'){c.command.status='unknown';c.command.error='コマンドの結果を確認できませんでした';changed=true;}const events:TopicEvent[]=[];for(const m of c.messages)if(m.status==='pending'||m.status==='streaming'){m.status='unknown';m.updatedAt=now();changed=true}for(const pack of c.packs)if(pack.state==='streaming'){this.closePack(pack,pack.role==='user'?'completed':'unknown',events);changed=true}if(changed){await this.save(c);if(t!==null&&phase==='execution')this.finishExecution(p,t);for(const event of events)this.emit(c,event);this.emit(c,{name:'chat.changed',data:{}})}}return c})}
+
+ async getContextUsage(p:string,t:string|null,phase:TaskPhase|null,provider:Provider,model:string,cwd:string,options:{refresh?:boolean;scopeCurrent?:()=>boolean}={}){
+  const k=conversationKey(p,t,phase),taskKey=key(p,t);
+  const agent=this.agents.get(provider);
+  if(!agent?.getContextUsage||phase==='finalization')return;
+  const modelId=modelKey(provider,model);
+  const idle=()=>!this.stopping.has(taskKey)&&!this.busy(p,t)&&options.scopeCurrent?.()!==false;
+  const result=await this.locked(k,async()=>{
+   if(!idle())return;
+   const c=await this.load(p,t,phase);
+   if(!idle())return;
+   const stored=modelSession(c,modelId);
+   const target=sessionTarget(stored,provider);
+   if(target.mode!=='resume')return;
+   if(stored?.contextUsage&&!options.refresh)return {usage:stored.contextUsage};
+   const probeKey=JSON.stringify([k,c.id,modelId,target.session.id,target.session.legacySessionId]);
+   const pending=this.contextProbes.get(probeKey);
+   if(pending)return {pending};
+   const workingDirectory=p===INSTRUCTIONS_CHAT_ID?directory(join(this.instructionEditor!.directory,'instruction-editor')):cwd;
+   const controller=new AbortController();
+   let timeout:ReturnType<typeof setTimeout>;
+   const deadline=new Promise<undefined>(resolve=>{
+    timeout=setTimeout(()=>{controller.abort();resolve(undefined)},8000);
+   });
+   const request=Promise.resolve().then(()=>agent.getContextUsage!({session:target.session,modelId:model,cwd:workingDirectory},controller.signal));
+   const probe=Promise.race([request,deadline]).catch(()=>undefined).then(async value=>{
+    clearTimeout(timeout);
+    const usage=parseContextUsage(value);
+    if(!usage||controller.signal.aborted)return;
+    return this.locked(k,async()=>{
+     if(!idle())return;
+     const current=await this.load(p,t,phase);
+     const session=modelSession(current,modelId);
+     if(!idle()||!session||current.id!==c.id||session.threadId!==target.session.id||
+      session.sessionId!==(target.session.legacySessionId??null)||
+      current.messages.at(-1)?.id!==c.messages.at(-1)?.id||current.command?.id!==c.command?.id)return;
+     session.contextUsage=usage;
+     await this.save(current);
+     this.emit(current,{name:'chat.changed',data:{}});
+     return usage;
+    });
+   }).finally(()=>this.contextProbes.delete(probeKey));
+   this.contextProbes.set(probeKey,probe);
+   return {pending:probe};
+  });
+  return result?.pending??result?.usage;
+ }
 
  private savedEditor(){return this.instructionSource().find(item=>item.key==='editor')!.content}
  async instructionEditorState(){const c=await this.get(INSTRUCTIONS_CHAT_ID,null);return {pending:c.appliedEditorContent!==this.savedEditor(),busy:this.busy(INSTRUCTIONS_CHAT_ID,null)}}
@@ -530,7 +579,7 @@ export class ChatService {
  }
  private async runCommand(k:string,c:Conversation,active:ActiveRun,agent:Agent,request:AgentRequest){
   const commandId=c.command!.id,commandName=c.command!.name;
-  const label=commandName==='compact'?'圧縮':commandName==='context'?'コンテキスト表示':commandName==='usage'?'使用量表示':commandName;
+  const label=commandName==='compact'?'圧縮':commandName==='usage'?'使用量表示':commandName;
   const account=this.usageAccounts.get(agent.id);
   let outcome:AgentOutcome;
   let accepted=false;
@@ -609,7 +658,7 @@ export class ChatService {
    }
    const toolsHash=managed?digest(JSON.stringify(workflowTools)):undefined;
    const knowledge=!managed&&documentDirectory?projectKnowledge(cwd,phase!=='finalization'):undefined;
-   const writable=managed?phase==='execution'||phase==='retrospective':!!documentDirectory;
+   const writable=managed?phase==='execution'||(phase==='retrospective'&&!systemGenerated):!!documentDirectory;
    const workingDirectory=managed?cwd:phase==='finalization'&&knowledge?dirname(knowledge):documentDirectory&&(phase==='execution'||phase==='retrospective')?cwd:documentDirectory??cwd;
    let knowledgeContent=managed?.knowledge??(knowledge?'':undefined);
    if(knowledge)try{knowledgeContent=readFileSync(knowledge,'utf8')}catch(error:any){if(phase!=='finalization'||error.code!=='ENOENT')throw error}
@@ -679,7 +728,8 @@ export class ChatService {
     for(const event of recovery)this.emit(c,event);
     this.emit(c,{name:'chat.pack.closed',data:{packId:userPack.packId,header:packHeader(userPack)}});this.emit(c,{name:'chat.changed',data:{}});
     const active:ActiveRun={controller:new AbortController()};this.active.set(k,active);
-    const workflow=managed?{provider:workflowProvider!,context:{projectId:p,taskId:t,phase,chatId:c.id,sendId,jobId},tools:workflowTools}:undefined;
+    if(this.explicitStops.has(taskKey))active.controller.abort();
+    const workflow=managed?{provider:workflowProvider!,context:{projectId:p,taskId:t,phase,chatId:c.id,sendId,jobId,systemGenerated},tools:workflowTools}:undefined;
     active.done=this.run(k,c,active,agent,{
      sendId,target:sessionTarget(c,provider),modelId:available.id,cwd:workingDirectory,access,
      builtInTools:job||p===INSTRUCTIONS_CHAT_ID?'disabled':'phase-default',

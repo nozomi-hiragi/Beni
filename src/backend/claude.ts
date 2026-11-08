@@ -21,17 +21,17 @@ const foreignAuth=():ClaudeStatus['auth']|null=>{
  if(process.env.ANTHROPIC_BASE_URL||['CLAUDE_CODE_USE_BEDROCK','CLAUDE_CODE_USE_VERTEX','CLAUDE_CODE_USE_FOUNDRY'].some(key=>process.env[key]&&process.env[key]!=='0'&&process.env[key]!=='false'))return 'other';
  return null;
 };
-const command=(executable:string,args:string[],allowFailure=false)=>new Promise<string>((resolve,reject)=>execFile(executable,args,{timeout:5000,maxBuffer:65536},(error,stdout)=>error&&!(allowFailure&&stdout)?reject(Error('Claude status unavailable')):resolve(stdout)));
-export async function claudeStatus(executable:string|null, onAccount?:(identity:string)=>void):Promise<ClaudeStatus>{
+const command=(executable:string,args:string[],allowFailure=false,signal?:AbortSignal)=>new Promise<string>((resolve,reject)=>execFile(executable,args,{timeout:5000,maxBuffer:65536,signal},(error,stdout)=>error&&!(allowFailure&&stdout)?reject(Error('Claude status unavailable')):resolve(stdout)));
+export async function claudeStatus(executable:string|null, onAccount?:(identity:string)=>void,signal?:AbortSignal):Promise<ClaudeStatus>{
  const status:ClaudeStatus={installed:!!executable,path:executable,version:null,checkedAt:new Date().toISOString(),auth:'unknown',models:null,usage:'unknown'};
  if(!executable)return status;
- try{const match=(await command(executable,['--version'])).match(/^(\d+\.\d+\.\d+)(?:[-+][\w.-]+)?\s+\(Claude Code\)/m);status.version=match?.[1]??null}catch{}
- if(!status.version||!versionSupported(status.version))return status;
+ try{const match=(await command(executable,['--version'],false,signal)).match(/^(\d+\.\d+\.\d+)(?:[-+][\w.-]+)?\s+\(Claude Code\)/m);status.version=match?.[1]??null}catch{}
+ if(signal?.aborted||!status.version||!versionSupported(status.version))return status;
  status.models=claudeModels.map(model=>({...model}));
  const override=foreignAuth();if(override){status.auth=override;return status}
  try{
   // アカウント識別子・メールアドレスなどは保存・返却しない。
-  const auth=JSON.parse(await command(executable,['auth','status','--json'],true));
+  const auth=JSON.parse(await command(executable,['auth','status','--json'],true,signal));
   status.auth=auth.loggedIn===false?'none':auth.loggedIn===true&&auth.authMethod==='claude.ai'&&auth.apiProvider==='firstParty'?'claude':['api_key','api_key_helper'].includes(auth.authMethod)?'apiKey':auth.loggedIn===true?'other':'unknown';
   if(status.auth==='claude'&&onAccount){
    const identity = [auth.accountId, auth.email, auth.orgId].map(value => typeof value === 'string' ? value : null);
@@ -41,9 +41,48 @@ export async function claudeStatus(executable:string|null, onAccount?:(identity:
  return status;
 }
 
+const sessionIdPattern=/^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i;
+const contextProbeTimeoutMs=5_000;
+
+export async function claudeSessionContextUsage(
+ executable:string,sessionId:string,model:string,cwd:string,signal:AbortSignal,
+):Promise<ContextUsage|undefined>{
+ if(signal.aborted||!sessionIdPattern.test(sessionId)||!claudeModels.some(candidate=>candidate.id===model))return;
+ const deadline=new AbortController();
+ const timeout=setTimeout(()=>deadline.abort(),contextProbeTimeoutMs);
+ const probeSignal=AbortSignal.any([signal,deadline.signal]);
+ const inputEnded=Promise.withResolvers<void>();
+ async function* idleInput():AsyncGenerator<SDKUserMessage>{await inputEnded.promise}
+ let stream:Query|undefined;
+ const close=()=>{stream?.close();inputEnded.resolve()};
+ probeSignal.addEventListener('abort',close,{once:true});
+ try{
+  const status=await claudeStatus(executable,undefined,probeSignal);
+  if(probeSignal.aborted||status.auth!=='claude'||foreignAuth())return;
+  // Keep SDK stdin open for control requests without yielding a user message.
+  stream=query({prompt:idleInput(),options:{
+   pathToClaudeCodeExecutable:executable,cwd,model,resume:sessionId,persistSession:false,
+   tools:[],allowedTools:[],disallowedTools:['mcp__*'],
+   permissionMode:'dontAsk',permissionPrompts:'none',settingSources:[],strictMcpConfig:true,
+   settings:{disableAllHooks:true},systemPrompt:{type:'preset',preset:'claude_code',snapshot:false},
+   extraArgs:{print:null,restricted:null,'safe-mode':null,'no-chrome':null,'system-prompt-snapshot':'off',
+    'disable-slash-commands':null,'mcp-config':'{"mcpServers":{}}'},
+  }});
+  await stream.initializationResult();
+  if(probeSignal.aborted)return;
+  const usage=await stream.getContextUsage({detail:'summary'});
+  if(!probeSignal.aborted)return contextUsageFromCounts(usage?.totalTokens,usage?.rawMaxTokens);
+ }catch{
+  // Unavailable or interrupted probes leave context usage unknown.
+ }finally{
+  clearTimeout(timeout);
+  probeSignal.removeEventListener('abort',close);
+  close();
+ }
+}
+
 type Options={builtinTools?:false;ephemeral?:true;authoritativeText?:true;cwd:string;model:string|null;sandbox:'read-only'|'workspace-write';developerInstructions?:string;dynamicTools?:EmbeddedTool[]};
 const generationCommands=['code-review','simplify','security-review','recap'] as const;
-const localCommands=['context','usage'] as const;
 const modelError=(error:any)=>['model_not_found','model_not_supported','model_not_available','unsupported_model'].includes(typeof error==='string'?error:error?.code);
 export const claudeGenerationArgumentsAllowed=(name:string,args:string)=>
  args.length<=16384&&!/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(args)&&
@@ -82,11 +121,10 @@ export class ClaudeRpc {
  private earlyToolCall=false;
  private compacting=false;
  private compactBoundary=false;
- private localCommand:'context'|'usage'|null=null;
+ private localCommand:'usage'|null=null;
  private commandFallback=false;
  private commandOutput:string|null=null;
  private usageReport:unknown;
- private commandContextUsage:ContextUsage|undefined;
  private commandUnavailable=false;
  private generationCommand:string|null=null;
  private pending:{resolve:()=>void;reject:(error:Error)=>void;timer:ReturnType<typeof setTimeout>}|null=null;
@@ -99,14 +137,14 @@ export class ClaudeRpc {
   if(method==='thread/start'||method==='thread/resume'){
    if(this.session)throw new ClaudeRejected();
    if(!params||typeof params.cwd!=='string'||!['read-only','workspace-write'].includes(params.sandbox))throw new ClaudeRejected();
-   if(method==='thread/resume'&&(typeof params.threadId!=='string'||!/^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(params.threadId)))throw new ClaudeRejected();
+   if(method==='thread/resume'&&(typeof params.threadId!=='string'||!sessionIdPattern.test(params.threadId)))throw new ClaudeRejected();
    this.session=method==='thread/resume'?params.threadId:randomUUID();this.resumed=method==='thread/resume';this.options=params;
    return {thread:{id:this.session,sessionId:this.session}};
   }
   if(method==='turn/start'||method==='thread/compact/start'||method==='thread/command/start'){
    const compacting=method==='thread/compact/start',local=method==='thread/command/start',maintenance=compacting||local;
    if(!params||typeof params!=='object')throw new ClaudeRejected();
-   if(local&&!localCommands.includes(params.command))throw new ClaudeRejected();
+   if(local&&params.command!=='usage')throw new ClaudeRejected();
    const generation=!maintenance&&params.command!==undefined?params.command:null;
    if(!maintenance&&params.command!==undefined&&(!generation||typeof generation!=='object'||Array.isArray(generation)||!generationCommands.includes(generation.name)||typeof generation.args!=='string'||Object.keys(generation).some(key=>key!=='name'&&key!=='args')))throw new ClaudeRejected();
    if(generation&&!claudeGenerationArgumentsAllowed(generation.name,generation.args))throw new ClaudeRejected(false,false,'COMMAND_ARGUMENTS_UNSUPPORTED');
@@ -136,7 +174,7 @@ export class ClaudeRpc {
     await acceptance;
     return {turn:{id:this.turn}};
    }
-   // /compact・/context・/usage は CLI 固有のローカル結果を厳密に識別する保守経路。
+   // /compact・/usage は CLI 固有のローカル結果を厳密に識別する保守経路。
    const args=['--print','--output-format','stream-json','--verbose','--include-partial-messages','--restricted','--safe-mode','--setting-sources','','--strict-mcp-config','--mcp-config','{"mcpServers":{}}','--no-chrome','--permission-mode','dontAsk','--permission-prompts','none','--tools','','--allowedTools','','--disallowedTools','mcp__*','--settings',JSON.stringify(settings),'--system-prompt-snapshot','off','--model',model,this.resumed?'--resume':'--session-id',this.session];
    if(this.options.ephemeral)args.push('--no-session-persistence');
    if(instructions)args.push('--append-system-prompt',instructions);
@@ -223,8 +261,7 @@ export class ClaudeRpc {
     if(!local||text===null||!text.trim()||Buffer.byteLength((this.commandOutput??'')+text,'utf8')>maxCommandOutput)this.commandFallback=true;
     else {
      this.commandOutput=(this.commandOutput??'')+text;
-     if(this.localCommand==='usage'&&this.options?.ephemeral&&message.usage_report!==undefined)this.usageReport=message.usage_report;
-     if(this.localCommand==='context')this.commandContextUsage=contextUsageFromCounts(message.context_usage?.total_tokens,message.context_usage?.raw_max_tokens);
+     if(this.options?.ephemeral&&message.usage_report!==undefined)this.usageReport=message.usage_report;
     }
    }
    if(message.type==='stream_event')this.commandFallback=true;
@@ -242,7 +279,6 @@ export class ClaudeRpc {
      this.accept();
      if(!this.interrupted){
       if(this.usageReport!==undefined)this.emit('account/usage/report',{report:this.usageReport});
-      if(this.commandContextUsage)this.emit('thread/context/usage',{usage:this.commandContextUsage});
       this.emit('thread/command/output',{output});
      }
     }

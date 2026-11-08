@@ -273,6 +273,19 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
    }
    const ackMatch=url.pathname.match(/^\/api\/chat\/packs\/([^/]+)\/ack$/);
    if(ackMatch){const p=input.projectId,t=input.taskId??null;if(!chatScope(p,t))return json({error:'会話が見つかりません'},404);if(!validChatPhase(t,input.phase)||(p===INSTRUCTIONS_CHAT_ID&&input.phase!==undefined))return json({error:'フェーズを確認してください'},400);const id=decodePackId(ackMatch[1]);if(!validId(id)||typeof input.hash!=='string'||! /^[a-f0-9]{64}$/.test(input.hash))return json({error:'入力を確認してください'},400);try{return json(await chat.ack(p as string,t as string|null,id,input.hash,chatPhase(t,input.phase)))}catch(error){const m=error instanceof Error?error.message:'';return json({error:m==='not found'?'パックが見つかりません':m==='not closed'?'生成中のパックです':'パックを読み込めませんでした'},m==='not found'?404:m==='not closed'?409:500)}}
+   if(url.pathname==='/api/chat/context-usage'){
+    const p=input.projectId,t=input.taskId??null,project=chatScope(p,t);
+    if(!project)return json({error:'会話が見つかりません'},404);
+    if(!validChatPhase(t,input.phase)||(p===INSTRUCTIONS_CHAT_ID&&input.phase!==undefined))return json({error:'フェーズを確認してください'},400);
+    if(!isProvider(input.provider)||typeof input.model!=='string'||!input.model.trim()||input.model.length>256||
+     (input.refresh!==undefined&&typeof input.refresh!=='boolean')||Object.keys(input).some(key=>!['projectId','taskId','phase','provider','model','refresh'].includes(key)))return json({error:'モデルを確認してください'},400);
+    const scopeCurrent=()=>t===null?!!chatScope(p,t):store.task(t as string)?.phase===input.phase&&!chatBlocked(t as string,input.phase);
+    if(!scopeCurrent())return json({});
+    try{
+     const contextUsage=await chat.getContextUsage(p as string,t as string|null,chatPhase(t,input.phase),input.provider,input.model,project.folder,{refresh:input.refresh===true,scopeCurrent});
+     return json({contextUsage});
+    }catch{return json({error:'コンテキストの使用量を取得できませんでした'},500)}
+   }
    if(url.pathname==='/api/chat/commands'){
     const p=input.projectId,t=input.taskId??null,project=chatScope(p,t);if(!project)return json({error:'会話が見つかりません'},404);
     if(!validChatPhase(t,input.phase)||(p===INSTRUCTIONS_CHAT_ID&&input.phase!==undefined))return json({error:'フェーズを確認してください'},400);
@@ -346,23 +359,32 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
     } catch (error) {
      const message = error instanceof Error ? error.message : '';
      const unavailable=action==='complete'?'終了に使うモデルの接続状態を確認してください':`${chat.agentName(isProvider(input.provider)?input.provider:undefined)} の接続状態を確認してください`;
-     return json({...(error instanceof ModelUnavailable ? {code:'MODEL_UNAVAILABLE'} : {}),error:error instanceof ModelUnavailable?'選択したモデルを利用できません':message === 'busy' ? 'チャットの処理中はフェーズを変更できません' : message === 'phase conflict' ? 'フェーズが変更されています' : message==='plan required'?'実装手順を作成してください':message==='review pending'?'反省会の精査を完了してください':message==='unavailable'?unavailable:'フェーズを保存できませんでした'}, ['busy','phase conflict','plan required','review pending'].includes(message) ? 409 : error instanceof ModelUnavailable||message==='unavailable'?400:500);
+     return json({...(error instanceof ModelUnavailable ? {code:'MODEL_UNAVAILABLE'} : {}),error:error instanceof ModelUnavailable?'選択したモデルを利用できません':message === 'busy' ? 'チャットの処理中はフェーズを変更できません' : message === 'phase conflict' ? 'フェーズが変更されています' : message==='plan required'?'実装手順を作成してください':message==='review pending'?'反省会の分析を完了してください':message==='unavailable'?unavailable:'フェーズを保存できませんでした'}, ['busy','phase conflict','plan required','review pending'].includes(message) ? 409 : error instanceof ModelUnavailable||message==='unavailable'?400:500);
     }
    }
 
-   const retry=url.pathname.match(/^\/api\/tasks\/([^/]+)\/(retry-review|retry-instructions)$/);
+   const reviewAction=url.pathname.match(/^\/api\/tasks\/([^/]+)\/(stop-review|retry-review)$/);
+   if(reviewAction){
+    const t=reviewAction[1]!,p=input.projectId,stop=reviewAction[2]==='stop-review';
+    if(!validProjectId(p)||!scope(p,t))return json({error:'タスクが見つかりません'},404);
+    try{
+     if(stop)await workflow.stopReview(p,t);
+     else workflow.retryReview(p,t);
+     return json({ok:true},stop?200:202);
+    }catch(error){
+     const message=error instanceof Error?error.message:'';
+     if(message==='busy'||message==='review unavailable')return json({error:stop?'停止できる分析がありません':'現在は分析を再試行できません'},409);
+     return json({error:stop?'分析を停止できませんでした':'分析を再試行できませんでした'},500);
+    }
+   }
+   const retry=url.pathname.match(/^\/api\/tasks\/([^/]+)\/retry-instructions$/);
    if(retry){
     const t=retry[1]!,p=input.projectId;
     if(!validProjectId(p)||!scope(p,t))return json({error:'タスクが見つかりません'},404);
     const task=store.task(t)!;
-    if(retry[2]==='retry-review'){
-     if(task.phase!=='retrospective'||task.status!=='idle'||workflow.review(p,t)?.state!=='failed')return json({error:'再試行できる精査がありません'},409);
-     void workflow.runReview(p,t,true).catch(()=>{});
-    }else{
-     if(task.status!=='completed'||store.instructionJob(p,t)?.status!=='failed')return json({error:'再試行できる指示更新がありません'},409);
-     store.retryInstructionJob(p,t);
-     workflow.kickJobs();
-    }
+    if(task.status!=='completed'||store.instructionJob(p,t)?.status!=='failed')return json({error:'再試行できる指示更新がありません'},409);
+    store.retryInstructionJob(p,t);
+    workflow.kickJobs();
     changed(p,t);
     return json({ok:true},202);
    }

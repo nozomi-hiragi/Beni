@@ -22,7 +22,11 @@
 
 `read-only` と `workspace-write` を提供する。書き込みは Beni が指定した作業場所の範囲とし、ネットワークと権限昇格を無効にする。外部 MCP、アプリ、プラグイン、フックなどは現行の制限付き起動設定に従う。サーバーからの要求は、登録済みの埋め込みツールの呼び出しだけを受け付ける。
 
+埋め込みツールを登録する場合は、読み取り専用のターンでも `code_mode_host` を有効にする。シェルの実行を制御する `shell_tool` は、作業フォルダーの書き込みと組み込みツールの使用を許可したターンで有効にする。
+
 ターンのコンテキスト使用量は、App Server の `thread/tokenUsage/updated` に含まれる `last.totalTokens` と `modelContextWindow` を使う。対象スレッド・ターンの値を正常終了時に渡す。圧縮時は圧縮項目の完了後に届いた値を採用する。 [Codex App Server](https://learn.chatgpt.com/docs/app-server#turn-events)
+
+保存済みセッションの計測値を更新するときは、App Server の `thread/read` で対象スレッドを照合し、ローカルの履歴から使用トークン数と上限を読み取る。対象モデルに対応する有効な計測記録を確認できた場合に値を返す。
 
 ## コマンド
 

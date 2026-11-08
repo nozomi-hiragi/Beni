@@ -1,4 +1,5 @@
 import {expect,test} from 'bun:test';
+import {existsSync} from 'node:fs';
 import {mkdtemp,readFile,realpath,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
@@ -134,6 +135,52 @@ test('Claude 内部ツールだけを明示許可し、外部設定とコード�
 });
 
 const compactSession='10000000-0000-4000-8000-000000000001';
+
+test('Claude reads resumed SDK context usage without sending a user message',async()=>{
+ const cwd=await mkdtemp(join(tmpdir(),'beni-claude-context-')),log=join(cwd,'calls.jsonl');
+ const agent=new ClaudeAgent(()=>fake);
+ const request={session:{agentId:'claude' as const,id:compactSession},modelId:'sonnet',cwd};
+ process.env.FAKE_CLAUDE_LOG=log;
+ try{
+  for(const mode of ['valid','invalid','unsupported']){
+   process.env.FAKE_CLAUDE_CONTEXT_PROBE=mode;
+   const result=await agent.getContextUsage(request,new AbortController().signal);
+   expect(result).toEqual(mode==='valid'?{usedTokens:24_000,maxTokens:200_000}:undefined);
+  }
+  const calls=(await readFile(log,'utf8')).trim().split('\n').map(line=>JSON.parse(line));
+  expect(calls).toHaveLength(3);
+  for(const call of calls){
+   expect(call).toMatchObject({cwd:await realpath(cwd),session:compactSession,initialized:true,detail:'summary'});
+   expect(call).not.toHaveProperty('prompt');
+   for(const flag of ['--resume','--no-session-persistence','--restricted','--safe-mode','--disable-slash-commands','--strict-mcp-config'])expect(call.args).toContain(flag);
+  }
+ }finally{
+  delete process.env.FAKE_CLAUDE_CONTEXT_PROBE;
+  delete process.env.FAKE_CLAUDE_LOG;
+  await rm(cwd,{recursive:true,force:true});
+ }
+});
+
+test('Claude cancels an unanswered SDK context probe',async()=>{
+ const cwd=await mkdtemp(join(tmpdir(),'beni-claude-context-')),log=join(cwd,'calls.jsonl');
+ const agent=new ClaudeAgent(()=>fake),controller=new AbortController();
+ process.env.FAKE_CLAUDE_LOG=log;
+ process.env.FAKE_CLAUDE_CONTEXT_PROBE='silent';
+ const result=agent.getContextUsage({session:{agentId:'claude',id:compactSession},modelId:'sonnet',cwd},controller.signal);
+ try{
+  await until(()=>existsSync(log));
+  controller.abort();
+  expect(await result).toBeUndefined();
+  const {pid}=JSON.parse((await readFile(log,'utf8')).trim());
+  await until(()=>{try{process.kill(pid,0);return false}catch{return true}});
+ }finally{
+  controller.abort();
+  await result;
+  delete process.env.FAKE_CLAUDE_CONTEXT_PROBE;
+  delete process.env.FAKE_CLAUDE_LOG;
+  await rm(cwd,{recursive:true,force:true});
+ }
+});
 test('Claude の偽CLIも slash command 無効時は成功resultを返して圧縮境界を出さない',async()=>{
  const child=Bun.spawn([fake,'--settings','{}','--tools','','--session-id',compactSession,'--disable-slash-commands'],{stdin:new Blob(['/compact']),stdout:'pipe',stderr:'pipe'});
  const messages=(await new Response(child.stdout).text()).trim().split('\n').map(line=>JSON.parse(line));
@@ -215,7 +262,7 @@ test('Claude 圧縮は受理後も中断でき、結果が返るまで完了扱�
  }finally{delete process.env.FAKE_CLAUDE_COMPACT}
 });
 
-async function prepareCommand(command='context',options:{cwd?:string;sandbox?:'read-only'|'workspace-write';resume?:boolean}={}){
+async function prepareCommand(command='usage',options:{cwd?:string;sandbox?:'read-only'|'workspace-write';resume?:boolean}={}){
  const rpc=new ClaudeRpc(fake),events:{method:string;params:any}[]=[];let closed=false;
  rpc.onEvent=(method,params)=>events.push({method,params});rpc.onClose=()=>{closed=true};
  const thread=await rpc.request(options.resume===false?'thread/start':'thread/resume',{...(options.resume===false?{}:{threadId:compactSession}),cwd:options.cwd??tmpdir(),model:'sonnet',sandbox:options.sandbox??'read-only',dynamicTools:eventTools});
@@ -225,44 +272,27 @@ async function prepareCommand(command='context',options:{cwd?:string;sandbox?:'r
 test('Claude local command は専用経路でのみ slash を有効にし、保存済みセッションの結果だけを配信する',async()=>{
  const root=await mkdtemp(join(tmpdir(),'beni-claude-local-')),log=join(root,'calls.jsonl');process.env.FAKE_CLAUDE_LOG=log;
  try{
-  for(const command of ['context','usage']){
-   const run=await prepareCommand(command,{cwd:root,sandbox:'workspace-write'});
-   try{
-    expect(await run.started).toEqual({});await until(run.closed);
-    expect(run.events.map(event=>event.method)).toEqual(['turn/started','thread/command/output','turn/completed']);
-    expect(run.events[1].params.output).toBe(command==='context'?'Context usage: 12%\n':'Usage: 3 fictional requests\n');
-    expect(run.events.every(event=>event.params.threadId===compactSession)).toBe(true);expect(run.events.at(-1)?.params.turn.status).toBe('completed');
-   }finally{run.rpc.close()}
-  }
+  const run=await prepareCommand('usage',{cwd:root,sandbox:'workspace-write'});
+  try{
+   expect(await run.started).toEqual({});await until(run.closed);
+   expect(run.events.map(event=>event.method)).toEqual(['turn/started','thread/command/output','turn/completed']);
+   expect(run.events[1].params.output).toBe('Usage: 3 fictional requests\n');
+   expect(run.events.every(event=>event.params.threadId===compactSession)).toBe(true);expect(run.events.at(-1)?.params.turn.status).toBe('completed');
+  }finally{run.rpc.close()}
   const calls=(await readFile(log,'utf8')).trim().split('\n').map(line=>JSON.parse(line));
-  for(const [index,call] of calls.entries()){
-   const args=call.args;expect(call.prompt).toBe(index===0?'/context':'/usage');expect(args[args.indexOf('--resume')+1]).toBe(compactSession);
-   for(const flag of ['--restricted','--safe-mode','--strict-mcp-config','--no-chrome'])expect(args).toContain(flag);
-   expect(args).not.toContain('--disable-slash-commands');expect(args).not.toContain('--input-format');
-   expect(args[args.indexOf('--tools')+1]).toBe('');expect(args[args.indexOf('--allowedTools')+1]).toBe('');expect(args[args.indexOf('--disallowedTools')+1]).toBe('mcp__*');
-   expect(args[args.indexOf('--setting-sources')+1]).toBe('');expect(JSON.parse(args[args.indexOf('--mcp-config')+1])).toEqual({mcpServers:{}});
-   const settings=JSON.parse(args[args.indexOf('--settings')+1]);expect(settings.disableAllHooks).toBe(true);expect(settings.sandbox.failIfUnavailable).toBe(true);expect(settings.sandbox.allowUnsandboxedCommands).toBe(false);
-  }
+  expect(calls).toHaveLength(1);
+  const [{args,prompt}]=calls;
+  expect(prompt).toBe('/usage');expect(args[args.indexOf('--resume')+1]).toBe(compactSession);
+  for(const flag of ['--restricted','--safe-mode','--strict-mcp-config','--no-chrome'])expect(args).toContain(flag);
+  expect(args).not.toContain('--disable-slash-commands');expect(args).not.toContain('--input-format');
+  expect(args[args.indexOf('--tools')+1]).toBe('');expect(args[args.indexOf('--allowedTools')+1]).toBe('');expect(args[args.indexOf('--disallowedTools')+1]).toBe('mcp__*');
+  expect(args[args.indexOf('--setting-sources')+1]).toBe('');expect(JSON.parse(args[args.indexOf('--mcp-config')+1])).toEqual({mcpServers:{}});
+  const settings=JSON.parse(args[args.indexOf('--settings')+1]);expect(settings.disableAllHooks).toBe(true);expect(settings.sandbox.failIfUnavailable).toBe(true);expect(settings.sandbox.allowUnsandboxedCommands).toBe(false);
  }finally{delete process.env.FAKE_CLAUDE_LOG;await rm(root,{recursive:true,force:true})}
 });
-test('Claude /context uses structured usage only when the local command succeeds',async()=>{
- process.env.FAKE_CLAUDE_CONTEXT_REPORT='1';
- try{
-  for(const mode of ['success','failure','legacy']){
-   process.env.FAKE_CLAUDE_COMMAND=mode;
-   const run=await prepareCommand();
-   try{
-    await run.started;await until(run.closed);
-    const reports=run.events.filter(event=>event.method==='thread/context/usage');
-    expect(reports.map(report=>report.params.usage)).toEqual(mode==='success'?[{usedTokens:24_000,maxTokens:200_000}]:[]);
-    expect(run.events.at(-1)?.params.turn.status).toBe(mode==='failure'?'failed':'completed');
-   }finally{run.rpc.close()}
-  }
- }finally{delete process.env.FAKE_CLAUDE_CONTEXT_REPORT;delete process.env.FAKE_CLAUDE_COMMAND}
-});
 test('Claude local command は固定allowlistとresumeを要求し、通常ターンではslash無効を維持する',async()=>{
- for(const command of ['context extra','usage\n/compact','compact','unknown']){const run=await prepareCommand(command);try{await expect(run.started).rejects.toBeInstanceOf(ClaudeRejected);expect(run.events).toEqual([])}finally{run.rpc.close()}}
- const fresh=await prepareCommand('context',{resume:false});try{await expect(fresh.started).rejects.toBeInstanceOf(ClaudeRejected);expect(fresh.events).toEqual([])}finally{fresh.rpc.close()}
+ for(const command of ['context','usage\n/compact','compact','unknown']){const run=await prepareCommand(command);try{await expect(run.started).rejects.toBeInstanceOf(ClaudeRejected);expect(run.events).toEqual([])}finally{run.rpc.close()}}
+ const fresh=await prepareCommand('usage',{resume:false});try{await expect(fresh.started).rejects.toBeInstanceOf(ClaudeRejected);expect(fresh.events).toEqual([])}finally{fresh.rpc.close()}
  for(const name of ['context','usage','code-review','simplify','security-review','recap']){
   const run=await begin(`/${name}`);try{await until(run.closed);expect(run.events.find(event=>event.method==='item/agentMessage/delta')?.params.delta).toBe(`/${name} isn't available in this environment.`);expect(run.events.some(event=>event.method==='thread/command/output')).toBe(false)}finally{run.rpc.close()}
  }
@@ -288,7 +318,7 @@ test('Claude local command は64KiBを改変せず返し、親イベントを除
     await run.started.catch(()=>{});await until(run.closed);
     const output=run.events.find(event=>event.method==='thread/command/output');
     if(mode==='limit'){expect(output?.params.output).toBe('x'.repeat(65536));expect(run.events.at(-1)?.params.turn.status).toBe('completed')}
-    else if(mode==='parent-noise'){expect(output?.params.output).toBe('Context usage: 12%\n');expect(JSON.stringify(run.events)).not.toContain('Private')}
+    else if(mode==='parent-noise'){expect(output?.params.output).toBe('Usage: 3 fictional requests\n');expect(JSON.stringify(run.events)).not.toContain('Private')}
     else{expect(output).toBeUndefined();expect(run.events.some(event=>event.method==='turn/completed')).toBe(false)}
    }finally{run.rpc.close()}
   }
@@ -343,12 +373,12 @@ test('Claude code-review はチャット外へ実行する引数を固定codeで
 
 test('Claude local command はsynthetic本文を使い、raw sourceとresultの重複を配信しない',async()=>{
  try{
-  for(const command of ['usage','context'])for(const mode of ['success','string-content','text-blocks','duplicate-result','legacy']){
-   process.env.FAKE_CLAUDE_COMMAND=mode;const run=await prepareCommand(command);
+  for(const mode of ['success','string-content','text-blocks','duplicate-result','legacy']){
+   process.env.FAKE_CLAUDE_COMMAND=mode;const run=await prepareCommand();
    try{
     expect(await run.started).toEqual({});await until(run.closed);
     expect(run.events.map(event=>event.method)).toEqual(['turn/started','thread/command/output','turn/completed']);
-    expect(run.events[1].params.output).toBe(command==='usage'?'Usage: 3 fictional requests\n':'Context usage: 12%\n');
+    expect(run.events[1].params.output).toBe('Usage: 3 fictional requests\n');
     expect(run.events.at(-1)?.params.turn.status).toBe('completed');expect(JSON.stringify(run.events)).not.toContain('Raw fixture');
    }finally{run.rpc.close()}
   }
@@ -356,8 +386,8 @@ test('Claude local command はsynthetic本文を使い、raw sourceとresultの�
 });
 test('Claude local synthetic のmetadata、canonical本文、outcome、累計UTF8上限を厳密に検証する',async()=>{
  try{
-  for(const command of ['usage','context'])for(const mode of ['missing-source','non-string-source','different-command','alias-command','nonempty-args','missing-args','missing-session','mixed-tool','invalid-content','combined-oversize','legacy-oversize','outcome-failed','outcome-unknown','outcome-restart_required','outcome-success','outcome-null','outcome-unavailable_headless','no-init','parent-only','empty-parent']){
-   process.env.FAKE_CLAUDE_COMMAND=mode;const run=await prepareCommand(command);
+  for(const mode of ['missing-source','non-string-source','different-command','alias-command','nonempty-args','missing-args','missing-session','mixed-tool','invalid-content','combined-oversize','legacy-oversize','outcome-failed','outcome-unknown','outcome-restart_required','outcome-success','outcome-null','outcome-unavailable_headless','no-init','parent-only','empty-parent']){
+   process.env.FAKE_CLAUDE_COMMAND=mode;const run=await prepareCommand();
    try{
     await run.started.catch(()=>{});await until(run.closed);
     expect(run.events.map(event=>event.method)).toEqual(['turn/started','turn/completed']);
@@ -504,8 +534,8 @@ test('ClaudeAgent requires a successful CLI exit for maintenance and prefers str
  };
  try {
   const request: AgentRequest = {...agentRequest(''), target:{mode:'resume',session:{agentId:'claude',id:compactSession}},
-   operation:{kind:'command',name:'context',args:''}};
-  expect(await agent.run(request, host)).toEqual({status:'completed',output:'Context usage: 12%\n'});
+   operation:{kind:'command',name:'usage',args:''}};
+  expect(await agent.run(request, host)).toEqual({status:'completed',output:'Usage: 3 fictional requests\n'});
   process.env.FAKE_CLAUDE_COMMAND = 'failed-exit';
   expect(await agent.run(request, host)).toEqual({status:'unknown'});
   delete process.env.FAKE_CLAUDE_COMMAND;

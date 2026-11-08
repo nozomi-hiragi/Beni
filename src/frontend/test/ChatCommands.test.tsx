@@ -1,18 +1,18 @@
 import { createSignal } from 'solid-js';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@solidjs/testing-library';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { modelStatus, resetModelCache } from '../model-cache';
+import { modelStatus, resetModelCache } from '../shared/model-cache';
 import { chatModelPicker, FakeWebSocket, packResponse, stubLegacyAgentFetch } from './test-events';
 import type { ChatCommand } from '../../shared/chat-commands';
-import type { ChatMessage, Conversation } from '../types';
-import ChatPanel, { type ChatTabStatus } from '../components/ChatPanel';
+import type { ChatMessage, Conversation } from '../shared/types';
+import ChatPanel, { type ChatTabStatus } from '../shared/components/ChatPanel';
 
 const json = (data: unknown, status = 200) => ({ok: status < 400, status, json: async () => data}) as Response;
 let serial = 0;
 beforeEach(() => { resetModelCache(); localStorage.clear(); FakeWebSocket.instances = []; vi.stubGlobal('WebSocket', FakeWebSocket); });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
-async function setup(options: {noModels?: boolean; claude?: boolean; taskId?: string; messages?: ChatMessage[]; instructions?: boolean; instructionFocus?: string; readOnly?: boolean; command?: ChatCommand; working?: boolean; tabStatus?: boolean; commandResponse?: () => Promise<Response>; contextUsage?: {usedTokens:number;maxTokens:number}} = {}) {
+async function setup(options: {noModels?: boolean; claude?: boolean; taskId?: string; messages?: ChatMessage[]; instructions?: boolean; instructionFocus?: string; readOnly?: boolean; command?: ChatCommand; working?: boolean; tabStatus?: boolean; commandResponse?: () => Promise<Response>; contextResponse?: (init?: RequestInit) => Promise<Response>; contextUsage?: {usedTokens:number;maxTokens:number}} = {}) {
   const projectId = options.instructions ? 'instructions' : `commands-${++serial}`;
   const snapshot: Conversation = {id:`conversation-${++serial}`,projectId,taskId:options.taskId ?? null,threadId:'saved-thread',sessionProvider:'codex',selectedModel:options.noModels ? null : {id:'test',name:'Test',provider:'codex'},contextUsage:options.contextUsage,messages: options.messages ?? (options.working ? [{id:'assistant',sendId:'send',role:'assistant',content:'',provider:'codex',model:'test',createdAt:'',updatedAt:'',status:'streaming'}] : []),command:options.command};
   const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
@@ -20,6 +20,7 @@ async function setup(options: {noModels?: boolean; claude?: boolean; taskId?: st
     if (url === '/api/claude/status') return json({installed:!!options.claude,auth:options.claude ? 'claude' : 'none',models:options.claude ? [{id:'sonnet',name:'Sonnet'}] : []});
     if (url.startsWith('/api/chat?')) return json({...snapshot});
     const packs = packResponse(url, snapshot.messages); if (packs) return packs;
+    if (url === '/api/chat/context-usage') return options.contextResponse?.(init) ?? json({});
     if (url === '/api/chat/commands') {
       if (options.commandResponse) return options.commandResponse();
       const name = JSON.parse(String(init?.body)).command;
@@ -56,7 +57,7 @@ it('executes compact from the context gauge and preserves the draft', async () =
   input('送信前の下書き');
   const gauge = screen.getByRole('img', {name:/コンテキスト:/});
   fireEvent.contextMenu(gauge);
-  const compact = screen.getByRole('menuitem', {name:'Compress'});
+  const compact = screen.getByRole('menuitem', {name:'圧縮'});
   fireEvent.click(commandMenu()); fireEvent.click(screen.getByText('会話操作', {selector:'summary'}));
   expect(screen.getByRole('button', {name:'/clear · 履歴を残して新しい会話'})).toBeTruthy();
   expect(screen.queryByRole('button', {name:'/compact · 会話を圧縮'})).toBeNull();
@@ -99,7 +100,8 @@ it('filters menu categories and items by conversation scope and provider', async
   fireEvent.keyDown(commandMenu(), {key:'Escape'});
   expect(commandMenu().getAttribute('aria-expanded')).toBe('false');
   choose('Claude/Sonnet');
-  expect(menuItem('会話操作', '/context · コンテキストの使用状況')).toBeTruthy();
+  expect(menuItem('会話操作', '/usage · 使用量を表示')).toBeTruthy();
+  expect(screen.queryByText('/context · コンテキストの使用状況')).toBeNull();
   fireEvent.pointerDown(textarea());
   expect(commandMenu().getAttribute('aria-expanded')).toBe('false');
 });
@@ -157,7 +159,7 @@ it('Enter respects the send restriction in instruction conversations', async () 
 it('sends compact from the gauge through its own API with the selected model', async () => {
   const {fetchMock, snapshot, socket, onBusyChange} = await setup();
   fireEvent.contextMenu(screen.getByRole('img',{name:/コンテキスト:/}));
-  fireEvent.click(screen.getByRole('menuitem',{name:'Compress'}));
+  fireEvent.click(screen.getByRole('menuitem',{name:'圧縮'}));
   await screen.findByText('圧縮中…');
   const request = fetchMock.mock.calls.find(([url]) => url === '/api/chat/commands');
   expect(JSON.parse(String(request?.[1]?.body))).toEqual({projectId:expect.stringMatching(/^commands-/),taskId:null,command:'compact',args:'',provider:'codex',model:'test'});
@@ -188,7 +190,7 @@ it.each(['/tmp/example.txt', '/Users/example/project', '「/compact」を説明�
 it('preserves input on a rejected compact operation and preserves newer edits after acceptance', async () => {
   let release!: (value: Response) => void;
   const {snapshot,fetchMock} = await setup({commandResponse:() => new Promise(resolve => {release = resolve;})});
-  const compact = () => { fireEvent.contextMenu(screen.getByRole('img',{name:/コンテキスト:/})); fireEvent.click(screen.getByRole('menuitem',{name:'Compress'})); };
+  const compact = () => { fireEvent.contextMenu(screen.getByRole('img',{name:/コンテキスト:/})); fireEvent.click(screen.getByRole('menuitem',{name:'圧縮'})); };
   compact();
   await screen.findByText('圧縮中…'); input('新しい下書き');
   release(json({error:'保存されたセッションがありません'},409));
@@ -245,24 +247,65 @@ it('shows counts and unknown context usage, and scopes compact to the selected s
   expect(tooltipRows).toHaveLength(2);
   expect(tooltipRows[0].textContent).toContain('150%');
   expect(tooltipRows[1].textContent).toContain('1,200 / 800 tokens');
-  fireEvent.contextMenu(gauge); const item = screen.getByRole('menuitem',{name:'Compress'});
+  fireEvent.contextMenu(gauge); const item = screen.getByRole('menuitem',{name:'圧縮'});
   await waitFor(()=>expect(item).toBe(document.activeElement));
   expect(gauge.parentElement?.classList.contains('dropdown-open')).toBe(true);
   fireEvent.keyDown(item,{key:'Escape'});
-  expect(screen.queryByRole('menuitem',{name:'Compress'})).toBeNull();
+  expect(screen.queryByRole('menuitem',{name:'圧縮'})).toBeNull();
   expect(gauge).toBe(document.activeElement);
   gauge.focus(); fireEvent.keyDown(gauge,{key:'F10',shiftKey:true});
-  expect(await screen.findByRole('menuitem',{name:'Compress'})).toBeTruthy();
+  expect(await screen.findByRole('menuitem',{name:'圧縮'})).toBeTruthy();
   choose('Claude/Sonnet');
-  expect(screen.queryByRole('menuitem',{name:'Compress'})).toBeNull();
+  expect(screen.queryByRole('menuitem',{name:'圧縮'})).toBeNull();
   expect(screen.getByRole('tooltip').textContent).toContain('不明');
 });
 
 it('shows missing context counts as unknown', async () => {
   await setup();
   const gauge = screen.getByRole('img',{name:/コンテキスト:/});
+  await waitFor(() => expect(gauge.textContent).toBe('?'));
   expect(screen.getByRole('tooltip').textContent).toContain('不明');
-  expect(gauge.textContent).toBe('?');
+});
+
+it('automatically probes once per missing session and retries from the gauge', async () => {
+  const requests: ((value: Response) => void)[] = [];
+  const {fetchMock, snapshot, socket} = await setup({
+    taskId: 'context-task',
+    contextResponse: () => new Promise(resolve => requests.push(resolve)),
+  });
+  const gauge = () => screen.getByRole('img', {name:/コンテキスト:/});
+  const calls = () => fetchMock.mock.calls.filter(([url]) => url === '/api/chat/context-usage');
+  await waitFor(() => expect(calls()).toHaveLength(1));
+  expect(JSON.parse(String(calls()[0][1]?.body))).toEqual({
+    projectId: snapshot.projectId, taskId: 'context-task', phase: 'requirements', provider: 'codex', model: 'test',
+  });
+  expect(gauge().getAttribute('aria-busy')).toBe('true');
+  expect(gauge().classList.contains('radial-progress')).toBe(false);
+  fireEvent.contextMenu(gauge());
+  expect((screen.getByRole('menuitem',{name:'更新'}) as HTMLButtonElement).disabled).toBe(true);
+  requests[0](json({}, 500));
+  await waitFor(() => expect(gauge().textContent).toBe('?'));
+  snapshot.messages = [message('履歴更新')]; socket.change();
+  await screen.findByText('履歴更新');
+  expect(calls()).toHaveLength(1);
+
+  fireEvent.contextMenu(gauge());
+  fireEvent.click(screen.getByRole('menuitem',{name:'更新'}));
+  expect(calls()).toHaveLength(2);
+  expect(JSON.parse(String(calls()[1][1]?.body))).toMatchObject({refresh:true});
+  snapshot.contextUsage = {usedTokens:200,maxTokens:1000};
+  requests[1](json({contextUsage:snapshot.contextUsage}));
+  await waitFor(() => expect(gauge().textContent).toBe('20%'));
+  expect(gauge().classList.contains('radial-progress')).toBe(true);
+
+  fireEvent.contextMenu(gauge());
+  fireEvent.click(screen.getByRole('menuitem',{name:'更新'}));
+  requests[2](json({}));
+  await waitFor(() => expect(gauge().textContent).toBe('20%'));
+  snapshot.threadId = 'next-thread'; snapshot.contextUsage = undefined; socket.change();
+  await waitFor(() => expect(calls()).toHaveLength(4));
+  requests[3](json({}));
+  await waitFor(() => expect(gauge().textContent).toBe('?'));
 });
 
 const commandCalls = (fetchMock: Awaited<ReturnType<typeof setup>>['fetchMock']) => fetchMock.mock.calls.filter(([url]) => url === '/api/chat/commands' || url === '/api/chat/send');
@@ -349,7 +392,8 @@ it('limits candidates to the selected provider and resets keyboard selection whe
   const {fetchMock} = await setup({claude:true, tabStatus:true});
   input('/'); expect(screen.queryByRole('option',{name:'/context · コンテキストの使用状況'})).toBeNull();
   choose('Claude/Sonnet');
-  expect(screen.getByRole('option',{name:'/context · コンテキストの使用状況'})).toBeTruthy();
+  expect(screen.queryByRole('option',{name:'/context · コンテキストの使用状況'})).toBeNull();
+  expect(screen.getByRole('option',{name:'/usage · 使用量を表示'})).toBeTruthy();
   fireEvent.keyDown(textarea(),{key:'ArrowUp'});
   expect(textarea().getAttribute('aria-activedescendant')).toBeTruthy();
   choose('Codex/Test');

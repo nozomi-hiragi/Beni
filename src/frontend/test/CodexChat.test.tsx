@@ -1,10 +1,10 @@
-import { loadModels, resetModelCache } from '../model-cache';
+import { loadModels, resetModelCache } from '../shared/model-cache';
 import { createSignal } from 'solid-js';
 import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-library';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import ChatPanel from '../components/ChatPanel';
-import CodexSettings from '../components/CodexSettings';
-import UsageIndicators from '../components/UsageIndicators';
+import ChatPanel from '../shared/components/ChatPanel';
+import SettingsPage from '../settings/SettingsPage';
+import UsageIndicators from '../shared/components/UsageIndicators';
 import { chatModelPicker, FakeWebSocket, packResponse, testPack, stubLegacyAgentFetch } from './test-events';
 
 const json = (data: unknown) => ({ ok: true, json: async () => data }) as Response;
@@ -26,7 +26,7 @@ it('refreshes installation and login state without starting login', async () => 
     expect(init?.body).toBe('{}');
     return Promise.resolve(json({ installed: true, path: '/usr/bin/codex', version: '1.2.3', checkedAt: '2026-01-02T03:04:05Z', auth: 'none', models: null, usage: {observedAt:'2026-01-02T03:04:05Z',windows:[{label:'週間',usedPercent:25}]} }));
   }));
-  render(() => <CodexSettings />);
+  render(() => <SettingsPage />);
   expect(await screen.findByText('Codex CLI をインストールしてください')).toBeTruthy();
   await waitFor(() => expect((screen.getByRole('button', { name: 'Codex の接続状態を更新' }) as HTMLButtonElement).disabled).toBe(false));
   fireEvent.click(screen.getByRole('button', { name: 'Codex の接続状態を更新' }));
@@ -207,6 +207,11 @@ it('follows streamed content only at the bottom and resets following when the sc
   log.scrollTop = 500; fireEvent.scroll(log);
   viewport = 200; resize(); flush(); expect(log.scrollTop).toBe(500);
   setTaskId('019a0000-0000-7100-8000-00000000003e'); flush(); expect(log.scrollTop).toBe(1600);
+  // The browser's scroll event for the programmatic bottom jump can arrive
+  // after the scope reset. It must not disable following for newly loaded history.
+  height = 2000; resize();
+  fireEvent.scroll(log);
+  flush(); expect(log.scrollTop).toBe(1800);
   cleanup(); expect(disconnect).toHaveBeenCalledOnce(); expect(frames.size).toBe(0);
 });
 
