@@ -13,7 +13,7 @@ import TabBar from '../../shared/components/TabBar';
 import TreeView, { type TreeNode } from './TreeView';
 import ProjectFileContent, { projectFileName, projectFilePath, projectFileTree } from './ProjectFiles';
 import TerminalPanel from './TerminalPanel';
-import ResizeHandle from '../../shared/components/ResizeHandle';
+import ResizeHandle, { MAX_RATIO } from '../../shared/components/ResizeHandle';
 import type { AppState, Document, Task, TaskDetail } from '../../shared/types';
 
 export interface WorkspaceProps {
@@ -26,7 +26,7 @@ export interface WorkspaceProps {
 
 const documentId = (document: Document) => document.path ?? JSON.stringify([document.name, document.version]);
 type DocumentTabs = { known: string[]; open: string[]; selected?: string };
-const reviewLabels = { pending: '待機中', running: '実行中', done: '完了', failed: '失敗' };
+const reviewLabels = { pending: '待機中', running: '実行中', stopped: '停止済み', done: '完了', failed: '失敗' };
 const instructionJobLabels = { pending: '処理中', succeeded: '完了', failed: '失敗', superseded: '後続の更新依頼に置き換え済み' };
 
 export default function Workspace(props: WorkspaceProps) {
@@ -131,7 +131,7 @@ export default function Workspace(props: WorkspaceProps) {
   createEffect(() => { activeTask(); setActiveFile(undefined); });
   createEffect(() => { projectId(); setOpenFiles([]); setActiveFile(undefined); });
   const [leftRatio, setLeftRatio] = createSignal(50);
-  const [chatRatio, setChatRatio] = createSignal(60);
+  const [chatRatio, setChatRatio] = createSignal(MAX_RATIO);
   let workspace: HTMLElement | undefined;
   let leftPanels: HTMLDivElement | undefined;
   const deletedTasks = new Set<string>();
@@ -306,7 +306,7 @@ export default function Workspace(props: WorkspaceProps) {
     onCleanup(() => { active = false; sequence++; refreshTaskDetail = undefined; unsubscribe?.(); unsubscribeEvents?.(); });
   });
 
-  async function retryWorkflow(action: 'retry-review' | 'retry-instructions') {
+  async function workflowAction(action: 'retry-review' | 'retry-instructions' | 'stop-review') {
     const task = detail()?.task;
     if (!task || task.id !== activeTask() || advancing()) return;
     setAdvancing(true);
@@ -314,7 +314,7 @@ export default function Workspace(props: WorkspaceProps) {
     try {
       await api(`/api/tasks/${task.id}/${action}`, { projectId: task.projectId });
     } catch (error) {
-      if (alive && task.id === activeTask()) setPhaseError(error instanceof Error ? error.message : '再試行を開始できませんでした');
+      if (alive && task.id === activeTask()) setPhaseError(error instanceof Error ? error.message : action === 'stop-review' ? '自動分析を停止できませんでした' : '再試行を開始できませんでした');
     } finally {
       if (alive && task.id === activeTask()) await refreshTaskDetail?.();
       if (alive) setAdvancing(false);
@@ -448,10 +448,16 @@ export default function Workspace(props: WorkspaceProps) {
               <Show when={phaseError()}><p role="alert" class="p-2 text-sm text-error">{phaseError()}</p></Show>
               <Show when={actualPhase() === 'retrospective' && review()}>{state =>
                 <div class="flex flex-wrap items-center gap-2 border-b border-base-300 px-3 py-2 text-sm">
-                  <p role="status">反省会の自動精査 · {reviewLabels[state().state]}<Show when={state().state !== 'done'}> · 残り {state().remaining} 件</Show></p>
+                  <p role="status">反省会の自動分析 · {reviewLabels[state().state]}</p>
+                  <Show when={state().state === 'pending' || state().state === 'running'}>
+                    <button type="button" class="btn btn-sm" disabled={advancing()} onClick={() => void workflowAction('stop-review')}>停止</button>
+                  </Show>
+                  <Show when={state().state === 'stopped'}>
+                    <button type="button" class="btn btn-sm" disabled={advancing() || chatBusy()} onClick={() => void workflowAction('retry-review')}>自動分析を再開</button>
+                  </Show>
                   <Show when={state().state === 'failed'}>
                     <Show when={state().error}><p class="text-error">{state().error}</p></Show>
-                    <button type="button" class="btn btn-sm" disabled={advancing() || chatBusy()} onClick={() => void retryWorkflow('retry-review')}>自動精査を再試行</button>
+                    <button type="button" class="btn btn-sm" disabled={advancing() || chatBusy()} onClick={() => void workflowAction('retry-review')}>自動分析を再試行</button>
                   </Show>
                 </div>
               }</Show>
@@ -460,7 +466,7 @@ export default function Workspace(props: WorkspaceProps) {
                   <p role="status">インストラクションの更新 · {instructionJobLabels[job().status]}</p>
                   <Show when={job().status === 'failed'}>
                     <Show when={job().error}><p class="text-error">{job().error}</p></Show>
-                    <button type="button" class="btn btn-sm" disabled={advancing()} onClick={() => void retryWorkflow('retry-instructions')}>インストラクションの更新を再試行</button>
+                    <button type="button" class="btn btn-sm" disabled={advancing()} onClick={() => void workflowAction('retry-instructions')}>インストラクションの更新を再試行</button>
                   </Show>
                 </div>
               }</Show>

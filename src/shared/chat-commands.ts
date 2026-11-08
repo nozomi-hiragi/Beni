@@ -6,7 +6,6 @@ export type ChatCommandDefinition = {name:ChatCommandName;command:string;descrip
 const common:readonly Provider[]=['codex','claude'];
 export const chatCommands:readonly (ChatCommandDefinition & {providers:readonly Provider[]})[] = [
  {name:'clear',command:'/clear',description:'履歴を残して新しい会話',providers:common,kind:'operation',aliases:['new','reset']},
- {name:'context',command:'/context',description:'コンテキストの使用状況',providers:['claude'],kind:'operation'},
  {name:'usage',command:'/usage',description:'使用量を表示',providers:['claude'],kind:'operation',aliases:['cost','stats']},
  {name:'review',command:'/review',description:'変更をレビュー',providers:common,kind:'message',argumentHint:'[対象]'},
  {name:'recap',command:'/recap',description:'会話を要約',providers:common,kind:'message'},

@@ -7,7 +7,8 @@ import { followChatBottom } from '../chat-scroll';
 import type { Pack, TaskPhase } from '../../../shared/communication';
 import { isTaskPhase } from '../../../shared/task-phase';
 import { findChatCommand, parseChatCommand, type ChatCommand, type ChatCommandDefinition } from '../../../shared/chat-commands';
-import { availableModels, chooseModel, loadModels, modelIsAvailable, modelLabel, modelScope, modelStatus, modelValue, providerCommands, providerName, providerReady, providerSupportsCompaction, registeredAgents, rejectModel, selectedModel } from '../model-cache';
+import type { ContextUsage } from '../../../shared/agent';
+import { availableModels, chooseModel, loadModels, modelIsAvailable, modelLabel, modelScope, modelStatus, modelValue, providerCommands, providerName, providerReady, providerSupportsCompaction, registeredAgent, registeredAgents, rejectModel, selectedModel } from '../model-cache';
 import type { ChatMessage, Conversation, Model } from '../types';
 import { popupHeight } from './chat-popup';
 import ModelPicker from './ModelPicker';
@@ -249,6 +250,50 @@ export default function ChatPanel(props: { projectId: string; taskId?: string; p
     return value.sessions?.[sessionKey];
   };
   const contextUsage = () => contextSession()?.contextUsage;
+  const contextProbeKey = () => {
+    const session = contextSession();
+    if (session?.threadId) return JSON.stringify([key(), conversation()?.id, selectedSessionKey(), session.threadId]);
+  };
+  const attemptedContextProbes = new Set<string>();
+  const [pendingContextProbes, setPendingContextProbes] = createSignal<ReadonlyMap<string, AbortController>>(new Map());
+  const contextLoading = () => pendingContextProbes().has(contextProbeKey() ?? '');
+  const contextRefreshSupported = () => {
+    const provider = selectedProvider();
+    return !!contextProbeKey() && !!provider && registeredAgent(provider)?.supportsContextUsage === true;
+  };
+  const canRefreshContext = () => contextRefreshSupported() && !props.readOnly && !busy() && modelAvailable() && !loadError() && !contextLoading();
+  onCleanup(() => {
+    for (const controller of pendingContextProbes().values()) controller.abort();
+  });
+  async function probeContext(refreshUsage = false) {
+    const probeKey = contextProbeKey(), scope = key(), selected = selection();
+    if (!probeKey || !selected || !canRefreshContext() || !refreshUsage && (contextUsage() || attemptedContextProbes.has(probeKey))) return;
+    const controller = new AbortController();
+    if (!contextUsage()) attemptedContextProbes.add(probeKey);
+    setPendingContextProbes(previous => new Map(previous).set(probeKey, controller));
+    try {
+      const result = await api<{contextUsage?: ContextUsage}>('/api/chat/context-usage', {
+        projectId: props.projectId, taskId: props.taskId ?? null,
+        ...(props.taskId === undefined ? {} : {phase: props.phase}),
+        provider: selected.provider ?? 'codex', model: selected.id, ...(refreshUsage ? {refresh: true} : {}),
+      }, controller.signal);
+      // 履歴を再読込し、送信や圧縮の結果を取得開始時点の値で置き換えない。
+      if (result.contextUsage && !controller.signal.aborted && key() === scope) refresh();
+    } catch { /* 取得できない場合は現在の表示を維持する。 */ }
+    finally {
+      if (!controller.signal.aborted) setPendingContextProbes(previous => {
+        const next = new Map(previous);
+        next.delete(probeKey);
+        return next;
+      });
+    }
+  }
+  createEffect(() => {
+    const probeKey = contextProbeKey();
+    if (!probeKey) return;
+    if (contextUsage()) attemptedContextProbes.delete(probeKey);
+    else void probeContext();
+  });
   const canCompact = () => {
     const session = contextSession(), provider = selectedProvider();
     return !!session?.threadId && !props.readOnly && !busy() && modelAvailable() && providerSupportsCompaction(provider);
@@ -464,7 +509,8 @@ export default function ChatPanel(props: { projectId: string; taskId?: string; p
         </div>
         <div class="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-2">
           <Show when={key()} keyed>
-            <ContextGauge usage={contextUsage()} compactAvailable={canCompact()} onCompact={compactSelectedSession} />
+            <ContextGauge usage={contextUsage()} loading={contextLoading()} compactAvailable={canCompact()} onCompact={compactSelectedSession}
+              refreshSupported={contextRefreshSupported()} refreshAvailable={canRefreshContext()} onRefresh={() => void probeContext(true)} />
             <ModelPicker models={models()} selection={selection()} available={modelAvailable()} busy={busy()} anchor={() => composerActions} onSelect={selectModel} />
           </Show>
           <Show when={busy()}><button type="button" class="btn btn-sm" disabled={interrupting()} onClick={interrupt}>中断</button></Show>

@@ -27,6 +27,7 @@ Beni/
 │   │   ├── documents.ts              旧 Markdown の検出・取り込み補助と変更監視
 │   │   ├── document-table.ts         文書の項目・根拠と版の保存
 │   │   ├── document-workflow.ts      文書用ツール、実装と反省会の進行、指示更新ジョブ
+│   │   ├── retrospective-signals.ts  反省会で使う文書の引用状況と実装履歴の集計
 │   │   ├── project-events.ts         プロジェクトイベント・文書差分・版の復元
 │   │   ├── project-files.ts          作業フォルダーの一覧・テキスト読み取り
 │   │   ├── rate-limits.ts            CLI が返す利用枠の正規化
@@ -85,7 +86,7 @@ Beni/
 │       │   ├── phase-display.ts      フェーズの表示名と対応する文書
 │       │   ├── types.ts              プロジェクト・タスク・文書・会話などの画面側の型
 │       │   └── components/
-│       │       ├── Menu.tsx           共通ヘッダーと画面の移動
+│       │       ├── Navbar.tsx         共通ヘッダーと画面の移動
 │       │       ├── UsageIndicators.tsx  接続先ごとの利用枠ゲージ
 │       │       ├── ChatPanel.tsx      会話、モデル選択、送信・中断、履歴表示
 │       │       ├── ChatComposer.tsx   テキスト入力と送信フォーム

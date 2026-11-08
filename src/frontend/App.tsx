@@ -1,7 +1,7 @@
 import { validProjectId, validTaskId } from '../shared/ids';
 import { createMemo, createSignal, onCleanup, onMount, Show } from 'solid-js';
 import HomePage from './home/HomePage';
-import Menu from './shared/components/Menu';
+import Navbar from './shared/components/Navbar';
 import SettingsPage from './settings/SettingsPage';
 import InstructionsPage from './instructions/InstructionsPage';
 import ProjectPage from './project/ProjectPage';
@@ -36,7 +36,7 @@ export default function App() {
     onCleanup(() => window.removeEventListener('popstate', pop));
   });
   return <div class="flow-root" classList={{ 'instructions-shell': route().kind === 'instructions', 'project-shell': route().kind === 'project' }}>
-    <Menu title={route().kind === 'project' ? (projectTitle()?.id === projectId() ? projectTitle()!.name : 'プロジェクト') : route().kind === 'settings' ? '設定' : route().kind === 'instructions' ? 'インストラクション管理' : 'Beni'} showHome={route().kind !== 'home'} onHome={home} onInstructions={() => navigate('/instructions')} onSettings={() => navigate('/settings')} />
+    <Navbar title={route().kind === 'project' ? (projectTitle()?.id === projectId() ? projectTitle()!.name : 'プロジェクト') : route().kind === 'settings' ? '設定' : route().kind === 'instructions' ? 'インストラクション管理' : 'Beni'} showHome={route().kind !== 'home'} onHome={home} onInstructions={() => navigate('/instructions')} onSettings={() => navigate('/settings')} />
     <main class="mx-auto w-full px-2 py-2">
       <Show when={route().kind === 'home'}><HomePage onOpenProject={project => { setProjectTitle({ id: project.id, name: project.name }); navigate(`/project/${project.id}`); }} onOpenTask={(task, project) => { setProjectTitle({ id: project.id, name: project.name }); navigate(`/project/${project.id}?task=${task.id}`); }} /></Show>
       <Show when={projectId()} keyed>{id => <ProjectPage id={id} task={projectRoute()?.task} invalidTask={projectRoute()?.invalidTask ?? false} onHome={home} onTitle={name => setProjectTitle({ id, name })} onTaskChange={task => navigate(`/project/${id}${task === undefined ? '' : `?task=${task}`}`)} />}</Show>

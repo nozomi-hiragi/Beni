@@ -3,11 +3,11 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  ClaudeRejected, ClaudeRpc, ClaudeSessionMissing, claudeGenerationArgumentsAllowed, claudeStatus,
+  ClaudeRejected, ClaudeRpc, ClaudeSessionMissing, claudeGenerationArgumentsAllowed, claudeSessionContextUsage, claudeStatus,
 } from '../claude';
 import { toolResult } from '../embedded-tools';
 import { claudeRateLimit, claudeUsageReport } from '../rate-limits';
-import type { Agent, AgentAccess, AgentCommand, AgentEvent, AgentFailureCode, AgentHost, AgentOutcome, AgentRequest, AgentStatus, AgentUsage } from './agent';
+import type { Agent, AgentAccess, AgentCommand, AgentEvent, AgentFailureCode, AgentHost, AgentOutcome, AgentRequest, AgentSession, AgentStatus, AgentUsage, ContextUsage } from './agent';
 
 function failure(code: AgentFailureCode): AgentOutcome {
   return { status: 'failed', code };
@@ -32,7 +32,6 @@ export class ClaudeAgent implements Agent {
   readonly supportsEmbeddedTools = true;
   readonly commands: readonly AgentCommand[] = [
     { name: 'compact', description: '会話を圧縮', kind: 'maintenance', requiresSession: true },
-    { name: 'context', description: 'コンテキストの使用状況', kind: 'maintenance', requiresSession: true },
     { name: 'usage', description: '使用量を表示', kind: 'maintenance', requiresSession: true, aliases: ['cost', 'stats'] },
     { name: 'code-review', description: 'コードをレビュー', kind: 'generation', requiresSession: false, aliases: ['review'], argumentHint: '[対象]' },
     { name: 'simplify', description: 'コードを簡潔にする', kind: 'generation', requiresSession: false },
@@ -126,6 +125,11 @@ export class ClaudeAgent implements Agent {
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }
+  }
+
+  async getContextUsage({ session, modelId, cwd }: { session: AgentSession; modelId: string; cwd: string }, signal: AbortSignal): Promise<ContextUsage | undefined> {
+    const executable = this.executable();
+    if (executable && session.agentId === this.id) return claudeSessionContextUsage(executable, session.id, modelId, cwd, signal);
   }
 
   private async execute(

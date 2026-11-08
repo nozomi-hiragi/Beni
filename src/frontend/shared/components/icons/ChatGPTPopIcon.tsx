@@ -20,8 +20,8 @@ export default function ChatGPTPopIcon(props: { class?: string }) {
     {...{ focusable: 'false' }}
   >
     <g transform="rotate(30 16 16)" fill="none" stroke-linecap="round">
-      <path d={spiral} stroke="#000" stroke-width="4.1" />
-      <path d={spiral} stroke="#fff" stroke-width="2.9" />
+      <path d={spiral} stroke="#000" stroke-width="6" />
+      <path d={spiral} stroke="#fff" stroke-width="3.0" />
     </g>
   </svg>;
 }

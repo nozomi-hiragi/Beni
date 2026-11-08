@@ -115,40 +115,45 @@ export default function TabBar(props: TabBarProps) {
     props.onSelect(tab.id);
     buttons.get(tab.id)?.focus();
   }
-  return <div class="flex min-h-12 min-w-0 border-b border-base-300">
+  return <div class="flex min-h-12 min-w-0">
     <Show when={props.left}><div class="flex shrink-0 items-center">{props.left}</div></Show>
     <div class="flex min-w-0 flex-1 overflow-x-auto">
       <div class="tabs tabs-border shrink-0 flex-nowrap" role="tablist" aria-label={props.label}>
         <For each={props.tabs.map(tab => tab.id)}>{(id, index) => {
-          const tab = () => tabById(id); return <div class="tab h-auto shrink-0 flex-nowrap border-r border-r-base-300 px-4" classList={{ 'tab-active font-semibold': props.activeId === id }} onContextMenu={event => {
+          const tab = () => tabById(id);
+          const handleContextMenu = (event: MouseEvent) => {
             if (editing() === id || saving() || !hasMenu(id)) return;
             event.preventDefault(); openMenu(id, event.clientX, event.clientY);
-          }}>
-            <Show when={editing() === id} fallback={
+          };
+          return <>
+            <Show when={editing() !== id} fallback={
+              <div class="flex shrink-0 flex-col self-center px-2 py-1">
+                <input ref={element => queueMicrotask(() => { if (element.isConnected) { element.focus(); element.select(); } })} class="input input-bordered input-sm" aria-label="タスク名" aria-invalid={!!error()} value={name()} readOnly={saving()} onInput={event => { setName(event.currentTarget.value); setError(''); }} onBlur={() => { if (!saving()) { setEditing(undefined); setError(''); } }} onKeyDown={event => editKeyDown(event, id)} />
+                <Show when={error()}><p role="alert" class="text-sm text-error">{error()}</p></Show>
+              </div>
+            }>
               <button
                 ref={element => buttons.set(id, element)}
                 type="button"
                 role="tab"
-                class="px-0 py-3 text-sm"
+                class="tab h-auto shrink-0 flex-nowrap px-4 py-3 text-sm"
+                classList={{ 'tab-active font-semibold': props.activeId === id }}
                 id={props.panelId ? `${props.panelId}-${id}` : undefined}
                 aria-controls={props.panelId}
                 aria-selected={props.activeId === id}
                 tabIndex={props.panelId ? (props.activeId === id ? 0 : -1) : undefined}
                 aria-haspopup={hasMenu(id) ? 'menu' : undefined}
+                onContextMenu={handleContextMenu}
                 onKeyDown={event => {
                   if (!saving() && hasMenu(id) && (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10'))) {
                     event.preventDefault(); const rect = event.currentTarget.getBoundingClientRect(); openMenu(id, rect.left, rect.bottom);
                   }
                   selectWithKey(event, index());
                 }}
-                onClick={() => props.onSelect(id)}>{tab()?.label}</button>}>
-              <div class="px-2 py-1">
-                <input ref={element => queueMicrotask(() => { if (element.isConnected) { element.focus(); element.select(); } })} class="input input-bordered input-sm" aria-label="タスク名" aria-invalid={!!error()} value={name()} readOnly={saving()} onInput={event => { setName(event.currentTarget.value); setError(''); }} onBlur={() => { if (!saving()) { setEditing(undefined); setError(''); } }} onKeyDown={event => editKeyDown(event, id)} />
-                <Show when={error()}><p role="alert" class="text-sm text-error">{error()}</p></Show>
-              </div>
+                onClick={() => props.onSelect(id)}>{tab()?.label}</button>
             </Show>
-            <Show when={props.onClose && tab()?.closable !== false}><button type="button" class="btn btn-ghost btn-xs btn-square ms-1" aria-label={`${tab()?.label} を閉じる`} onClick={() => props.onClose?.(id)}><span aria-hidden="true">×</span></button></Show>
-          </div>
+            <Show when={props.onClose && tab()?.closable !== false}><button type="button" class="btn btn-ghost btn-xs btn-square ms-1 self-center" aria-label={`${tab()?.label} を閉じる`} onContextMenu={handleContextMenu} onClick={() => props.onClose?.(id)}><span aria-hidden="true">×</span></button></Show>
+          </>;
         }}</For>
       </div>
       <Show when={props.right}><div class="flex shrink-0 items-center">{props.right}</div></Show>

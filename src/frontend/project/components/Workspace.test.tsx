@@ -554,48 +554,61 @@ it('自動精査の進捗と再試行に応じて反省会のチャットと完�
   const projectId = '019a0000-0000-7000-8000-000000000001';
   const id = '019a0000-0000-7100-8000-000000000099';
   const task = { id, projectId, name: '精査の確認', phase: 'retrospective', status: 'idle' };
-  const workflow: NonNullable<TaskDetail['workflow']> = { review: { state: 'pending', remaining: 3 } };
+  const workflow: NonNullable<TaskDetail['workflow']> = { review: { state: 'running' } };
   const documents = [{ path: 'retrospective.md', name: 'retrospective.md', content: '# 精査結果', version: 1 }];
   const retries: string[] = [];
+  let chatMessages = [{ id: 'review-assistant', sendId: 'review-send', role: 'assistant', content: '精査中', provider: 'codex', model: 'test', createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z', status: 'streaming' }];
   stubLegacyAgentFetch(vi.fn(async (path: string, init?: RequestInit) => {
     if (path === '/api/state') return json({ projects: [], tasks: [task] });
     if (path === `/api/tasks/${id}`) return json(structuredClone({ task, documents, workflow }));
-    if (path === `/api/tasks/${id}/retry-review` || path === `/api/tasks/${id}/retry-instructions`) {
+    if (path === `/api/tasks/${id}/stop-review` || path === `/api/tasks/${id}/retry-review` || path === `/api/tasks/${id}/retry-instructions`) {
       expect(init?.method).toBe('POST');
       expect(JSON.parse(String(init?.body))).toEqual({ projectId });
       retries.push(path);
-      if (path.endsWith('retry-review')) workflow.review = { state: 'running', remaining: 2 };
+      if (path.endsWith('stop-review')) { workflow.review = { state: 'stopped' }; chatMessages = []; }
+      else if (path.endsWith('retry-review')) workflow.review = { state: 'running' };
       else workflow.instructionJob = { status: 'pending' };
       return json({ ok: true });
     }
-    if (path.startsWith('/api/chat?')) return json({ id: 'review-conversation', messages: [] });
+    if (path.startsWith('/api/chat?')) return json({ id: 'review-conversation', projectId, taskId: id, threadId: null, selectedModel: { id: 'test', name: 'Test', provider: 'codex' }, messages: chatMessages });
     return packResponse(path, []) ?? json({ sessions: [] });
   }));
   render(() => <Workspace taskId={id} onHome={() => {}} />);
   const composer = () => screen.queryByRole('textbox', { name: '希望や回答を入力' });
   const complete = () => screen.getByRole<HTMLButtonElement>('button', { name: 'タスク完了' });
-  await screen.findByText('反省会の自動精査 · 待機中 · 残り 3 件');
-  expect(composer()).toBeNull();
-  expect(complete().disabled).toBe(true);
-
+  await screen.findByText('反省会の自動分析 · 実行中');
   const socket = FakeWebSocket.instances.find(item => !item.closed)!;
+  await screen.findByText('作業中…');
+  const stopButton = screen.getByRole<HTMLButtonElement>('button', { name: '停止' });
+  expect(stopButton.disabled).toBe(false);
+  fireEvent.click(stopButton);
+  await screen.findByText('反省会の自動分析 · 停止済み');
+  socket.change('chat', id);
+  await waitFor(() => expect(screen.queryByText('作業中…')).toBeNull());
+  expect(complete().disabled).toBe(true);
+  expect(composer()).toBeTruthy();
+  expect(complete().disabled).toBe(true);
+  fireEvent.click(screen.getByRole('button', { name: '自動分析を再開' }));
+  await screen.findByText('反省会の自動分析 · 実行中');
+  expect(composer()).toBeNull();
+
   let lastEventId = 0;
   const notify = () => socket.event('task-events', { name: 'task.events.changed', data: { lastEventId: ++lastEventId } });
   await waitFor(() => expect([...socket.subscriptions.values()].some(item => item.topic === 'task-events')).toBe(true));
-  workflow.review = { state: 'failed', remaining: 2, error: '精査に失敗しました' };
+  workflow.review = { state: 'failed', error: '精査に失敗しました' };
   notify();
-  const retry = await screen.findByRole('button', { name: '自動精査を再試行' });
+  const retry = await screen.findByRole('button', { name: '自動分析を再試行' });
   expect(screen.getByText('精査に失敗しました')).toBeTruthy();
   expect(composer()).toBeTruthy();
   expect(complete().disabled).toBe(true);
   fireEvent.click(retry);
-  await screen.findByText('反省会の自動精査 · 実行中 · 残り 2 件');
+  await screen.findByText('反省会の自動分析 · 実行中');
   expect(composer()).toBeNull();
   expect(complete().disabled).toBe(true);
 
-  workflow.review = { state: 'done', remaining: 0 };
+  workflow.review = { state: 'done' };
   notify();
-  await screen.findByText('反省会の自動精査 · 完了');
+  await screen.findByText('反省会の自動分析 · 完了');
   await screen.findByRole('heading', { name: '精査結果' });
   expect(composer()).toBeTruthy();
   expect(complete().disabled).toBe(false);
@@ -612,5 +625,5 @@ it('自動精査の進捗と再試行に応じて反省会のチャットと完�
   expect(screen.getByRole('tab', { name: 'ナレッジ' }).getAttribute('aria-selected')).toBe('true');
   expect(screen.getByRole('heading', { name: '次回に活かす知識' })).toBeTruthy();
   expect(screen.queryByRole('button', { name: 'インストラクションの更新を再試行' })).toBeNull();
-  expect(retries).toEqual([`/api/tasks/${id}/retry-review`, `/api/tasks/${id}/retry-instructions`]);
+  expect(retries).toEqual([`/api/tasks/${id}/stop-review`, `/api/tasks/${id}/retry-review`, `/api/tasks/${id}/retry-review`, `/api/tasks/${id}/retry-instructions`]);
 });

@@ -152,9 +152,9 @@ it('resizes the chat and references boundary with keyboard controls',async()=>{
   expect(handle.parentElement!.style.getPropertyValue(second)).toBe(`${100-ratio}fr`);
  };
  const expectChat=(ratio:number)=>expectRatio(chatHandle,'--instructions-chat-ratio','--instructions-references-ratio',ratio);
- expectChat(65);
+ expectChat(80);
  fireEvent.keyDown(chatHandle,{key:'ArrowUp'});
- expectChat(63);
+ expectChat(78);
  fireEvent.keyDown(chatHandle,{key:'Home'});
  fireEvent.keyDown(chatHandle,{key:'ArrowUp'});
  expectChat(20);

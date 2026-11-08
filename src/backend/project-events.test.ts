@@ -5,7 +5,9 @@ import { linkSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, sym
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { generateId } from '../shared/ids';
-import { appendProjectEvent, captureProjectTaskHistory, getProjectFileChange, getProjectFileVersion, projectEvent, projectEvents, projectTaskDeleted, projectTaskVersion } from './project-events';
+import { appendProjectEvent, captureProjectTaskHistory, getProjectFileChange, getProjectFileVersion, projectEvent, projectEvents, projectTaskDeleted, projectTaskVersion, type ProjectEventInput } from './project-events';
+import { retrospectiveSignals } from './retrospective-signals';
+import { Store } from './store';
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, {recursive: true, force: true}); });
@@ -214,6 +216,75 @@ test('実行開始・終了は参照と種別で重複を防ぎ、出力・コ�
   expect(() => appendProjectEvent(root, {...input, chatId: 'another-chat'})).toThrow('Conflicting operation event');
   expect(() => appendProjectEvent(root, {...input, operationId: 'other', details: {command: 'example command'} as any})).toThrow('Unsupported event details');
   expect(() => appendProjectEvent(root, {...input, operationId: 'other', details: {output: 'example output'} as any})).toThrow('Unsupported event details');
+});
+
+test('反省会の引用集計は空白を除き、抜粋が異なる同じ原文をまとめる', () => {
+  const { root } = fixture();
+  const store = new Store(join(root, 'store.sqlite'));
+  try {
+    const project = store.createProject('Project', root);
+    const task = store.createTask(project.id, 'Task');
+    const original = store.managedDocument(project.id, task.id, 'requirements.md')!;
+    const document = store.writeManagedDocument(project.id, task.id, original.name, original.revision, [
+      ...original.items,
+      { text: '\n', reason: '', sources: [] },
+      { text: '要件本文', reason: '合意したため', sources: [
+        { kind: 'message', id: 'message', text: '抜粋1' },
+        { kind: 'message', id: 'message', text: '抜粋2' },
+        { kind: 'document', id: 'document/item', revision: 'old', text: '旧版の本文' },
+        { kind: 'document', id: 'document/item', revision: 'new', text: '新版の本文' },
+      ] },
+    ], 'test');
+
+    const result = retrospectiveSignals(store, project.id, task.id, 'documents', 0);
+    expect(result).toMatchObject({ area: 'documents', next: null });
+    if (result.area !== 'documents') throw Error('Expected document signals');
+    expect(result.documents.find(entry => entry.name === original.name)).toEqual({
+      name: original.name, revision: document.revision, items: 2, citations: 4,
+      byKind: { document: 2, instruction: 0, message: 2, result: 0 },
+      uniqueSources: 3, imported: { template: 1, legacy: 0 },
+      mostCitedItems: [{ item: 2, excerpt: '要件本文', citations: 4 }],
+    });
+  } finally { store.close(); }
+});
+
+test('反省会の実装集計は対象タスクの書き込みの反復と終了の異常を返す', () => {
+  const { root } = fixture();
+  const store = new Store(join(root, 'store.sqlite'));
+  try {
+    const project = store.createProject('Project', root);
+    const task = store.createTask(project.id, 'Task');
+    const other = store.createTask(project.id, 'Other');
+    const record = (event: ProjectEventInput) => store.recordProjectEvent(project.id, {
+      taskId: task.id, phase: 'execution', ...event,
+    });
+    const edit = { type: 'tool.finished', details: { toolName: 'Edit', targetPaths: ['src/example.ts'], result: 'completed' } };
+    const first = record({ ...edit, operationId: 'edit-1' });
+    const second = record({ ...edit, operationId: 'edit-2' });
+    record({ ...edit, operationId: 'edit-other', taskId: other.id });
+    record({ ...edit, operationId: 'edit-retrospective', phase: 'retrospective' });
+    for (const operationId of ['read-1', 'read-2']) record({
+      type: 'tool.finished', operationId, details: { toolName: 'Read', targetPaths: ['src/read-only.ts'], result: 'completed' },
+    });
+    record({ type: 'tool.started', operationId: 'command', details: { toolName: 'command' } });
+    const failed = record({
+      type: 'tool.finished', operationId: 'command', details: { toolName: 'command', result: 'completed', exitCode: 1 },
+    });
+    const interrupted = record({
+      type: 'tool.finished', operationId: 'interrupted', details: { toolName: 'command', result: 'interrupted' },
+    });
+    const unknown = record({ type: 'tool.started', operationId: 'unknown', details: { toolName: 'command' } });
+    expect(retrospectiveSignals(store, project.id, task.id, 'execution', 0)).toMatchObject({
+      area: 'execution', toolExecutions: 7, successfulEditCallsWithPaths: 2, anomalyCount: 3,
+      anomalies: [
+        { eventId: unknown.id, operationId: 'unknown', result: 'unknown', missingFinish: true },
+        { eventId: interrupted.id, operationId: 'interrupted', result: 'interrupted' },
+        { eventId: failed.id, operationId: 'command', result: 'failed', exitCode: 1 },
+      ],
+      repeatedEditCount: 1, repeatedEdits: [{ path: 'src/example.ts', count: 2, eventIds: [second.id, first.id] }],
+      latestCompletion: null, next: null,
+    });
+  } finally { store.close(); }
 });
 
 test('イベントDBやsidecarのシンボリックリンク・ハードリンクを拒否する', () => {

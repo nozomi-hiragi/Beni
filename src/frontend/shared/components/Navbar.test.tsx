@@ -2,7 +2,7 @@ import { createSignal } from 'solid-js';
 import { cleanup, fireEvent, render, screen } from '@solidjs/testing-library';
 import { afterEach, expect, it, vi } from 'vitest';
 import { loadModels, resetModelCache } from '../model-cache';
-import Menu from './Menu';
+import Navbar from './Navbar';
 
 afterEach(() => { cleanup(); resetModelCache(); vi.unstubAllGlobals(); });
 
@@ -13,7 +13,7 @@ it('displays the current title and only shows the home button outside home', asy
   const onInstructions = vi.fn();
   const [title, setTitle] = createSignal('Beni');
   const [showHome, setShowHome] = createSignal(false);
-  render(() => <Menu title={title()} showHome={showHome()} onHome={onHome} onSettings={onSettings} onInstructions={onInstructions} />);
+  render(() => <Navbar title={title()} showHome={showHome()} onHome={onHome} onSettings={onSettings} onInstructions={onInstructions} />);
 
   expect(screen.getByText('Beni')).toBeTruthy();
   expect(screen.queryByRole('button', { name: 'ホームへ戻る' })).toBeNull();

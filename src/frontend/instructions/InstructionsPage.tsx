@@ -5,7 +5,7 @@ import type { DocumentProvenance } from '../shared/types';
 import MarkdownPreview from '../shared/components/MarkdownPreview';
 import PromptTableMarkdownPreview from '../shared/components/PromptTableMarkdownPreview';
 import ChatPanel from '../shared/components/ChatPanel';
-import ResizeHandle from '../shared/components/ResizeHandle';
+import ResizeHandle, { MAX_RATIO } from '../shared/components/ResizeHandle';
 import TabBar from '../shared/components/TabBar';
 import { phaseLabels } from '../shared/phase-display';
 import { taskPhases as phases, type TaskPhase } from '../../shared/task-phase';
@@ -60,7 +60,7 @@ export default function InstructionsPage() {
   }
   const [leftRatio, setLeftRatio] = createSignal(50);
   const [selectedGroup, setSelectedGroup] = createSignal('instructions');
-  const [chatRatio, setChatRatio] = createSignal(65);
+  const [chatRatio, setChatRatio] = createSignal(MAX_RATIO);
   let leftPanels: HTMLElement | undefined;
   let layout: HTMLDivElement | undefined;
   const tabId = createUniqueId();

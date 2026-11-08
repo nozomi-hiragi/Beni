@@ -26,6 +26,7 @@ TypeScript で契約を示す。`RateLimitUsage` は現行の共通型を再利�
 ```ts
 type AgentId = string;
 type AgentModel = { id: string; name: string };
+type ContextUsage = { usedTokens: number; maxTokens: number };
 type AgentSession = { agentId: AgentId; id: string; legacySessionId?: string };
 type AgentTarget =
   | { mode: 'new' | 'ephemeral' }
@@ -97,7 +98,7 @@ type AgentEvent =
       'running' | 'completed' | 'failed' | 'interrupted' | 'unknown';
       input?: string; output?: string; targetPaths?: readonly string[]; exitCode?: number }
   | { type: 'usage'; data: AgentUsage }
-  | { type: 'context.usage'; data: { usedTokens: number; maxTokens: number } };
+  | { type: 'context.usage'; data: ContextUsage };
 
 interface AgentHost {
   signal: AbortSignal;
@@ -115,6 +116,8 @@ interface Agent {
   validateCommand?(command: { name: string; args: string }): boolean;
   run(request: AgentRequest, host: AgentHost): Promise<AgentOutcome>;
   getUsage?(): Promise<AgentUsage>;
+  getContextUsage?(request: { session: AgentSession; modelId: string; cwd: string },
+    signal: AbortSignal): Promise<ContextUsage | undefined>;
 }
 ```
 
@@ -146,8 +149,8 @@ Beni はフェーズから `access` と組み込みツールの扱いを選び�
 ## 任意機能と拡張
 
 - **利用枠**。手動取得は `getUsage` の有無で判定し、明示的な更新時にだけ呼ぶ。会話中の更新は `usage` イベントで渡す。`snapshot` は取得した枠一覧で置き換え、`window-update` は同じラベルの枠だけを更新する。取得できなければ `usage: 'unknown'` を返し、同じアカウントの取得済みの値は保持する。Beni は `getStatus()` で確認した Agent ID と `accountKey` の組に一致する結果だけをキャッシュする。照合値が得られないときはキャッシュを使わず、アカウント切り替え前の通知は破棄する。`accountKey` は画面やチャット履歴に渡さない。
-- **コンテキスト使用量**。受理済みのセッションで使用トークン数とモデルの上限を取得できたら、`context.usage` イベントで渡す。Beni は会話とモデルの組ごとに最後の値を保存する。圧縮の成功後は、その圧縮を反映した値だけを使う。
-- **コマンド**。圧縮、レビュー、コンテキスト表示などは `commands` に宣言する。Beni は候補の表示、別名の解決、名前・引数の共通制限・利用条件の検証、実行状態の保存を行う。Agent には別名を解決した登録名を渡す。接続先固有の引数は Agent が検証し、`validateCommand` を提供する場合は Beni が受付前にも呼び出す。情報表示用の本文は `completed` の `output` に返し、通常の回答パックには含めない。生成コマンドの回答は通常の本文イベントで返す。圧縮の未対応や履歴不足は専用の失敗コードで区別する。履歴のアーカイブやモデル選択など、Beni 内で完結するコマンドは引き続き Beni が扱う。
+- **コンテキスト使用量**。受理済みのセッションで使用トークン数とモデルの上限を取得できたら、`context.usage` イベントで渡す。Beni は会話とモデルの組ごとに最後の値を保存する。圧縮の成功後は、その圧縮を反映した値だけを使う。保存済みセッションを個別に確認できる Agent は `getContextUsage` を実装し、チャットの送信や推論を行わずに値を取得する。
+- **コマンド**。圧縮やレビューなどは `commands` に宣言する。Beni は候補の表示、別名の解決、名前・引数の共通制限・利用条件の検証、実行状態の保存を行う。Agent には別名を解決した登録名を渡す。接続先固有の引数は Agent が検証し、`validateCommand` を提供する場合は Beni が受付前にも呼び出す。情報表示用の本文は `completed` の `output` に返し、通常の回答パックには含めない。生成コマンドの回答は通常の本文イベントで返す。圧縮の未対応や履歴不足は専用の失敗コードで区別する。履歴のアーカイブやモデル選択など、Beni 内で完結するコマンドは引き続き Beni が扱う。
 - **今後の候補**。実行中の追加入力、セッションの分岐、画像入力、対話的な承認は、Beni の操作として採用した時点で型付きの任意機能として定義する。対応判定にはその機能の有無を使い、未対応を別操作で暗黙に代用しない。実行中の追加入力を採用する場合は、元の実行を識別し、通常の送信や新規ターンと区別する。
 
 ## 検証

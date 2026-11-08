@@ -8,7 +8,7 @@ Beni は Claude Agent SDK から、利用者の実行環境にある公式 Claud
 
 | 対象 | ライセンス・利用条件 |
 | --- | --- |
-| TypeScript 版 `@anthropic-ai/claude-agent-sdk` | Beni が使う npm 版 `0.3.292` の同梱 `LICENSE.md` は All rights reserved とし、Claude Code の利用条件を参照している。 [Claude Code の利用条件](https://code.claude.com/docs/en/legal-and-compliance) |
+| TypeScript 版 `@anthropic-ai/claude-agent-sdk` | Beni が使う npm 版 `0.3.319` の同梱 `LICENSE.md` は All rights reserved とし、Claude Code の利用条件を参照している。 [Claude Code の利用条件](https://code.claude.com/docs/en/legal-and-compliance) |
 | Python 版 `claude-agent-sdk` | SDK のソースコードは MIT。CLI とサービスにはそれぞれの利用条件が適用される。 [LICENSE](https://github.com/anthropics/claude-agent-sdk-python/blob/main/LICENSE) |
 
 Beni 本体は Apache-2.0 で公開し、npm の依存パッケージには提供元の利用条件が適用される。TypeScript 版の公式リポジトリの `LICENSE.md` は商用利用規約を参照している。 [Beni のライセンス](../LICENSE) · [TypeScript 版 SDK のライセンス](https://github.com/anthropics/claude-agent-sdk-typescript/blob/main/LICENSE.md)

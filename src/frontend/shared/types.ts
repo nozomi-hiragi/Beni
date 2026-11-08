@@ -20,7 +20,7 @@ export interface TaskDetail {
   documents: Document[];
   canStart?: boolean;
   workflow?: {
-    review?: { state: 'pending' | 'running' | 'done' | 'failed'; remaining: number; error?: string | null } | null;
+    review?: { state: 'pending' | 'running' | 'stopped' | 'done' | 'failed'; error?: string | null } | null;
     instructionJob?: { status: 'pending' | 'succeeded' | 'failed' | 'superseded'; error?: string };
   };
 }

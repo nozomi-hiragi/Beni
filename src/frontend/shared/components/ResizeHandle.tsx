@@ -1,5 +1,7 @@
 import { createSignal, onCleanup, onMount } from 'solid-js';
 
+export const MAX_RATIO = 80;
+
 export default function ResizeHandle(props: {
   orientation: 'horizontal' | 'vertical';
   label: string;
@@ -10,7 +12,7 @@ export default function ResizeHandle(props: {
   const [dragging, setDragging] = createSignal(false);
   let handle!: HTMLDivElement;
   let pointerId: number | undefined;
-  const change = (value: number) => props.onChange(Math.max(20, Math.min(80, value)));
+  const change = (value: number) => props.onChange(Math.max(100 - MAX_RATIO, Math.min(MAX_RATIO, value)));
   function stop() {
     const id = pointerId;
     pointerId = undefined;
@@ -41,7 +43,7 @@ export default function ResizeHandle(props: {
     window.removeEventListener('blur', stop);
     window.removeEventListener('resize', stop);
   });
-  return <div ref={handle} role="separator" tabindex="0" aria-label={props.label} aria-orientation={props.orientation} aria-valuemin={20} aria-valuemax={80} aria-valuenow={Math.round(props.value)}
+  return <div ref={handle} role="separator" tabindex="0" aria-label={props.label} aria-orientation={props.orientation} aria-valuemin={100 - MAX_RATIO} aria-valuemax={MAX_RATIO} aria-valuenow={Math.round(props.value)}
     class="workspace-resize" classList={{'workspace-resize-vertical': props.orientation === 'vertical', 'workspace-resize-horizontal': props.orientation === 'horizontal', 'workspace-resize-active': dragging()}}
     onPointerDown={event => {
       if (!event.isPrimary || event.button !== 0 || pointerId !== undefined) return;
@@ -61,6 +63,6 @@ export default function ResizeHandle(props: {
       const increase = props.orientation === 'vertical' ? 'ArrowRight' : 'ArrowDown';
       if (![decrease, increase, 'Home', 'End'].includes(event.key)) return;
       event.preventDefault();
-      change(event.key === 'Home' ? 20 : event.key === 'End' ? 80 : props.value + (event.key === increase ? 2 : -2));
+      change(event.key === 'Home' ? 100 - MAX_RATIO : event.key === 'End' ? MAX_RATIO : props.value + (event.key === increase ? 2 : -2));
     }} />;
 }

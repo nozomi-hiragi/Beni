@@ -4,7 +4,7 @@ import DocumentIcon from './icons/DocumentIcon';
 import SettingsIcon from './icons/SettingsIcon';
 import UsageIndicators from './UsageIndicators';
 
-export interface MenuProps {
+export interface NavbarProps {
   title: string;
   showHome: boolean;
   onHome: () => void;
@@ -12,7 +12,7 @@ export interface MenuProps {
   onSettings: () => void;
 }
 
-export default function Menu(props: MenuProps) {
+export default function Navbar(props: NavbarProps) {
   return <header class="navbar relative z-10 w-auto mx-2 mt-2 rounded-box border border-base-300 bg-base-100 shadow-sm min-h-10 flex-wrap items-center gap-3 px-4 py-2">
     <Show when={props.showHome}>
       <button type="button" class="btn btn-ghost btn-square btn-sm" aria-label="ホームへ戻る" onClick={props.onHome}>

@@ -87,5 +87,6 @@ export interface Agent {
   getStatus(): Promise<AgentStatus>;
   validateCommand?(command: { name: string; args: string }): boolean;
   run(request: AgentRequest, host: AgentHost): Promise<AgentOutcome>;
+  getContextUsage?(request: { session: AgentSession; modelId: string; cwd: string }, signal: AbortSignal): Promise<ContextUsage | undefined>;
   getUsage?(): Promise<AgentUsage>;
 }

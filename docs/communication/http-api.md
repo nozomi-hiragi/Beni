@@ -27,11 +27,12 @@ HTTP による取得・操作と、チャットのパック同期の契約を定
 | `POST /api/tasks/:id/phase` | `{projectId: string, phase: string, target: string}`。現在と移動先の準備フェーズを指定 | 200 移動後の `Task` | 400 入力不正、404 タスクなし・所属不一致、409 実行中・フェーズ不一致 |
 | `POST /api/tasks/:id/start` | `{projectId: string, phase: string, model: string \| null, provider?: string}` | 200 実装中の `Task`。選択モデルへ実装開始の依頼を送信 | 400 入力不正・接続先やモデルを利用できない、404 対象なし、409 実行中・フェーズ不一致・実装手順未編集、500 開始失敗 |
 | `POST /api/tasks/:id/stop` | `{projectId: string, phase: "execution"}` | 200 停止完了後の実装手順の `Task` | 400 入力不正、404 対象なし、409 フェーズ不一致・停止処理中、500 停止失敗 |
-| `POST /api/tasks/:id/complete` | `{projectId: string, phase: "retrospective"}` | 200 `phase: finalization` の `Task` | 400 入力不正・接続先やモデルを利用できない、404 対象なし、409 フェーズ・状態不一致・自動精査未完了・処理中、500 開始失敗 |
+| `POST /api/tasks/:id/complete` | `{projectId: string, phase: "retrospective"}` | 200 `phase: finalization` の `Task` | 400 入力不正・接続先やモデルを利用できない、404 対象なし、409 フェーズ・状態不一致・自動分析未完了・処理中、500 開始失敗 |
 | `POST /api/tasks/:id/reopen` | `{projectId: string, phase: "finalization" または "retrospective"}` | 200 反省会・`status: idle` の `Task` | 404 対象なし、409 フェーズ・状態不一致 |
 | `POST /api/tasks/:id/rename` | `{projectId: string, name: string}`。名前の前後の空白を除く | 200 更新後の `Task` | 400 名前不正、404 タスクなし・所属不一致、500 保存失敗 |
 | `GET /api/tasks/:id` | パスのタスク ID | 200 `TaskDetail` | 404 タスクなし、500 文書取得失敗 |
-| `POST /api/tasks/:id/retry-review` | `{projectId: string}` | 202 `{ok: true}`。反省会の自動精査を再試行 | 404 タスクなし・所属不一致、409 `retrospective`・`idle`・精査 `failed` の条件を満たさない |
+| `POST /api/tasks/:id/stop-review` | `{projectId: string}` | 200 `{ok: true}`。反省会の自動分析を停止 | 404 タスクなし・所属不一致、409 停止可能な分析なし、500 停止失敗 |
+| `POST /api/tasks/:id/retry-review` | `{projectId: string}` | 202 `{ok: true}`。反省会の自動分析を再開・再試行 | 404 タスクなし・所属不一致、409 `retrospective`・`idle` で停止または失敗した分析がない、処理中 |
 | `POST /api/tasks/:id/retry-instructions` | `{projectId: string}` | 202 `{ok: true}`。インストラクション更新を再試行 | 404 タスクなし・所属不一致、409 `completed`・更新ジョブ `failed` の条件を満たさない |
 | `POST /api/folders/list` | `{path?: string}`。指定時は絶対パス | 200 `FolderList` | 400 パス不正・開けない |
 | `GET /api/agents` | なし | 200 `{agents: AgentInfo[]}`。起動時に登録した接続先の一覧 | |
@@ -44,6 +45,7 @@ HTTP による取得・操作と、チャットのパック同期の契約を定
 | `GET /api/chat` | query: `projectId`, 任意の `taskId`、タスクでは `phase` | 200 `Conversation` | 400 フェーズ不正、404 会話対象なし、500 履歴取得失敗 |
 | `POST /api/chat/send` | `{projectId, taskId?, phase?, content, model, provider?, instructionFocus?}`。content は空白のみ不可、model は256 UTF-16コード単位以内の文字列か null | 202 `Conversation` | 400 入力不正・接続先やモデルを利用できない、404 対象なし、409 送信中・フェーズや状態の不一致、500 保存・接続失敗 |
 | `POST /api/chat/commands` | `{projectId, taskId?, phase?, command, args?, provider?, model?}` | 202 `{command: ChatCommand}` | 400 入力不正・未対応コマンド・接続先利用不可、404 対象なし、409 実行中・セッションなし・接続先やフェーズ・状態の不一致、500 保存・接続失敗 |
+| `POST /api/chat/context-usage` | `{projectId, taskId?, phase?, provider, model, refresh?}` | 200 `{contextUsage?: ContextUsage}` | 400 入力不正、404 対象なし、500 履歴の読み込み・保存失敗 |
 | `POST /api/chat/interrupt` | `{projectId, taskId?, phase?}` | 200 `{ok: true}` | 400 フェーズ不正、404 対象なし、409 停止対象なし・状態不一致、500 保存・接続失敗 |
 
 タスクチャットの `phase` は `requirements`・`documents`・`implementation`・`execution`・`retrospective`・`finalization` のいずれかとする。
@@ -66,7 +68,7 @@ type Document = { name: string; path: string; content: string; version: number; 
 type TaskDetail = {
   task: Task; documents: Document[]; canStart: boolean;
   workflow: {
-    review: { state: 'pending' | 'running' | 'done' | 'failed'; remaining: number; error: string | null } | null;
+    review: { state: 'pending' | 'running' | 'stopped' | 'done' | 'failed'; error: string | null } | null;
     instructionJob?: {
       id: string; projectId: string; taskId: string; revision: string;
       provider: string; model: string | null;
@@ -91,6 +93,7 @@ type AgentCommand = {
 };
 type AgentInfo = {
   id: string; name: string; commands: readonly AgentCommand[]; supportsUsage: boolean;
+  supportsContextUsage?: boolean;
 };
 type AgentConnectionStatus = {
   availability: 'ready' | 'not-installed' | 'unsupported-version' | 'unavailable';
@@ -151,7 +154,9 @@ type Conversation = {
 
 既存セッションが必要な保守コマンドは、指定した接続先とモデルの保存済みセッションに対して実行する。対象のセッションがない場合は409で拒否する。指定を省略した場合は会話の選択モデルを優先する。操作中も会話のメッセージとパック列は保持する。
 
-コンテキストゲージの `Compress` は `command: "compact"` を送る。会話取得・送信レスポンスでは、選択モデルの計測値を `contextUsage` に、他のモデルの計測値を `sessions["接続先ID/モデルID"].contextUsage` に含める。未計測の項目は省略する。
+コンテキストゲージの「圧縮」は `command: "compact"` を送る。会話取得・送信レスポンスでは、選択モデルの計測値を `contextUsage` に、他のモデルの計測値を `sessions["接続先ID/モデルID"].contextUsage` に含める。未計測の項目は省略する。
+
+`POST /api/chat/context-usage` は、指定した接続先とモデルの保存済みセッションのコンテキスト使用量を取得する。通常は保存値があれば返し、未計測なら接続先からの取得を試す。ゲージの「更新」は `refresh: true` を指定し、保存値があっても再取得する。再取得できなければ応答の `contextUsage` を省略し、保存値があれば保持する。計測値を保存したときは `chat.changed` で通知する。
 
 通常の送信は、会話とモデルごとにセッションを保存する。モデルを切り替えたときは、そのモデルがまだ受け取っていない会話の抜粋を追加する。再開先の消失やツール構成との不一致が受理前に確定した場合は、新規セッションで同じ送信を一度だけ実行する。認証・モデルの拒否や結果不明の切断では、保存済みセッションを維持する。
 
@@ -242,7 +247,7 @@ status/state は生成状態を表します。正常終了したアシスタン�
 
 送信・実装開始の `provider` は登録 ID。省略時は登録順の先頭を使う。標準の構成では `codex`。モデルIDは接続先の生IDを送り、画面表示の接頭辞は含めない。選択した接続先だけへ送信し、他方へ自動変更しない。
 
-実装中・終了フェーズ・完了済みタスクと、反省会の自動精査が `pending` または `running` のタスクでは、`chat/send`・`chat/interrupt`・`chat/commands` を409で拒否する。実装中はタスクの `stop` を利用できる。停止以外で実装が終わると、BEが反省会への遷移を保存して自動精査を始める。精査完了後の `complete` は終了の定型依頼を送信する。ナレッジの版が確定すればタスクを完了し、確定できなければ反省会に戻す。終了のチャットは履歴を取得・購読できる。処理中の `reopen` は409で拒否し、完了後の `reopen` で反省会に戻す。
+実装中・終了フェーズ・完了済みタスクと、反省会の自動分析が `pending` または `running` のタスクでは、`chat/send`・`chat/interrupt`・`chat/commands` を409で拒否する。実装中はタスクの `stop`、自動分析中は `stop-review` を利用できる。停止以外で実装が終わると、BEが反省会への遷移を保存して自動分析を始める。自動分析を停止した場合は、反省会で `retry-review` を使って再開できる。分析完了後の `complete` は終了の定型依頼を送信する。ナレッジの版が確定すればタスクを完了し、確定できなければ反省会に戻す。終了のチャットは履歴を取得・購読できる。処理中の `reopen` は409で拒否し、完了後の `reopen` で反省会に戻す。
 
 ## インストラクション
 

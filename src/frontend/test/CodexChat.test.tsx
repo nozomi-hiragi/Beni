@@ -207,6 +207,11 @@ it('follows streamed content only at the bottom and resets following when the sc
   log.scrollTop = 500; fireEvent.scroll(log);
   viewport = 200; resize(); flush(); expect(log.scrollTop).toBe(500);
   setTaskId('019a0000-0000-7100-8000-00000000003e'); flush(); expect(log.scrollTop).toBe(1600);
+  // The browser's scroll event for the programmatic bottom jump can arrive
+  // after the scope reset. It must not disable following for newly loaded history.
+  height = 2000; resize();
+  fireEvent.scroll(log);
+  flush(); expect(log.scrollTop).toBe(1800);
   cleanup(); expect(disconnect).toHaveBeenCalledOnce(); expect(frames.size).toBe(0);
 });
 

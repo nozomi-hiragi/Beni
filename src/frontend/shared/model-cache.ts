@@ -17,8 +17,8 @@ const manualInflight = new Map<Provider, Promise<void>>();
 const statusRevision = new Map<Provider, number>();
 const selections = new Map<string, Selection>();
 const legacyAgents: readonly AgentInfo[] = [
-  {id:'codex', name:'Codex', commands:[], supportsUsage:true},
-  {id:'claude', name:'Claude', commands:[], supportsUsage:true},
+  {id:'codex', name:'Codex', commands:[], supportsUsage:true, supportsContextUsage:true},
+  {id:'claude', name:'Claude', commands:[], supportsUsage:true, supportsContextUsage:true},
 ];
 export const registeredAgents = () => registry()?.agents ?? [];
 export const registeredAgent = (provider: Provider) => registeredAgents().find(agent => agent.id === provider);

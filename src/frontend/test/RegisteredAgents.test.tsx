@@ -68,7 +68,7 @@ it('uses a registered agent for models, command aliases, settings and usage', as
   fireEvent.click(within(screen.getByRole('listbox',{name:'モデル'})).getByRole('option',{name:'試験エージェント/One'}));
   const context = screen.getByRole('img',{name:/コンテキスト:/});
   fireEvent.contextMenu(context);
-  expect(screen.getByRole('menuitem',{name:'Compress'})).toBeTruthy();
+  expect(screen.getByRole('menuitem',{name:'圧縮'})).toBeTruthy();
 
   const gauge = screen.getByRole('progressbar',{name:'試験エージェント の利用枠'});
   expect(gauge.getAttribute('aria-valuetext')).toBe('当日 残り 90%');
