@@ -1,7 +1,7 @@
 import { createSignal, untrack } from 'solid-js';
 import { api, ApiError } from './api';
-import { isAgentId, type AgentConnectionStatus, type AgentInfo } from '../shared/agent';
-import { beniChatCommands, commandsForProvider, type ChatCommandDefinition } from '../shared/chat-commands';
+import { isAgentId, type AgentConnectionStatus, type AgentInfo } from '../../shared/agent';
+import { beniChatCommands, commandsForProvider, type ChatCommandDefinition } from '../../shared/chat-commands';
 import type { ClaudeStatus, CodexStatus, Model, Provider } from './types';
 
 type Selection = Model & { rejected?: boolean };

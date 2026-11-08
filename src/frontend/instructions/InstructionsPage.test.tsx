@@ -1,11 +1,11 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen, within } from '@solidjs/testing-library';
 import { afterEach, expect, it, vi } from 'vitest';
-import Instructions from './Instructions';
-import { communication } from './communication';
-vi.mock('./communication',()=>({communication:{subscribe:vi.fn(()=>vi.fn())}}));
+import InstructionsPage from './InstructionsPage';
+import { communication } from '../shared/communication';
+vi.mock('../shared/communication',()=>({communication:{subscribe:vi.fn(()=>vi.fn())}}));
 const chatMock = vi.hoisted(()=>({busyChange: undefined as ((busy:boolean)=>void)|undefined}));
-vi.mock('./components/ChatPanel',()=>({default: (props: {projectId:string; instructionFocus?:string|null; onBusyChange?:(busy:boolean)=>void})=>{chatMock.busyChange=props.onBusyChange;return <div data-testid="instructions-chat">{props.projectId}</div>}}));
+vi.mock('../shared/components/ChatPanel',()=>({default: (props: {projectId:string; instructionFocus?:string|null; onBusyChange?:(busy:boolean)=>void})=>{chatMock.busyChange=props.onBusyChange;return <div data-testid="instructions-chat">{props.projectId}</div>}}));
 afterEach(()=>{cleanup();vi.unstubAllGlobals()});
 it('loads templates and switches the Markdown preview with descriptive variable badges',async()=>{
  const executionContent = '# Execution instructions';
@@ -14,7 +14,7 @@ it('loads templates and switches the Markdown preview with descriptive variable 
   provenance:{execution:{revision:'execution-revision',items:[{id:'execution-item',start:0,end:executionContent.length}]}},
  })}).mockResolvedValueOnce({ok:true,json:async()=>({reason:'実装時の指示の根拠',sources:[]})});
  vi.stubGlobal('fetch',fetch);
- render(()=> <Instructions/>);
+ render(()=> <InstructionsPage/>);
  expect(screen.getAllByRole('status')[0].textContent).toContain('読み込み中');
  expect(await screen.findByRole('heading',{name:'Common プロジェクトのディレクトリ'})).toBeTruthy();
  expect(screen.queryByText('{{project_directory}}')).toBeNull();
@@ -64,13 +64,13 @@ it('loads templates and switches the Markdown preview with descriptive variable 
 });
 it('shows a loading failure',async()=>{
  vi.stubGlobal('fetch',vi.fn().mockRejectedValue(Error('offline')));
- render(()=> <Instructions/>);
+ render(()=> <InstructionsPage/>);
  expect((await screen.findByRole('alert')).textContent).toContain('読み込めませんでした');
 });
 
 it.each([{}, {instructions:null}, {instructions:[]}, {instructions:[{key:'editor',content:'# Editor instructions'},{key:'common'}]}])('shows malformed responses as a loading failure: %j',async data=>{
  vi.stubGlobal('fetch',vi.fn().mockResolvedValue({ok:true,json:async()=>data}));
- render(()=> <Instructions/>);
+ render(()=> <InstructionsPage/>);
  expect((await screen.findByRole('alert')).textContent).toContain('読み込めませんでした');
  expect(screen.queryByRole('tablist',{name:'フェーズ別インストラクション'})).toBeNull();
 });
@@ -85,7 +85,7 @@ it('refreshes saved instructions on chat events and ignores older responses',asy
   .mockImplementationOnce(()=>new Promise(resolve=>{resolveOlder=resolve}))
   .mockResolvedValueOnce(response('Saved editor','Saved common'));
  vi.stubGlobal('fetch',fetch);
- const view=render(()=> <Instructions/>);
+ const view=render(()=> <InstructionsPage/>);
  await screen.findByText('Initial common');
  expect(communication.subscribe).toHaveBeenLastCalledWith('chat',{projectId:'instructions',taskId:null},expect.anything());
  listener!.event({name:'chat.changed'});
@@ -105,7 +105,7 @@ it('shows refresh failures and recovers when the chat reconnects',async()=>{
  vi.mocked(communication.subscribe).mockImplementationOnce((_topic,_scope,value)=>{listener=value;return vi.fn()});
  const response=(content:string)=>({ok:true,json:async()=>({instructions:[{key:'common',content}]})});
  vi.stubGlobal('fetch',vi.fn().mockResolvedValueOnce(response('Initial common')).mockRejectedValueOnce(Error('offline')).mockResolvedValueOnce(response('Recovered common')));
- render(()=> <Instructions/>);
+ render(()=> <InstructionsPage/>);
  await screen.findByText('Initial common');
  listener!.event({name:'chat.changed'});
  expect((await screen.findByRole('alert')).textContent).toContain('読み込めませんでした');
@@ -116,7 +116,7 @@ it('shows refresh failures and recovers when the chat reconnects',async()=>{
 
 it('resizes the instruction columns with keyboard controls within the allowed range',async()=>{
  vi.stubGlobal('fetch',vi.fn().mockResolvedValue({ok:true,json:async()=>({instructions:[{key:'common',content:'Common instructions'}]})}));
- render(()=> <Instructions/>);
+ render(()=> <InstructionsPage/>);
  await screen.findByText('Common instructions');
  const handle=screen.getByRole('separator',{name:'相談とインストラクションの幅を調整'});
  const layout=handle.parentElement!;
@@ -141,7 +141,7 @@ it('resizes the instruction columns with keyboard controls within the allowed ra
 
 it('resizes the chat and references boundary with keyboard controls',async()=>{
  vi.stubGlobal('fetch',vi.fn().mockResolvedValue({ok:true,json:async()=>({instructions:[{key:'editor',content:'Editor instructions'}]})}));
- render(()=> <Instructions/>);
+ render(()=> <InstructionsPage/>);
  await screen.findByRole('tab',{name:'要件定義'});
  expect(screen.queryByRole('separator',{name:'プロンプトと下部パネルの高さを調整'})).toBeNull();
  const chatHandle=screen.getByRole('separator',{name:'チャットと変数・ツールの高さを調整'});
@@ -166,7 +166,7 @@ it('resizes the chat and references boundary with keyboard controls',async()=>{
 
 it('selects prompt content by click and keyboard while keeping focus separate from displayed tabs',async()=>{
  vi.stubGlobal('fetch',vi.fn().mockResolvedValue({ok:true,json:async()=>({instructions:[{key:'editor',content:'Editor instructions'},{key:'common',content:'Common instructions'},{key:'requirements',content:'Requirements instructions'},{key:'execution',content:'Execution instructions'}]})}));
- render(()=> <Instructions/>);
+ render(()=> <InstructionsPage/>);
  await screen.findByText('Common instructions');
  const consultation=screen.getByRole('region',{name:'インストラクション相談'});
  const focusHeading=within(consultation).getByRole('heading');
@@ -208,7 +208,7 @@ it('applies pending editor content and refreshes the templates',async()=>{
   .mockResolvedValueOnce({ok:true,json:async()=>({editorState:{pending:false,busy:false}})})
   .mockResolvedValueOnce({ok:true,json:async()=>({instructions:[{key:'editor',content:'New editor'}],editorState:{pending:false,busy:false}})});
  vi.stubGlobal('fetch',fetch);
- render(()=> <Instructions/>);
+ render(()=> <InstructionsPage/>);
  fireEvent.click(await screen.findByRole('button',{name:'適用'}));
  await vi.waitFor(()=>expect(screen.queryByRole('button',{name:'適用'})).toBeNull());
  expect(fetch.mock.calls[1][0]).toBe('/api/instructions/apply');
@@ -218,7 +218,7 @@ it('applies pending editor content and refreshes the templates',async()=>{
 it('keeps pending content visible when apply fails',async()=>{
  vi.stubGlobal('fetch',vi.fn().mockResolvedValueOnce({ok:true,json:async()=>({instructions:[{key:'editor',content:'New editor'}],editorState:{pending:true,busy:false}})})
   .mockResolvedValueOnce({ok:false,status:409,json:async()=>({error:'編集内容が更新されました'})}));
- render(()=> <Instructions/>);
+ render(()=> <InstructionsPage/>);
  fireEvent.click(await screen.findByRole('button',{name:'適用'}));
  expect((await screen.findByRole('alert')).textContent).toBe('編集内容が更新されました');
  expect((screen.getByRole('button',{name:'適用'}) as HTMLButtonElement).disabled).toBe(false);
@@ -227,12 +227,12 @@ it('keeps pending content visible when apply fails',async()=>{
 });
 it.each([false,true])('disables apply while editor is busy: %s',async busy=>{
  vi.stubGlobal('fetch',vi.fn().mockResolvedValue({ok:true,json:async()=>({instructions:[{key:'editor',content:'Editor'}],editorState:{pending:true,busy}})}));
- render(()=> <Instructions/>);
+ render(()=> <InstructionsPage/>);
  expect((await screen.findByRole('button',{name:'適用'}) as HTMLButtonElement).disabled).toBe(busy);
 });
 it('hides apply when no editor changes are pending',async()=>{
  vi.stubGlobal('fetch',vi.fn().mockResolvedValue({ok:true,json:async()=>({instructions:[{key:'editor',content:'Editor'}],editorState:{pending:false,busy:false}})}));
- render(()=> <Instructions/>);
+ render(()=> <InstructionsPage/>);
  await within(screen.getByRole('tablist',{name:'プロンプトの種類'})).findByRole('tab',{name:'編集用'});
  await vi.waitFor(()=>expect(screen.queryByRole('status')).toBeNull());
  expect(screen.queryByRole('button',{name:'適用'})).toBeNull();
@@ -240,7 +240,7 @@ it('hides apply when no editor changes are pending',async()=>{
 
 it('disables apply while the chat is busy',async()=>{
  vi.stubGlobal('fetch',vi.fn().mockResolvedValue({ok:true,json:async()=>({instructions:[{key:'editor',content:'Editor'}],editorState:{pending:true,busy:false}})}));
- render(()=> <Instructions/>);
+ render(()=> <InstructionsPage/>);
  const button=await screen.findByRole('button',{name:'適用'}) as HTMLButtonElement;
  chatMock.busyChange?.(true);
  expect(button.disabled).toBe(true);
@@ -250,7 +250,7 @@ it('disables apply while the chat is busy',async()=>{
 
 it('switches reference tabs independently with correctly categorized variables and tools',async()=>{
  vi.stubGlobal('fetch',vi.fn().mockResolvedValue({ok:true,json:async()=>({instructions:[{key:'common',content:'Common instructions'},{key:'editor',content:'Editor instructions'}]})}));
- render(()=> <Instructions/>);
+ render(()=> <InstructionsPage/>);
  await screen.findByText('Common instructions');
  const references=within(screen.getByRole('tablist',{name:'変数・ツールの種類'}));
  const prompts=within(screen.getByRole('tablist',{name:'プロンプトの種類'}));

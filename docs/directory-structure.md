@@ -2,6 +2,8 @@
 
 Beni は一つのアプリケーションとして管理し、サーバー側を `src/backend/`、ブラウザー側を `src/frontend/`、共通の通信定義を `src/shared/` に分けています。設定ファイルはルート、テストは対象コードの近くに置きます。
 
+フロントエンドでは画面ごとのフォルダーを直下に並べます。画面専用の部品は各画面の `components/`、複数画面で使う部品や処理はフロントエンドの `shared/` に置きます。
+
 `[生成]` と `[データ]` は Git 管理の対象外です。テストファイルは一部を `*.test.tsx` としてまとめています。
 
 ```text
@@ -49,52 +51,60 @@ Beni/
 │   │   └── project-files.ts          プロジェクトファイル一覧・プレビューの型
 │   └── frontend/                     ブラウザーで動く SolidJS の画面
 │       ├── index.html                アプリの表示先と JavaScript・CSS の読み込み
-│       ├── main.tsx                  SolidJS のアプリを HTML に取り付ける入口
-│       ├── Instructions.tsx          インストラクション管理画面
-│       ├── App.tsx                   URL に応じたホーム・設定・指示管理・プロジェクト画面の切り替え
-│       ├── Home.tsx                  プロジェクト・タスク作成、タスク一覧と並べ替え
-│       ├── Workspace.tsx             チャット・タスク・文書の表示とタブ管理
-│       ├── api.ts                    バックエンドへの JSON リクエストとエラー処理
-│       ├── model-cache.ts            CLI の接続状態・利用枠と、チャット・実装担当モデルの記憶
-│       ├── communication.ts          共通 WS、購読の共有、再接続
-│       ├── chat-sync.ts              チャットのパック照合・順序付き確定・再同期
-│       ├── chat-scroll.ts            最下部にいる間のスクロール追従
-│       ├── assets.d.ts               CSS importの型宣言
-│       ├── types.ts                  プロジェクト・タスク・文書・会話などの型
+│       ├── main.tsx                  SolidJS アプリを HTML に取り付ける入口
+│       ├── App.tsx                   URL に応じた画面の切り替えと共通ヘッダー
+│       ├── App.test.tsx              画面遷移とルーティングのテスト
+│       ├── assets.d.ts               CSS import の型宣言
 │       ├── tailwind.css              Tailwind CSS の探索対象、daisyUI のテーマ、共通スタイル
-│       ├── *.test.tsx                画面実装と同じ場所に置く表示・操作のテスト
-│       ├── test/                     対応する実装がないテストとテスト補助
-│       │   ├── WorkspaceTrees.test.tsx  タスク・文書ツリーのテスト
-│       │   ├── test-events.ts        WS とパックを模擬するテスト補助
-│       │   ├── ChatCommands.test.tsx  スラッシュコマンドのテスト
-│       │   ├── ClaudeChat.test.tsx     Claude チャットのテスト
-│       │   ├── CodexChat.test.tsx      Codex チャットのテスト
-│       │   └── RegisteredAgents.test.tsx 登録済み Agent のテスト
-│       └── components/               画面を構成する部品
-│           ├── ResizeHandle.tsx      作業領域の左右・上下比率を調整するハンドル
-│           ├── TerminalPanel.tsx     ターミナルタブ・描画・操作権・再接続
-│           ├── MarkdownPreview.tsx   Markdown の変換・サニタイズ・装飾表示
-│           ├── PromptTableMarkdownPreview.tsx  出典と根拠を表示する Markdown プレビュー
-│           ├── markdown-provenance.ts 根拠付き項目の範囲と取得 API
-│           ├── ProjectFiles.tsx      作業フォルダーのツリーとファイルのプレビュー
-│           ├── CodePreview.tsx       テキストの行番号と構文強調
-│           ├── Menu.tsx              共通ヘッダーと画面の移動
-│           ├── UsageIndicators.tsx   接続先ごとの利用枠ゲージ
-│           ├── TaskCreate.tsx        プロジェクトを選び、タスクを作成するフォーム
-│           ├── TaskList.tsx          タスク一覧と並べ替え操作
-│           ├── ProjectCreateDialog.tsx  プロジェクトの名前・フォルダーを指定するダイアログ
-│           ├── FolderPicker.tsx      バックエンドが動く環境のフォルダー選択
-│           ├── ChatPanel.tsx         Codex・Claude との会話、モデル選択、送信・中断、履歴表示
-│           ├── ContextGauge.tsx      コンテキスト使用率と圧縮メニュー
-│           ├── ModelPicker.tsx       チャット用モデルの選択と接続先アイコン
-│           ├── chat-popup.ts         チャット内のポップアップの表示可能な高さ
-│           ├── CodexSettings.tsx     登録済み Agent の接続状態と利用枠の確認
-│           ├── ChatComposer.tsx      テキスト入力と送信フォーム
-│           ├── PhaseIndicator.tsx    フェーズ表示と実装開始・停止・タスク完了・再開
-│           ├── TabBar.tsx            タブの選択と閉じる操作
-│           ├── TreeView.tsx          項目の階層表示と選択
-│           ├── icons/                ナビゲーションや利用枠表示のアイコン
-│           └── *.test.tsx            部品の表示・操作のテスト
+│       ├── home/
+│       │   ├── HomePage.tsx          プロジェクト・タスク作成、タスク一覧と並べ替え
+│       │   └── components/
+│       │       ├── TaskCreate.tsx    プロジェクトを選び、タスクを作成するフォーム
+│       │       ├── TaskList.tsx      タスク一覧と並べ替え操作
+│       │       ├── ProjectCreateDialog.tsx  プロジェクトの名前・フォルダーを指定するダイアログ
+│       │       └── FolderPicker.tsx  バックエンドが動く環境のフォルダー選択
+│       ├── project/
+│       │   ├── ProjectPage.tsx       プロジェクトとタスクを確認し、作業画面を表示
+│       │   └── components/
+│       │       ├── Workspace.tsx     チャット・タスク・文書の表示とタブ管理
+│       │       ├── TerminalPanel.tsx ターミナルタブ・描画・操作権・再接続
+│       │       ├── PhaseIndicator.tsx フェーズ表示と実装開始・停止・タスク完了・再開
+│       │       ├── ProjectFiles.tsx  作業フォルダーのツリーとファイルのプレビュー
+│       │       ├── CodePreview.tsx   テキストの行番号と構文強調
+│       │       └── TreeView.tsx      項目の階層表示と選択
+│       ├── instructions/
+│       │   └── InstructionsPage.tsx インストラクション管理画面
+│       ├── settings/
+│       │   └── SettingsPage.tsx     登録済み Agent の接続状態と利用枠の確認
+│       ├── shared/
+│       │   ├── api.ts                バックエンドへの JSON リクエストとエラー処理
+│       │   ├── model-cache.ts        CLI の接続状態・利用枠とモデル選択の記憶
+│       │   ├── communication.ts      共通 WS、購読の共有、再接続
+│       │   ├── chat-sync.ts          チャットのパック照合・順序付き確定・再同期
+│       │   ├── chat-scroll.ts        最下部にいる間のスクロール追従
+│       │   ├── phase-display.ts      フェーズの表示名と対応する文書
+│       │   ├── types.ts              プロジェクト・タスク・文書・会話などの画面側の型
+│       │   └── components/
+│       │       ├── Menu.tsx           共通ヘッダーと画面の移動
+│       │       ├── UsageIndicators.tsx  接続先ごとの利用枠ゲージ
+│       │       ├── ChatPanel.tsx      会話、モデル選択、送信・中断、履歴表示
+│       │       ├── ChatComposer.tsx   テキスト入力と送信フォーム
+│       │       ├── ContextGauge.tsx   コンテキスト使用率と圧縮メニュー
+│       │       ├── ModelPicker.tsx    チャット用モデルの選択と接続先アイコン
+│       │       ├── chat-popup.ts      チャット内のポップアップの表示可能な高さ
+│       │       ├── ResizeHandle.tsx   作業領域の左右・上下比率を調整するハンドル
+│       │       ├── TabBar.tsx          タブの選択と閉じる操作
+│       │       ├── MarkdownPreview.tsx  Markdown の変換・サニタイズ・装飾表示
+│       │       ├── PromptTableMarkdownPreview.tsx  出典と根拠を表示する Markdown プレビュー
+│       │       ├── markdown-provenance.ts  根拠付き項目の範囲と取得 API
+│       │       └── icons/             ナビゲーションや利用枠表示のアイコン
+│       └── test/                     複数の実装をまたぐテストとテスト補助
+│           ├── WorkspaceTrees.test.tsx  タスク・文書ツリーのテスト
+│           ├── test-events.ts        WS とパックを模擬するテスト補助
+│           ├── ChatCommands.test.tsx  スラッシュコマンドのテスト
+│           ├── ClaudeChat.test.tsx     Claude チャットのテスト
+│           ├── CodexChat.test.tsx      Codex チャットのテスト
+│           └── RegisteredAgents.test.tsx 登録済み Agent のテスト
 ├── dist/                             [生成] ビルド出力
 │   └── frontend/                     フロントエンドの生成物
 │       ├── app.js                    Vite が生成する JavaScript

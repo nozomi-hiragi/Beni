@@ -1,5 +1,5 @@
 import { Show, createEffect, createSignal, onCleanup, onMount } from 'solid-js';
-import type { ContextUsage } from '../../shared/agent';
+import type { ContextUsage } from '../../../shared/agent';
 
 export default function ContextGauge(props: { usage?: ContextUsage; compactAvailable: boolean; onCompact: () => void }) {
   const [menuOpen, setMenuOpen] = createSignal(false);

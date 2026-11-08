@@ -1,7 +1,7 @@
 import { createSignal, For, onMount, Show } from 'solid-js';
-import { loadAgentRegistry, loadModels, modelStatus, registeredAgents, refreshProviderStatus } from '../model-cache';
+import { loadAgentRegistry, loadModels, modelStatus, registeredAgents, refreshProviderStatus } from '../shared/model-cache';
 import type { AgentAvailability, AgentInfo } from '../../shared/agent';
-import type { ProviderUsage, UsageWindow } from '../types';
+import type { ProviderUsage, UsageWindow } from '../shared/types';
 
 const availabilityLabels = {ready:'利用可能', 'not-installed':'未インストール', 'unsupported-version':'未対応のバージョン', unavailable:'利用不可'} satisfies Record<AgentAvailability, string>;
 
@@ -99,7 +99,7 @@ function Connection(props: {agent: AgentInfo}) {
     <Show when={props.agent.id === 'claude'}><p class="mt-4 text-sm text-base-content/70">Claude Code 2.1.292 以降とサブスクリプションのログインが必要です。実装中・反省会では作業フォルダー内のファイル編集とコマンド実行ができます。ネットワークと外部ツールは無効です。</p></Show>
   </div>;
 }
-export default function CodexSettings() {
+export default function SettingsPage() {
   const [loaded, setLoaded] = createSignal(false);
   const [error, setError] = createSignal(false);
   async function load() {

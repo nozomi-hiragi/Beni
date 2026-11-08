@@ -1,11 +1,11 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@solidjs/testing-library';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { AgentConnectionStatus, AgentInfo } from '../../shared/agent';
-import { modelScope, resetModelCache } from '../model-cache';
+import { modelScope, resetModelCache } from '../shared/model-cache';
 import { chatModelPicker, FakeWebSocket, packResponse } from './test-events';
-import ChatPanel from '../components/ChatPanel';
-import CodexSettings from '../components/CodexSettings';
-import UsageIndicators from '../components/UsageIndicators';
+import ChatPanel from '../shared/components/ChatPanel';
+import SettingsPage from '../settings/SettingsPage';
+import UsageIndicators from '../shared/components/UsageIndicators';
 
 beforeEach(() => {
   resetModelCache();
@@ -39,7 +39,7 @@ it('uses a registered agent for models, command aliases, settings and usage', as
     throw new Error(path);
   });
   vi.stubGlobal('fetch', fetchMock);
-  render(() => <><CodexSettings /><UsageIndicators /><ChatPanel projectId="019a0000-0000-7000-8000-000000000901" /></>);
+  render(() => <><SettingsPage /><UsageIndicators /><ChatPanel projectId="019a0000-0000-7000-8000-000000000901" /></>);
 
   expect(await screen.findByRole('heading',{name:'試験エージェント 接続'})).toBeTruthy();
   expect(await screen.findByText('認証不要')).toBeTruthy();
@@ -93,7 +93,7 @@ it('preserves the selected model and history when the registry is empty', async 
     throw new Error(path);
   });
   vi.stubGlobal('fetch', fetchMock);
-  render(() => <><CodexSettings /><ChatPanel projectId={projectId} /></>);
+  render(() => <><SettingsPage /><ChatPanel projectId={projectId} /></>);
   expect(await screen.findByText('登録されているエージェントはありません。')).toBeTruthy();
   expect(await screen.findByText('過去の応答')).toBeTruthy();
   expect(within(screen.getByRole('log')).getByText(/removed-agent\/model/)).toBeTruthy();

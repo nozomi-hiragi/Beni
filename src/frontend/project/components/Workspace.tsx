@@ -1,19 +1,20 @@
-import { availableModels, chooseModel, loadModels, modelIsAvailable, modelLabel, modelScope, modelValue, providerReady, rejectModel, selectedModel as cachedModel } from './model-cache';
+import { availableModels, chooseModel, loadModels, modelIsAvailable, modelLabel, modelScope, modelValue, providerReady, rejectModel, selectedModel as cachedModel } from '../../shared/model-cache';
 import { batch, createEffect, createMemo, createSignal, For, onCleanup, onMount, Show, untrack } from 'solid-js';
 import { createStore, reconcile } from 'solid-js/store';
-import { api, ApiError, loadDocumentProvenance } from './api';
-import { isTaskPhase, type TaskPhase } from '../shared/task-phase';
-import { communication } from './communication';
-import ChatPanel, { type ChatTabStatus } from './components/ChatPanel';
-import MarkdownPreview from './components/MarkdownPreview';
-import PromptTableMarkdownPreview from './components/PromptTableMarkdownPreview';
-import PhaseIndicator, { phaseDocuments } from './components/PhaseIndicator';
-import TabBar from './components/TabBar';
-import TreeView, { type TreeNode } from './components/TreeView';
-import ProjectFileContent, { projectFileName, projectFilePath, projectFileTree } from './components/ProjectFiles';
-import TerminalPanel from './components/TerminalPanel';
-import ResizeHandle from './components/ResizeHandle';
-import type { AppState, Document, Task, TaskDetail } from './types';
+import { api, ApiError, loadDocumentProvenance } from '../../shared/api';
+import { isTaskPhase, type TaskPhase } from '../../../shared/task-phase';
+import { communication } from '../../shared/communication';
+import ChatPanel, { type ChatTabStatus } from '../../shared/components/ChatPanel';
+import MarkdownPreview from '../../shared/components/MarkdownPreview';
+import PromptTableMarkdownPreview from '../../shared/components/PromptTableMarkdownPreview';
+import PhaseIndicator from './PhaseIndicator';
+import { phaseDocuments } from '../../shared/phase-display';
+import TabBar from '../../shared/components/TabBar';
+import TreeView, { type TreeNode } from './TreeView';
+import ProjectFileContent, { projectFileName, projectFilePath, projectFileTree } from './ProjectFiles';
+import TerminalPanel from './TerminalPanel';
+import ResizeHandle from '../../shared/components/ResizeHandle';
+import type { AppState, Document, Task, TaskDetail } from '../../shared/types';
 
 export interface WorkspaceProps {
   taskId?: string;

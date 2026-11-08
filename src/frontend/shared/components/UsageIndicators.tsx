@@ -1,6 +1,6 @@
 import { createUniqueId, For, onMount, Show } from 'solid-js';
 import { loadModels, modelStatus, registeredAgents } from '../model-cache';
-import type { AgentInfo } from '../../shared/agent';
+import type { AgentInfo } from '../../../shared/agent';
 import type { Provider } from '../types';
 import AgentIcon from './icons/AgentIcon';
 

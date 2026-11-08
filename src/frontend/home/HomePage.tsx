@@ -1,9 +1,9 @@
 import { createEffect, createMemo, createSignal, onCleanup, onMount, Show } from 'solid-js';
-import { api } from './api';
+import { api } from '../shared/api';
 import TaskCreate from './components/TaskCreate';
 import TaskList, { type SortKey } from './components/TaskList';
 import ProjectCreateDialog from './components/ProjectCreateDialog';
-import type { AppState, Project, Task } from './types';
+import type { AppState, Project, Task } from '../shared/types';
 
 export interface HomeProps {
   onOpenProject?: (project: Project) => void;
@@ -38,7 +38,7 @@ const projectListeners = new Set<(project: Project) => void>();
 let taskNameEditVersion = 0;
 let projectChoiceVersion = 0;
 
-export default function Home(props: HomeProps) {
+export default function HomePage(props: HomeProps) {
   const [projects, setProjects] = createSignal<Project[]>([]);
   const [tasks, setTasks] = createSignal<Task[]>([]);
   const [error, setError] = createSignal('');

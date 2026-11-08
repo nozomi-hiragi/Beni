@@ -1,14 +1,14 @@
 import { batch, createMemo, createSignal, createUniqueId, For, onCleanup, onMount, Show, type JSX } from 'solid-js';
-import { api, loadDocumentProvenance } from './api';
-import { communication } from './communication';
-import type { DocumentProvenance } from './types';
-import MarkdownPreview from './components/MarkdownPreview';
-import PromptTableMarkdownPreview from './components/PromptTableMarkdownPreview';
-import ChatPanel from './components/ChatPanel';
-import ResizeHandle from './components/ResizeHandle';
-import TabBar from './components/TabBar';
-import { phaseLabels } from './components/PhaseIndicator';
-import { taskPhases as phases, type TaskPhase } from '../shared/task-phase';
+import { api, loadDocumentProvenance } from '../shared/api';
+import { communication } from '../shared/communication';
+import type { DocumentProvenance } from '../shared/types';
+import MarkdownPreview from '../shared/components/MarkdownPreview';
+import PromptTableMarkdownPreview from '../shared/components/PromptTableMarkdownPreview';
+import ChatPanel from '../shared/components/ChatPanel';
+import ResizeHandle from '../shared/components/ResizeHandle';
+import TabBar from '../shared/components/TabBar';
+import { phaseLabels } from '../shared/phase-display';
+import { taskPhases as phases, type TaskPhase } from '../../shared/task-phase';
 
 const labels: Record<string, string> = { editor: '編集相談用プロンプト', common: '全共通', ...phaseLabels };
 const instructionTabs = [
@@ -35,7 +35,7 @@ const embeddedTools = [
   { name: 'get_execution_output', description: 'ツール・コマンドの実行出力の取得' },
   { name: 'acknowledge_events', description: 'イベントの確認済み位置の更新' },
 ];
-export default function Instructions() {
+export default function InstructionsPage() {
   const [instructions, setInstructions] = createSignal<{ key: string; content: string }[]>([]);
   const [provenance, setProvenance] = createSignal<Record<string, DocumentProvenance>>({});
   const [instructionFocus, setInstructionFocus] = createSignal<string | null>(null);

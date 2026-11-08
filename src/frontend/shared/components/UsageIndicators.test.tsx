@@ -1,4 +1,4 @@
-import { stubLegacyAgentFetch } from '../test/test-events';
+import { stubLegacyAgentFetch } from '../../test/test-events';
 import { cleanup, render, screen } from '@solidjs/testing-library';
 import { afterEach, expect, it, vi } from 'vitest';
 import { refreshProviderStatus, resetModelCache } from '../model-cache';

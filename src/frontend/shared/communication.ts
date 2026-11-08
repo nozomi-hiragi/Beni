@@ -1,4 +1,4 @@
-import { eventTopics, validServerMessage, type ClientMessage, type Scope, type Topic, type TopicEvent, type TerminalAction } from '../shared/communication';
+import { eventTopics, validServerMessage, type ClientMessage, type Scope, type Topic, type TopicEvent, type TerminalAction } from '../../shared/communication';
 
 type Listener = { subscribed(): void; event(event: TopicEvent): void; error(message: string): void };
 type Subscription = { id: string; topic: Topic; scope: Scope; listeners: Set<Listener>; ready: boolean; timer?: ReturnType<typeof setTimeout> };

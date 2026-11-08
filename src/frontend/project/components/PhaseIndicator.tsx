@@ -1,16 +1,8 @@
 import { For, Match, Show, Switch, type JSX } from 'solid-js';
-import type { TaskPhase } from '../../shared/task-phase';
+import { phaseLabels, preparationPhases } from '../../shared/phase-display';
 
-export const phaseLabels = { requirements: '要件定義', documents: '仕様整理', implementation: '実装手順', execution: '実装中', retrospective: '反省会', finalization: '終了' } satisfies Record<TaskPhase, string>;
-
-const preparationPhases = ['requirements', 'documents', 'implementation'] as const;
 const historyPhases = ['execution', 'retrospective', 'finalization'] as const;
 type HistoryPhase = typeof historyPhases[number];
-
-export const phaseDocuments = [
-  ...[...preparationPhases, 'retrospective' as const].map(phase => ({ phase, name: `${phase}.md`, label: phaseLabels[phase] })),
-  { phase: 'finalization' as const, name: 'knowledge.md', label: 'ナレッジ' },
-];
 
 export default function PhaseIndicator(props: { phase: string; viewPhase?: string; onViewPhaseChange?: (phase: HistoryPhase) => void; onChange: (target: string) => void; advancing?: boolean; canStart?: boolean; canComplete?: boolean; completed?: boolean; busy?: boolean; modelSelect?: JSX.Element }) {
   const selectedPhase = () => props.viewPhase ?? props.phase;

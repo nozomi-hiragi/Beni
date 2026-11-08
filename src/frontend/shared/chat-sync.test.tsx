@@ -1,7 +1,7 @@
 import { expect, it, vi } from 'vitest';
 import { ChatSync } from './chat-sync';
 import { api } from './api';
-import type { Pack } from '../shared/communication';
+import type { Pack } from '../../shared/communication';
 vi.mock('./api',()=>({api:vi.fn()}));
 it('clears cached packs when another client replaces the conversation',async()=>{
  const pack:Pack={packId:'old-pack',sequence:1,messageId:'message',sendId:'send',role:'user',kind:'text',content:'Old conversation',tool:null,model:null,createdAt:'2026-01-01T00:00:00Z',status:'completed',state:'closed'};

@@ -1,9 +1,9 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-library';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import type { TerminalSession, TopicEvent } from '../../shared/communication';
+import type { TerminalSession, TopicEvent } from '../../../shared/communication';
 
 const mocks = vi.hoisted(() => ({ subscribe:vi.fn(), send:vi.fn(), terminals:[] as any[], defer:false, writes:[] as (()=>void)[] }));
-vi.mock('../communication', () => ({communication:{subscribe:mocks.subscribe,terminal:mocks.send}}));
+vi.mock('../../shared/communication', () => ({communication:{subscribe:mocks.subscribe,terminal:mocks.send}}));
 vi.mock('@xterm/xterm', () => ({Terminal:class {
   cols = 80; rows = 24; options = {disableStdin:true}; writes:string[] = []; resets = 0; input = (_data:string) => {};
   constructor() { mocks.terminals.push(this); }

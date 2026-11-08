@@ -1,5 +1,5 @@
 import { createSignal, For, onCleanup, onMount, Show } from 'solid-js';
-import { api } from '../api';
+import { api } from '../../shared/api';
 
 type FolderListing = {
   path: string;

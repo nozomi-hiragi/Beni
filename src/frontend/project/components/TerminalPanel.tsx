@@ -2,10 +2,10 @@ import { For, Show, createEffect, createSignal, onCleanup, onMount } from 'solid
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
-import { api, ApiError } from '../api';
-import { communication } from '../communication';
-import type { TerminalSession, TopicEvent } from '../../shared/communication';
-import TabBar from './TabBar';
+import { api, ApiError } from '../../shared/api';
+import { communication } from '../../shared/communication';
+import type { TerminalSession, TopicEvent } from '../../../shared/communication';
+import TabBar from '../../shared/components/TabBar';
 
 type Control = { owner: boolean; connected: boolean; token: string | null };
 const disconnected = (): Control => ({ owner: false, connected: false, token: null });

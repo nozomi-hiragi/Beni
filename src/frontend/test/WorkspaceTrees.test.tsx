@@ -1,13 +1,13 @@
 import { stubLegacyAgentFetch } from './test-events';
-import { resetModelCache } from '../model-cache';
+import { resetModelCache } from '../shared/model-cache';
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-library';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import Workspace from '../Workspace';
+import Workspace from '../project/components/Workspace';
 import {FakeWebSocket, packResponse} from './test-events';
 
 // Terminal behavior is covered separately; these tests isolate task/document navigation.
-vi.mock('../components/TerminalPanel', () => ({default: () => null}));
+vi.mock('../project/components/TerminalPanel', () => ({default: () => null}));
 
 type Deferred<T> = { promise: Promise<T>; resolve(value: T): void };
 function deferred<T>(): Deferred<T> {

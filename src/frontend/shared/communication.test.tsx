@@ -2,8 +2,8 @@ import { waitFor } from '@solidjs/testing-library';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { Communication } from './communication';
 import { ChatSync } from './chat-sync';
-import { FakeWebSocket, packHeader, testPack } from './test/test-events';
-import { packHash, type Pack } from '../shared/communication';
+import { FakeWebSocket, packHeader, testPack } from '../test/test-events';
+import { packHash, type Pack } from '../../shared/communication';
 
 const json = (value: unknown) => ({ ok: true, json: async () => value }) as Response;
 const disposals: (() => void)[] = [];

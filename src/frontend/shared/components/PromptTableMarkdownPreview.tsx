@@ -2,7 +2,7 @@ import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show }
 import { Portal } from 'solid-js/web';
 import type { DocumentProvenance, DocumentProvenanceDetail } from '../types';
 import { MarkdownArticle, renderMarkdown, type MarkdownPreviewProps } from './MarkdownPreview';
-import { phaseDocuments, phaseLabels } from './PhaseIndicator';
+import { phaseDocuments, phaseLabels } from '../phase-display';
 
 const instructionNames: Record<string, string> = { common: '全共通', editor: '編集相談用プロンプト', ...phaseLabels };
 

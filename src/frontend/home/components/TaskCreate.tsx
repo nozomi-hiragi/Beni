@@ -1,5 +1,5 @@
 import { For, Show } from 'solid-js';
-import type { Project } from '../types';
+import type { Project } from '../../shared/types';
 
 export interface TaskCreateProps {
   taskName: string;

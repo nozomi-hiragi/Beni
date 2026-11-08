@@ -1,7 +1,7 @@
 import { createSignal, Match, onCleanup, onMount, Switch } from 'solid-js';
-import type { ProjectFileList, ProjectFilePreview } from '../../shared/project-files';
-import { api } from '../api';
-import MarkdownPreview from './MarkdownPreview';
+import type { ProjectFileList, ProjectFilePreview } from '../../../shared/project-files';
+import { api } from '../../shared/api';
+import MarkdownPreview from '../../shared/components/MarkdownPreview';
 import CodePreview from './CodePreview';
 import type { TreeNode } from './TreeView';
 

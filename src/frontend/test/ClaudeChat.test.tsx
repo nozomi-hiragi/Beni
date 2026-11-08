@@ -1,9 +1,9 @@
 import { createSignal } from 'solid-js';
 import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-library';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import ChatPanel from '../components/ChatPanel';
-import CodexSettings from '../components/CodexSettings';
-import { resetModelCache } from '../model-cache';
+import ChatPanel from '../shared/components/ChatPanel';
+import SettingsPage from '../settings/SettingsPage';
+import { resetModelCache } from '../shared/model-cache';
 import { chatModelPicker, FakeWebSocket, stubLegacyAgentFetch } from './test-events';
 
 const json = (data: unknown) => ({ok:true,json:async()=>data}) as Response;
@@ -92,7 +92,7 @@ it('設定のClaude更新だけ共有一覧へ反映し、CLI制限と非対応�
   if(url.startsWith('/api/chat?'))return Promise.resolve(json({id:'settings-shared',messages:[],selectedModel:null}));
   throw Error(url);
  }));
- render(()=><><CodexSettings/><ChatPanel projectId="019a0000-0000-7000-8000-000000000ad5"/></>);
+ render(()=><><SettingsPage/><ChatPanel projectId="019a0000-0000-7000-8000-000000000ad5"/></>);
  await screen.findByText('Claude Code 2.1.292 以降に更新してください');
  expect(screen.getByText('Claude Code 2.1.292 以降とサブスクリプションのログインが必要です。実装中・反省会では作業フォルダー内のファイル編集とコマンド実行ができます。ネットワークと外部ツールは無効です。')).toBeTruthy();
  expect(codexCalls).toBe(1);expect(claudeCalls).toBe(1);
@@ -127,6 +127,6 @@ it('providerのないローカル保存をCodexとして復元する',async()=>{
 
 it.each([false,true])('設定でClaudeの検出と認証状態を説明する installed=%s',async installed=>{
  stubLegacyAgentFetch(vi.fn((url:string)=>Promise.resolve(json(url==='/api/instructions'?{instructions:[{key:'common',content:'# 共通'}]}:url==='/api/codex/status'?codex:{...claude,installed,auth:'none',version:installed?'2.1.292':null,models:null}))));
- render(()=><CodexSettings/>);
+ render(()=><SettingsPage/>);
  await screen.findByText(installed?'Claude にログインしてください':'Claude CLI をインストールしてください');
 });

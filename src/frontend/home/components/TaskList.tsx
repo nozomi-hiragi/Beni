@@ -1,5 +1,5 @@
 import { For, Show } from 'solid-js';
-import type { Task } from '../types';
+import type { Task } from '../../shared/types';
 
 export type SortKey = 'id' | 'name' | 'phase' | 'status' | 'createdAt' | 'updatedAt';
 const columns: { key: SortKey; label: string }[] = [

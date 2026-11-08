@@ -1,5 +1,5 @@
 import { createSignal, For, onCleanup, onMount, Show } from 'solid-js';
-import TreeIcon from './icons/TreeIcon';
+import TreeIcon from '../../shared/components/icons/TreeIcon';
 
 type TreeContents = { nodes: TreeNode[]; truncated?: boolean };
 

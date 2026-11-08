@@ -1,5 +1,5 @@
 import { api } from './api';
-import { object, packHash, validId, validPack, type Pack, type PackEntry, type PackHeader, type Scope, type TopicEvent } from '../shared/communication';
+import { object, packHash, validId, validPack, type Pack, type PackEntry, type PackHeader, type Scope, type TopicEvent } from '../../shared/communication';
 
 const histories = new Map<string, Pack[]>();
 const conversationIds = new Map<string, string>();

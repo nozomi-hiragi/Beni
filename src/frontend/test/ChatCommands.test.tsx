@@ -1,11 +1,11 @@
 import { createSignal } from 'solid-js';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@solidjs/testing-library';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { modelStatus, resetModelCache } from '../model-cache';
+import { modelStatus, resetModelCache } from '../shared/model-cache';
 import { chatModelPicker, FakeWebSocket, packResponse, stubLegacyAgentFetch } from './test-events';
 import type { ChatCommand } from '../../shared/chat-commands';
-import type { ChatMessage, Conversation } from '../types';
-import ChatPanel, { type ChatTabStatus } from '../components/ChatPanel';
+import type { ChatMessage, Conversation } from '../shared/types';
+import ChatPanel, { type ChatTabStatus } from '../shared/components/ChatPanel';
 
 const json = (data: unknown, status = 200) => ({ok: status < 400, status, json: async () => data}) as Response;
 let serial = 0;

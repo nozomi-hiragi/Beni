@@ -1,11 +1,11 @@
 import { createSignal } from 'solid-js';
-import { resetModelCache } from './model-cache';
+import { resetModelCache } from '../../shared/model-cache';
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@solidjs/testing-library';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import Workspace from './Workspace';
-import { chatModelPicker, FakeWebSocket, packResponse, stubLegacyAgentFetch } from './test/test-events';
-import type { TaskDetail } from './types';
+import { chatModelPicker, FakeWebSocket, packResponse, stubLegacyAgentFetch } from '../../test/test-events';
+import type { TaskDetail } from '../../shared/types';
 
 type Deferred<T> = { promise: Promise<T>; resolve(value: T): void };
 function deferred<T>(): Deferred<T> {
@@ -340,7 +340,7 @@ it.each(['codex','claude'] as const)('starts with the selected %s model and refr
 });
 
 it('利用不可の保存モデルを表示して送信を止め、有効モデルの保存で解除する',async()=>{
- const {default:ChatPanel}=await import('./components/ChatPanel');
+ const {default:ChatPanel}=await import('../../shared/components/ChatPanel');
  let selectedModel={id:'removed',name:'Saved model'};
  const post=vi.fn();
  stubLegacyAgentFetch(vi.fn((path:string,init?:RequestInit)=>{

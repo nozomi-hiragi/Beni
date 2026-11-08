@@ -1,8 +1,8 @@
-import type { ChatCommand } from '../shared/chat-commands';
-import type { ContextUsage, RateLimitUsage } from '../shared/agent';
-import type { Provider } from '../shared/communication';
-export type { UsageWindow } from '../shared/agent';
-export type { Provider } from '../shared/communication';
+import type { ChatCommand } from '../../shared/chat-commands';
+import type { ContextUsage, RateLimitUsage } from '../../shared/agent';
+import type { Provider } from '../../shared/communication';
+export type { UsageWindow } from '../../shared/agent';
+export type { Provider } from '../../shared/communication';
 
 export interface Project { id: string; name: string; folder: string }
 export interface Task { createdAt?: string | null; updatedAt?: string | null; id: string; projectId: string; name: string; phase: string; status: string }
