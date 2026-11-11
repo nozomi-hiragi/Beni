@@ -282,7 +282,7 @@ it('uses the current URL scope for manual tools and preserves the chat draft', a
     return Promise.resolve(json({
       scope: search.get('kind') === 'instructions' ? { kind: 'instructions' } : { kind: 'project', projectId: projects[0].id, taskId },
       label: taskId ? '架空プロジェクト / 一つ目' : search.get('kind') === 'instructions' ? '共通のインストラクション' : '架空プロジェクト',
-      phase: taskId ? 'requirements' : null, revision: 'test', tools: taskId ? [{
+      phase: taskId ? 'requirements' : null, revision: 'test', tools: taskId || search.get('kind') === 'instructions' ? [{
         name: 'list_events', description: 'イベント一覧を取得', category: 'events', effect: 'read',
         inputSchema: { type: 'object', properties: {}, additionalProperties: false },
       }] : [],
@@ -292,11 +292,11 @@ it('uses the current URL scope for manual tools and preserves the chat draft', a
   render(() => <App />);
   const draft = await screen.findByRole('textbox', { name: '希望や回答を入力' });
   fireEvent.input(draft, { target: { value: 'チャットの下書き' } });
-  const open = () => {
-    fireEvent.click(screen.getByRole('button', { name: 'ツール' }));
+  const open = async () => {
+    fireEvent.click(await screen.findByRole('button', { name: 'ツール' }));
     return within(screen.getByRole('dialog', { name: 'ツール' }));
   };
-  let view = open();
+  let view = await open();
   expect(await view.findByText(/対象：架空プロジェクト \/ 一つ目/)).toBeTruthy();
   fireEvent.click(await view.findByRole('button', { name: /list_events/ }));
   fireEvent.click(view.getByRole('button', { name: '実行' }));
@@ -305,11 +305,9 @@ it('uses the current URL scope for manual tools and preserves the chat draft', a
   expect(draft).toHaveProperty('value', 'チャットの下書き');
   expect(within(screen.getByRole('log', { name: 'チャット履歴' })).queryByText('ツールの結果')).toBeNull();
   pop(path);
-  view = open();
-  await view.findByText('対象：架空プロジェクト');
+  expect(screen.queryByRole('button', { name: 'ツール' })).toBeNull();
   pop('/instructions');
-  await waitFor(() => expect(screen.queryByRole('dialog', { name: 'ツール' })).toBeNull());
-  view = open();
+  view = await open();
   await view.findByText('対象：共通のインストラクション');
   expect(requests).toEqual([
     `/api/tools?kind=project&projectId=${projects[0].id}&taskId=${tasks[0].id}`,

@@ -1,4 +1,4 @@
-import { createEffect, createSignal, createUniqueId, For, Match, on, onCleanup, Show, Switch } from 'solid-js';
+import { batch, createEffect, createMemo, createSignal, createUniqueId, For, Match, on, onCleanup, Show, Switch } from 'solid-js';
 import { Portal } from 'solid-js/web';
 import type { ManualToolDefinition, ManualToolOperation, ManualToolRequest, ManualToolResponse, ManualToolsCatalog, ManualToolScope } from '../../shared/manual-tools';
 import { api, ApiError } from '../shared/api';
@@ -14,7 +14,7 @@ const query = (scope: ManualToolScope) => new URLSearchParams(scope.kind === 'in
 }).toString();
 const key = (scope: ManualToolScope) => `beni.manual-tool:${query(scope)}`;
 const message = (error: unknown, fallback: string) => error instanceof ApiError ? error.message : fallback;
-type Reference = { scope: ManualToolScope; id: string; label?: string };
+type Reference = { scope: ManualToolScope; id: string; label?: string; phase?: ManualToolsCatalog['phase'] };
 const readReference = (scope: ManualToolScope): Reference | undefined => {
   try {
     const id = sessionStorage.getItem(key(scope));
@@ -49,7 +49,7 @@ export default function ManualTools(props: { scope?: ManualToolScope; page?: str
   const [missingOperation, setMissingOperation] = createSignal(false);
   const references = new Map<string, Reference>();
   let dialog!: HTMLDialogElement;
-  let trigger!: HTMLButtonElement;
+  let trigger: HTMLButtonElement | undefined;
   let heading!: HTMLHeadingElement;
   let catalogController: AbortController | undefined;
   let catalogTimer: ReturnType<typeof setTimeout> | undefined;
@@ -57,6 +57,14 @@ export default function ManualTools(props: { scope?: ManualToolScope; page?: str
   let operationTimer: ReturnType<typeof setTimeout> | undefined;
   let attempts = 0;
   const focusHeading = () => queueMicrotask(() => { if (opened()) heading.focus(); });
+  const scopeQuery = createMemo(() => props.scope && !props.unavailable ? query(props.scope) : undefined);
+  const canOpen = () => {
+    const data = catalog();
+    const current = scopeQuery();
+    const ref = reference();
+    const running = ref && current === query(ref.scope) && (!operation() || operation()?.status === 'running');
+    return !!data && current === query(data.scope) && !data.disabledReason && data.tools.length > 0 && !listError() && !running;
+  };
 
   function stopCatalog() {
     clearTimeout(catalogTimer);
@@ -71,13 +79,16 @@ export default function ManualTools(props: { scope?: ManualToolScope; page?: str
   function close() {
     if (!opened()) return;
     setOpened(false);
-    stopCatalog();
     stopOperation();
     const ref = reference();
     const result = operation();
+    const current = scopeQuery();
     if (ref && result && result.status !== 'running') {
       saveReference(ref, true);
       references.delete(key(ref.scope));
+    } else if (ref && current === query(ref.scope)) {
+      setCatalog(undefined);
+      void loadCatalog(current);
     }
     setReference(undefined);
     setOperation(undefined);
@@ -85,42 +96,47 @@ export default function ManualTools(props: { scope?: ManualToolScope; page?: str
     setChecking(false);
     setCheckError('');
     setMissingOperation(false);
-    setCatalog(undefined);
     setSelected(undefined);
-    setListError('');
     setSubmitError('');
     setReloadRequired(false);
     if (dialog.open) dialog.close();
-    trigger.focus();
+    if (canOpen() && trigger?.isConnected) trigger.focus();
   }
 
-  createEffect(on(() => props.scope ? query(props.scope) : props.page, () => {
+  createEffect(on(scopeQuery, current => {
+    stopCatalog();
+    setCatalog(undefined);
+    setListError('');
     if (opened() && !reference()) close();
-  }, { defer: true }));
+    if (current) void loadCatalog(current);
+  }));
   onCleanup(() => { stopCatalog(); stopOperation(); });
 
-  async function loadCatalog(scope: ManualToolScope, refresh = false) {
+  async function loadCatalog(current: string, refresh = false) {
     stopCatalog();
     const controller = catalogController = new AbortController();
-    if (!refresh) setListError('');
+    const isCurrent = () => !controller.signal.aborted && scopeQuery() === current;
     try {
-      const data = await api<ManualToolsCatalog>(`/api/tools?${query(scope)}`, undefined, AbortSignal.any([controller.signal, AbortSignal.timeout(15_000)]));
-      if (controller.signal.aborted || !opened() || reference()) return;
+      const data = await api<ManualToolsCatalog>(`/api/tools?${current}`, undefined, AbortSignal.any([controller.signal, AbortSignal.timeout(15_000)]));
+      if (!isCurrent()) return;
       const previous = catalog();
-      if (previous && previous.phase !== data.phase) { close(); return; }
-      if (!refresh && selected()?.revision !== data.revision) setSelected(undefined);
-      if (!previous || previous.revision !== data.revision || previous.disabledReason !== data.disabledReason || previous.label !== data.label) {
-        setCatalog(data);
-      }
-      if (!refresh) setReloadRequired(false);
-      setListError('');
+      batch(() => {
+        if (!previous || previous.phase !== data.phase || previous.revision !== data.revision ||
+          previous.disabledReason !== data.disabledReason || previous.label !== data.label || previous.tools.length !== data.tools.length) {
+          setCatalog(data);
+        }
+        if (!reference() && previous && previous.phase !== data.phase) close();
+        if (!refresh && selected()?.revision !== data.revision) setSelected(undefined);
+        if (!refresh) setReloadRequired(false);
+        setListError('');
+      });
     } catch (error) {
-      if (controller.signal.aborted) return;
-      if (refresh && error instanceof ApiError && error.status === 404) { close(); return; }
+      if (!isCurrent()) return;
       setListError(message(error, 'ツール一覧を取得できませんでした'));
+      if (!reference() && error instanceof ApiError && error.status === 404) close();
     }
-    if (!controller.signal.aborted && opened() && !reference() && !listError()) {
-      catalogTimer = setTimeout(() => void loadCatalog(scope, true), 3_000);
+    if (isCurrent()) {
+      catalogTimer = setTimeout(() => void loadCatalog(current, true), 3_000);
     }
   }
 
@@ -152,18 +168,17 @@ export default function ManualTools(props: { scope?: ManualToolScope; page?: str
   }
 
   function open() {
-    if (opened()) return;
+    const scope = props.scope;
+    if (opened() || !scope || !canOpen()) return;
     setOpened(true);
     dialog.showModal();
     focusHeading();
-    const scope = props.scope;
-    if (!scope) return;
     const saved = references.get(key(scope)) ?? readReference(scope);
     if (saved) {
       attempts = 0;
       setReference(saved);
       void check(saved);
-    } else void loadCatalog(scope);
+    }
   }
 
   async function run(input: Record<string, unknown>) {
@@ -171,13 +186,12 @@ export default function ManualTools(props: { scope?: ManualToolScope; page?: str
     const choice = selected();
     if (!target || !choice || blocked()) return;
     const request: ManualToolRequest = { scope: target.scope, revision: choice.revision, operationId: crypto.randomUUID(), name: choice.tool.name, input };
-    const ref = { scope: target.scope, id: request.operationId, label: target.label };
+    const ref = { scope: target.scope, id: request.operationId, label: target.label, phase: target.phase };
     setSubmitError('');
     setPending(request);
     setReference(ref);
     saveReference(ref);
     references.set(key(ref.scope), ref);
-    stopCatalog();
     focusHeading();
     const controller = operationController = new AbortController();
     try {
@@ -190,10 +204,9 @@ export default function ManualTools(props: { scope?: ManualToolScope; page?: str
         references.delete(key(ref.scope));
         setReference(undefined);
         setPending(undefined);
-        if (!props.scope || query(props.scope) !== query(ref.scope)) { close(); return; }
+        if (scopeQuery() !== query(ref.scope)) { close(); return; }
         setSubmitError(error.message);
         setReloadRequired(error.status !== 400);
-        catalogTimer = setTimeout(() => void loadCatalog(ref.scope, true), 3_000);
       } else {
         attempts = 0;
         void check(ref);
@@ -202,17 +215,18 @@ export default function ManualTools(props: { scope?: ManualToolScope; page?: str
   }
 
   const target = () => operation()?.label ?? (reference() ? reference()?.label ?? scopeName(reference()!.scope) : catalog()?.label ?? (props.scope ? scopeName(props.scope) : 'なし'));
+  const phase = () => reference() ? operation()?.phase ?? reference()?.phase : catalog()?.phase;
   const outputClass = 'max-w-full whitespace-pre-wrap break-all rounded-box bg-base-200 p-3 text-xs';
   const stale = () => !!selected() && selected()?.revision !== catalog()?.revision;
   const issue = () => listError() || submitError() || catalog()?.disabledReason ||
     (stale() ? '操作対象の状態が変更されました。一覧を取得し直してください' : '');
   const blocked = () => !!(catalog()?.disabledReason || listError() || reloadRequired() || reference() || stale());
   return <>
-    <li>
-      <button ref={trigger} type="button" class="tooltip tooltip-bottom" data-tip="ツール" aria-label="ツール" aria-haspopup="dialog" onClick={open}>
+    <Show when={canOpen()}>
+      <button ref={trigger} type="button" class="btn btn-ghost btn-square btn-sm tooltip tooltip-bottom" data-tip="ツール" aria-label="ツール" aria-haspopup="dialog" onClick={open}>
         <HeaderIcon><path d="M14.7 6.3a5 5 0 0 0-6.4 6.4l-5.6 5.6a2.1 2.1 0 0 0 3 3l5.6-5.6a5 5 0 0 0 6.4-6.4l-3 3-3-3 3-3Z" /></HeaderIcon>
       </button>
-    </li>
+    </Show>
     <Portal><dialog ref={dialog} class="modal" aria-labelledby={title} onClose={() => { if (!dialog.open) close(); }} onCancel={event => { event.preventDefault(); close(); }}
       onKeyDown={event => {
         if (event.key === 'Escape') { event.preventDefault(); close(); return; }
@@ -231,7 +245,7 @@ export default function ManualTools(props: { scope?: ManualToolScope; page?: str
           <button type="button" class="btn btn-sm btn-ghost" onClick={close}>閉じる</button>
         </div>
         <p class="mb-3 shrink-0 break-words text-sm">対象：{target()}
-          <Show when={operation()?.phase ?? catalog()?.phase}>{phase => <>（{phaseLabels[phase()]}）</>}</Show>
+          <Show when={phase()}>{current => <>（{phaseLabels[current()]}）</>}</Show>
         </p>
         <div class="min-h-0 min-w-0 overflow-y-auto overscroll-contain" tabindex={0}>
           <Show when={reference()}>
@@ -273,10 +287,10 @@ export default function ManualTools(props: { scope?: ManualToolScope; page?: str
             <Show when={issue()}>
               <p role="alert" class="break-words text-error">{issue()}</p>
               <button type="button" class="btn self-start" onClick={() => {
-                const scope = props.scope;
-                if (!scope) return;
+                const current = scopeQuery();
+                if (!current) return;
                 setSubmitError('');
-                void loadCatalog(scope);
+                void loadCatalog(current);
               }}>一覧を再取得</button>
             </Show>
             <Switch>

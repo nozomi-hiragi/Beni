@@ -26,6 +26,7 @@ export default function Navbar(props: NavbarProps) {
         <HomeIcon />
       </button>
     </Show>
+    <ManualTools scope={props.toolScope} page={props.toolsPage} unavailable={props.toolsUnavailable} />
     <strong class="min-w-0 truncate text-lg font-semibold tracking-tight">{props.title}</strong>
     <span class="flex-1" aria-hidden="true" />
     <UsageIndicators />
@@ -35,7 +36,6 @@ export default function Navbar(props: NavbarProps) {
           <DataIcon />
         </button>
       </li>
-      <ManualTools scope={props.toolScope} page={props.toolsPage} unavailable={props.toolsUnavailable} />
       <li>
         <button type="button" class="tooltip tooltip-bottom" data-tip="インストラクション管理" aria-label="インストラクション管理" onClick={props.onInstructions}>
           <DocumentIcon />

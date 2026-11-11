@@ -245,9 +245,9 @@ export default function DataPage() {
             <For each={scopeOptions()}>{option => <option value={option.id} selected={sourceId() === option.id}>{option.name}</option>}</For>
           </select>
         </label></Show>
-        <div class="join" role="group" aria-label="表示切り替え">
-          <button type="button" class="btn btn-sm join-item" classList={{ 'btn-active': mobileView() === 'list' }} aria-pressed={mobileView() === 'list'} onClick={() => setMobileView('list')}>一覧</button>
-          <button type="button" class="btn btn-sm join-item" classList={{ 'btn-active': mobileView() === 'detail' }} aria-pressed={mobileView() === 'detail'} disabled={!detailId()} onClick={() => setMobileView('detail')}>詳細</button>
+        <div class="inline-flex items-stretch" role="group" aria-label="表示切り替え">
+          <button type="button" class="btn btn-sm rounded-e-none hover:z-1 focus:z-2" classList={{ 'btn-active': mobileView() === 'list' }} aria-pressed={mobileView() === 'list'} onClick={() => setMobileView('list')}>一覧</button>
+          <button type="button" class="btn btn-sm rounded-s-none enabled:ms-[calc(-1*var(--border,1px))] disabled:border-e-0 hover:z-1 focus:z-2" classList={{ 'btn-active': mobileView() === 'detail' }} aria-pressed={mobileView() === 'detail'} disabled={!detailId()} onClick={() => setMobileView('detail')}>詳細</button>
         </div>
       </div>
       <div class="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)] gap-2" classList={{
