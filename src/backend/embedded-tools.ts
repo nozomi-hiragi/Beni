@@ -20,12 +20,13 @@ export const eventTools:EmbeddedTool[]=[
  tool('get_execution_output','Read a bounded excerpt of chat output referenced by a project operation; deleted chats return deleted.',{operation_id:{type:'string'}},['operation_id']),
  tool('acknowledge_events','Confirm review through an ID in the range announced to this conversation. Retrieval alone does not acknowledge.',{through:integer},['through'])
 ];
-export class EventToolArgumentsError extends Error {}
+export class ManualToolInputError extends Error {}
+export class EventToolArgumentsError extends ManualToolInputError {}
 export function eventToolArguments(name:string,value:unknown):Record<string,any>{
  const spec=eventTools.find(tool=>tool.name===name);
  if(!spec||!value||typeof value!=='object'||Array.isArray(value))throw Error('Invalid embedded tool request');
  const args=value as Record<string,unknown>,properties=spec.inputSchema.properties as Record<string,any>;
- if(Object.keys(args).some(key=>!(key in properties))||(spec.inputSchema.required as string[]).some(key=>!(key in args)))throw Error('Invalid embedded tool arguments');
+ if(Object.keys(args).some(key=>!Object.hasOwn(properties,key))||(spec.inputSchema.required as string[]).some(key=>!Object.hasOwn(args,key)))throw Error('Invalid embedded tool arguments');
  for(const [key,value] of Object.entries(args)){
   const schema=properties[key];
   if(key==='limit'&&(typeof value!=='number'||!Number.isSafeInteger(value)||value<1||value>100))throw new EventToolArgumentsError('limit は 1〜100 の整数で指定してください。省略時は 20 件です。');

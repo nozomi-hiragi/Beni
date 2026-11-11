@@ -2,6 +2,7 @@ import { DataBrowser } from '../data-browser';
 import { AgentTable } from './agents';
 import type { AgentStatus } from '../agents/agent';
 import type { AgentId, RateLimitUsage } from '../../shared/agent';
+import type { ManualToolOperation } from '../../shared/manual-tools';
 import { createHash } from 'node:crypto';
 import { defaultInstructions, isInstructionKey, isWorkflowUpdateTarget, taskCompletedInstructionKey, validateInstruction, type Instruction } from '../instructions';
 import { initialImplementationPlan, taskDocumentSnapshot, documentContentsKey } from '../documents';
@@ -55,6 +56,8 @@ const legacyInstructionHashes: Partial<Record<Instruction['key'], readonly strin
   retrospective: ['197564ac50f478ce0e916049c0edf5b75d5ed9486d7652b6f85af503e887449e', 'eadacb92d68c1df5e3b3b74c9bb6c5489ce5e85c0dd5924bfd746f7acdc8f984'],
   finalization: ['715cb6f374fc043f43fd3f37e50dd1dba1129ecc792e66d2eb6927ef72c05735'],
 };
+const manualToolRetentionMs = 30 * 24 * 60 * 60 * 1000;
+const unknownManualToolResult = '実行結果を確認できませんでした';
 const instructionScope = 'instructions';
 const knowledgeScope = 'knowledge';
 const managedName = /^[a-z][a-z0-9-]{0,251}\.md$/;
@@ -168,6 +171,19 @@ export class Store {
         event_id INTEGER, event_key TEXT NOT NULL DEFAULT 'task.completed', instruction_revision TEXT);
       CREATE INDEX IF NOT EXISTS instruction_jobs_task ON instruction_jobs(project_id,task_id,ordinal);
       CREATE INDEX IF NOT EXISTS instruction_jobs_pending ON instruction_jobs(status,ordinal);`);
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS manual_tool_operations (
+        id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, operation TEXT NOT NULL, expires_at INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS manual_tool_operations_expiration
+        ON manual_tool_operations(expires_at) WHERE expires_at IS NOT NULL;
+    `);
+    this.db.query(`
+      UPDATE manual_tool_operations
+      SET operation=json_set(operation, '$.status', 'unknown', '$.error', ?, '$.updatedAt', ?)
+      WHERE json_extract(operation, '$.status')='running'
+    `).run(unknownManualToolResult, new Date().toISOString());
+    this.expireManualToolDetails();
     this.instructionTable = new DocumentTable(this.db);
     this.db.transaction(() => {
       const projectColumns = this.db.query<{name: string}, []>('PRAGMA table_info(projects)').all();
@@ -225,6 +241,34 @@ export class Store {
   invalidateAgentStatus(id: AgentId) { this.agentTable.invalidateAgentStatus(id); }
   agentUsage(id: AgentId) { return this.agentTable.agentUsage(id); }
   saveAgentUsage(id: AgentId, identity: string, usage: RateLimitUsage) { this.agentTable.saveAgentUsage(id,identity,usage); }
+  private expireManualToolDetails() {
+    // 引数・出力を消した後も ID と照合用のハッシュを残し、同じ操作を再実行させない。
+    this.db.query(`
+      UPDATE manual_tool_operations SET expires_at=NULL,
+        operation=json_set(json_remove(operation, '$.output'), '$.input', json('{}'), '$.status', 'unknown',
+          '$.error', ?, '$.updatedAt', ?)
+      WHERE expires_at <= ? AND json_extract(operation, '$.status') != 'running'
+    `).run('保存期限を過ぎたため実行の詳細を表示できません', new Date().toISOString(), Date.now());
+  }
+  manualToolOperation(id: string) {
+    this.expireManualToolDetails();
+    const row = this.db.query<{ fingerprint: string; operation: string }, [string]>(
+      'SELECT fingerprint, operation FROM manual_tool_operations WHERE id=?'
+    ).get(id);
+    return row ? { fingerprint: row.fingerprint, operation: JSON.parse(row.operation) as ManualToolOperation } : undefined;
+  }
+  acceptManualToolOperation(operation: ManualToolOperation, fingerprint: string) {
+    return this.db.query(
+      'INSERT OR IGNORE INTO manual_tool_operations VALUES (?,?,?,?)'
+    ).run(operation.id, fingerprint, JSON.stringify(operation), Date.now() + manualToolRetentionMs).changes > 0;
+  }
+  saveManualToolOperation(operation: ManualToolOperation) {
+    const result = this.db.query(`
+      UPDATE manual_tool_operations SET operation=?, expires_at=?
+      WHERE id=? AND json_extract(operation, '$.status')='running'
+    `).run(JSON.stringify(operation), Date.now() + manualToolRetentionMs, operation.id);
+    if (result.changes !== 1) throw Error('Manual tool operation is no longer running');
+  }
   instructions(): Instruction[] {
     const contents = new Map(this.instructionTable.list(instructionScope).map(({name, content}) => [name, content]));
     return defaultInstructions.map(({key}) => ({key, content: contents.get(key)!}));
@@ -827,6 +871,11 @@ export class Store {
   }
   projectEventCursor(projectId: string) {
     return projectEvents(this.projectDatabasePath(projectId), {limit: 1}).through;
+  }
+  taskStateCursor(projectId: string, taskId: string) {
+    return withDatabase(this.scopedProjectDatabase(projectId), db => db.query<{id: number}, [string]>(
+      "SELECT COALESCE(MAX(id),0) AS id FROM events WHERE task_id=? AND type IN ('phase.changed','task.completed','task.reopened')"
+    ).get(taskId)!.id);
   }
   projectEvent(projectId: string, eventId: number) {
     return projectEvent(this.projectDatabasePath(projectId), eventId);

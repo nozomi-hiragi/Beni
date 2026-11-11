@@ -6,6 +6,7 @@ import SettingsPage from './settings/SettingsPage';
 import InstructionsPage from './instructions/InstructionsPage';
 import ProjectPage from './project/ProjectPage';
 import DataPage from './data/DataPage';
+import type { ManualToolScope } from '../shared/manual-tools';
 
 type Route = { kind: 'home' } | { kind: 'settings' } | { kind: 'instructions' } | { kind: 'data' } | { kind: 'project'; id: string; task?: string; invalidTask: boolean } | { kind: 'not-found' };
 export function parseRoute(url: URL): Route {
@@ -26,6 +27,11 @@ export default function App() {
   const [projectTitle, setProjectTitle] = createSignal<{ id: string; name: string }>();
   const [dataPageKey, setDataPageKey] = createSignal(1);
   const projectId = createMemo(() => { const current = route(); return current.kind === 'project' ? current.id : undefined; });
+  const toolScope = createMemo<ManualToolScope | undefined>(() => {
+    const current = route();
+    if (current.kind === 'instructions') return { kind: 'instructions' };
+    if (current.kind === 'project' && !current.invalidTask) return { kind: 'project', projectId: current.id, taskId: current.task };
+  });
   const projectRoute = () => { const current = route(); return current.kind === 'project' ? current : undefined; };
   const navigate = (path: string) => {
     if (path === `${window.location.pathname}${window.location.search}`) return;
@@ -53,7 +59,7 @@ export default function App() {
     }
   };
   return <div classList={{ 'flow-root': route().kind !== 'data', 'instructions-shell': route().kind === 'instructions', 'project-shell': route().kind === 'project', 'flex h-dvh flex-col overflow-hidden [&>header]:shrink-0': route().kind === 'data' }}>
-    <Navbar title={title()} showHome={route().kind !== 'home'} onHome={home} onData={openData} onInstructions={() => navigate('/instructions')} onSettings={() => navigate('/settings')} />
+    <Navbar title={title()} toolScope={toolScope()} toolsPage={route().kind} toolsUnavailable={projectRoute()?.invalidTask ? 'このプロジェクトのタスクが見つかりません' : undefined} showHome={route().kind !== 'home'} onHome={home} onData={openData} onInstructions={() => navigate('/instructions')} onSettings={() => navigate('/settings')} />
     <main class="mx-auto w-full px-2 py-2" classList={{ 'min-h-0 flex-1': route().kind === 'data' }}>
       <Show when={route().kind === 'home'}><HomePage onOpenProject={project => { setProjectTitle({ id: project.id, name: project.name }); navigate(`/project/${project.id}`); }} onOpenTask={(task, project) => { setProjectTitle({ id: project.id, name: project.name }); navigate(`/project/${project.id}?task=${task.id}`); }} /></Show>
       <Show when={projectId()} keyed>{id => <ProjectPage id={id} task={projectRoute()?.task} invalidTask={projectRoute()?.invalidTask ?? false} onHome={home} onTitle={name => setProjectTitle({ id, name })} onTaskChange={task => navigate(`/project/${id}${task === undefined ? '' : `?task=${task}`}`)} />}</Show>

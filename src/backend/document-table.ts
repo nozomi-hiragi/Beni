@@ -1,3 +1,4 @@
+import { ManualToolInputError } from './embedded-tools';
 import type { Database } from 'bun:sqlite';
 import { createHash, randomUUID } from 'node:crypto';
 
@@ -47,7 +48,7 @@ const maxReasonBytes = 16 * 1024;
 const maxSourceBytes = 64 * 1024;
 const sourceKinds = new Set(['document', 'instruction', 'message', 'result', 'template', 'legacy']);
 
-export class DocumentConflictError extends Error {
+export class DocumentConflictError extends ManualToolInputError {
   constructor() {
     super('文書の版が更新されています。最新の版を取得してください。');
     this.name = 'DocumentConflictError';
@@ -152,7 +153,7 @@ export class DocumentTable {
     requireIdentifier(actor);
     if (base !== null) requireIdentifier(base);
     if (!Array.isArray(items) || items.length > maxItems) {
-      throw new Error('文書の項目数が上限を超えているか、形式が無効です。');
+      throw new ManualToolInputError('文書の項目数が上限を超えているか、形式が無効です。');
     }
     return this.db.transaction(() => {
       const current = this.get(scope, name);
@@ -166,7 +167,7 @@ export class DocumentTable {
         contentBytes += Buffer.byteLength(item.text);
         snapshotBytes += Buffer.byteLength(JSON.stringify(item)) + 1;
         if (contentBytes > maxDocumentBytes || snapshotBytes > maxSnapshotBytes) {
-          throw new Error('文書または根拠のサイズが上限を超えています。');
+          throw new ManualToolInputError('文書または根拠のサイズが上限を超えています。');
         }
         return item;
       });
@@ -203,50 +204,50 @@ function readVersion(row: VersionRow): DocumentVersion {
 }
 
 function validateItem(input: DocumentItemInput, existing: Map<string, DocumentItem>, seen: Set<string>): DocumentItem {
-  if (!input || typeof input !== 'object') throw new Error('文書項目の形式が無効です。');
+  if (!input || typeof input !== 'object') throw new ManualToolInputError('文書項目の形式が無効です。');
   const { id, text, reason, sources } = input;
   const previous = id === undefined ? undefined : existing.get(id);
   if (id !== undefined && (!previous || seen.has(id))) {
-    throw new Error('文書に存在しないか、重複する項目IDです。');
+    throw new ManualToolInputError('文書に存在しないか、重複する項目IDです。');
   }
   if (id !== undefined) seen.add(id);
   requireString(text, maxDocumentBytes);
   requireString(reason, maxReasonBytes);
   if (!Array.isArray(sources) || sources.length > maxSources) {
-    throw new Error('参照元の件数が上限を超えているか、形式が無効です。');
+    throw new ManualToolInputError('参照元の件数が上限を超えているか、形式が無効です。');
   }
   const references = Array.from(sources, validateSource);
   if (previous && previous.text === text && previous.reason === reason
     && JSON.stringify(previous.sources) === JSON.stringify(references)) return previous;
   if (references.some(source => source.kind === 'template' || source.kind === 'legacy')) {
-    throw new Error('初期設定や既存文書から取り込んだ項目を引用するときは、文書の版と項目を指定してください。');
+    throw new ManualToolInputError('初期設定や既存文書から取り込んだ項目を引用するときは、文書の版と項目を指定してください。');
   }
   if (text.trim() && (!reason.trim() || references.length === 0)) {
-    throw new Error('見出しや本文の追加・変更には採用理由と参照元が必要です。');
+    throw new ManualToolInputError('見出しや本文の追加・変更には採用理由と参照元が必要です。');
   }
   return { id: id ?? randomUUID(), text, reason, sources: references };
 }
 
 function validateSource(source: DocumentSource): DocumentSource {
   if (!source || typeof source !== 'object' || !sourceKinds.has(source.kind)) {
-    throw new Error('参照元の形式が無効です。');
+    throw new ManualToolInputError('参照元の形式が無効です。');
   }
   const { kind, id, revision, start, text } = source;
   requireIdentifier(id);
   if (revision !== undefined) requireIdentifier(revision);
   requireString(text, maxSourceBytes);
-  if (!text.trim()) throw new Error('参照元の原文が空です。');
-  if (start !== undefined && (!Number.isSafeInteger(start) || start < 0)) throw Error('引用位置が無効です。');
+  if (!text.trim()) throw new ManualToolInputError('参照元の原文が空です。');
+  if (start !== undefined && (!Number.isSafeInteger(start) || start < 0)) throw new ManualToolInputError('引用位置が無効です。');
   return { kind, id, revision, ...(start === undefined ? {} : {start}), text };
 }
 
 function requireIdentifier(value: unknown): asserts value is string {
   requireString(value, 4096);
-  if (!value.trim() || value.includes('\0')) throw new Error('識別子が無効です。');
+  if (!value.trim() || value.includes('\0')) throw new ManualToolInputError('識別子が無効です。');
 }
 
 function requireString(value: unknown, maxBytes: number): asserts value is string {
   if (typeof value !== 'string' || Buffer.byteLength(value) > maxBytes) {
-    throw new Error('文字列のサイズが上限を超えているか、形式が無効です。');
+    throw new ManualToolInputError('文字列のサイズが上限を超えているか、形式が無効です。');
   }
 }

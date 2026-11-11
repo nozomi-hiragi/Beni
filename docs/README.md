@@ -28,6 +28,7 @@
   - [インストラクション管理](features/instructions.md)
   - [イベントに対応するワークフロー](features/workflows.md)
   - [LLM チャット連携](features/llm-chat.md)
+  - [Navbar のツール](features/manual-tools.md)
   - [タスク検索（未実装）](features/task-search.md)
   - [プロジェクト内ターミナル](features/terminal.md)
 

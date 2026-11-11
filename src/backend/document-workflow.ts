@@ -6,6 +6,8 @@ import { withDatabase, type WorkflowEventType } from './project-events';
 import { retrospectiveSignals } from './retrospective-signals';
 import type { Store } from './store';
 import { isInstructionKey, isWorkflowUpdateTarget, renderInstruction, type InstructionKey } from './instructions';
+import { INSTRUCTIONS_CHAT_ID } from '../shared/communication';
+import { ManualToolInputError } from './embedded-tools';
 import { taskPhases, type TaskPhase } from '../shared/task-phase';
 
 const maxText = 4096;
@@ -27,7 +29,7 @@ const reads = [
 ];
 const sourceSchema = { type: 'object', properties: { kind: { enum: ['document', 'instruction', 'message', 'result'] }, id: value, revision: value, start: cursor, text: value }, required: ['kind', 'id', 'text'], additionalProperties: false };
 const editSchema = { type: 'object', properties: {
- id: value, text: value, reason: value, sources: { type: 'array', items: sourceSchema },
+ id: value, text: value, reason: value, sources: { type: 'array', items: sourceSchema, maxItems: 16 },
  index: cursor, remove: { type: 'boolean' }
 }, additionalProperties: false };
 const editTool = tool('edit_document', '文書に項目を挿入・更新・移動・削除する。新規は id を省略、既存は id を指定。空白以外の項目を追加・変更するときは reason と原文引用 sources が必須。見出しは独立した項目にし、その見出しを置く理由と引用を付ける。見出しや構成への指摘には実際の発言を引用する。index は挿入・移動位置。',
@@ -45,22 +47,24 @@ type Job = NonNullable<ReturnType<Store['pendingInstructionJob']>>;
 type InstructionEdit = { key: InstructionKey; base: string; items: DocumentItemInput[] };
 type JobDraft = { job: Job; edits: Map<InstructionKey, InstructionEdit>; reason?: string };
 type Arguments = Record<string, unknown>;
+type DocumentPin = { name: string; revision: string };
+type DocumentToolContext = WorkflowToolContext & { manual?: DocumentPin[] };
 
 function object(input: unknown): Arguments {
- if (!input || typeof input !== 'object' || Array.isArray(input)) throw Error('入力はオブジェクトで指定してください');
+ if (!input || typeof input !== 'object' || Array.isArray(input)) throw new ManualToolInputError('入力はオブジェクトで指定してください');
  return input as Arguments;
 }
 function string(input: unknown, limit = 256) {
- if (typeof input !== 'string' || !input || input.length > limit) throw Error('入力文字列を確認してください');
+ if (typeof input !== 'string' || !input || input.length > limit) throw new ManualToolInputError('入力文字列を確認してください');
  return input;
 }
 function index(input: unknown, fallback = 0) {
  if (input === undefined) return fallback;
- if (typeof input !== 'number' || !Number.isSafeInteger(input) || input < 0) throw Error('取得位置を確認してください');
+ if (typeof input !== 'number' || !Number.isSafeInteger(input) || input < 0) throw new ManualToolInputError('取得位置を確認してください');
  return input;
 }
 function chunk(text: string, offset: number) {
- if (offset > text.length || (offset > 0 && /^[\udc00-\udfff]/.test(text.slice(offset, offset + 1)))) throw Error('取得位置を確認してください');
+ if (offset > text.length || (offset > 0 && /^[\udc00-\udfff]/.test(text.slice(offset, offset + 1)))) throw new ManualToolInputError('取得位置を確認してください');
  let end = Math.min(offset + maxText, text.length);
  if (end < text.length && /^[\udc00-\udfff]/.test(text.slice(end, end + 1))) end--;
  return { text: text.slice(offset, end), next: end < text.length ? end : null };
@@ -73,6 +77,7 @@ export class DocumentWorkflow {
  private readonly preparations = new Map<symbol, string>();
  private workingJobs = false;
  private jobsRequested = false;
+ private jobsDeferredByManualTool = false;
  private readonly capturedInstructions = new Map<string, { key: InstructionKey; revision: string }[]>();
 
  constructor(private readonly store: Store, private readonly chat: ChatService,
@@ -118,6 +123,34 @@ export class DocumentWorkflow {
    ...(phase === 'retrospective' ? [reviewSignals, finishRetrospective] : []), ...(phase === 'finalization' ? [finishKnowledge] : [])];
  }
 
+ manualTools(p: string, task: string, phase: TaskPhase, writable: boolean, reviewState?: string) {
+  return this.tools(p, task, phase).filter(tool =>
+   reads.includes(tool) || (writable && (tool === editTool || tool === reviewSignals ||
+    (tool === finishRetrospective && (reviewState === 'failed' || reviewState === 'stopped')))));
+ }
+ manualContext(p: string, task: string, phase: TaskPhase, operationId: string): DocumentToolContext {
+  const documents: DocumentPin[] = this.store.managedDocuments(p, task).map(({ name, revision }) => ({ name, revision }));
+  const knowledge = this.store.managedDocument(p, null, knowledgeName);
+  if (knowledge) documents.push({ name: knowledgeName, revision: knowledge.revision });
+  for (const name of ['common', phase]) {
+   const doc = this.store.instructionDocument(name);
+   if (doc) documents.push({ name, revision: doc.revision });
+  }
+  return { projectId: p, taskId: task, phase, sendId: 'manual/' + operationId, chatId: '', manual: documents };
+ }
+ manualToolBusy(p: string, taskId: string | null) {
+  if ([...this.drafts.values()].some(({ job }) =>
+   p === INSTRUCTIONS_CHAT_ID || (job.projectId === p && (taskId === null || job.taskId === taskId)))) return true;
+  if (p === INSTRUCTIONS_CHAT_ID) return false;
+  const tasks = taskId === null ? this.store.tasks(p, false) : [this.store.task(taskId)];
+  return tasks.some(task => {
+   if (!task) return false;
+   if (this.isExecutionContinuing(task.id)) return true;
+   if (task.phase !== 'retrospective' || task.status !== 'idle') return false;
+   const state = this.review(p, task.id)?.state;
+   return state === 'pending' || state === 'running';
+  });
+ }
  context(p: string, task: string | null, phase: TaskPhase | null, jobId?: string) {
   if (jobId) {
    const job = this.drafts.get(jobId)?.job;
@@ -149,7 +182,7 @@ export class DocumentWorkflow {
    'タスク文書とナレッジはBeniのDBで管理する。list_documents / read_document で読み、edit_document で更新する。タスク文書のファイルパスに関する指示は同名のDB文書として扱い、ファイルに読み書きしない。見出しを含め、空白以外の追加・変更には採用理由と原文引用を記録する。見出しや構成への指摘も実際の発言を引用する。原文のIDはツールから取得する。' + preparation };
  }
 
- sent(c: WorkflowToolContext, instructions: string) {
+ sent(c: DocumentToolContext, instructions: string) {
   if (!c.taskId || !c.phase || c.jobId) return;
   if (c.phase === 'retrospective' && c.systemGenerated) {
    const run = this.reviewRuns.get(c.taskId);
@@ -174,12 +207,16 @@ export class DocumentWorkflow {
   ];
  }
 
- private jobDraft(c: WorkflowToolContext) {
+ private jobDraft(c: DocumentToolContext) {
   const draft = c.jobId && this.drafts.get(c.jobId);
-  if (!draft || draft.job.projectId !== c.projectId) throw Error('更新ジョブがありません');
+  if (!draft || draft.job.projectId !== c.projectId) throw new ManualToolInputError('更新ジョブがありません');
   return draft;
  }
- private read(c: WorkflowToolContext, name: string, revision?: string): DocumentVersion | undefined {
+ private read(c: DocumentToolContext, name: string, revision?: string): DocumentVersion | undefined {
+  if (c.manual && revision === undefined) {
+   revision = c.manual.find(doc => doc.name === name)?.revision;
+   if (revision === undefined) return undefined;
+  }
   if (isInstructionKey(name)) {
    if (!isWorkflowUpdateTarget(name)) return undefined;
    if (!c.jobId && !revision) revision = this.capturedInstructions.get(c.sendId)?.find(entry => entry.key === name)?.revision;
@@ -201,7 +238,7 @@ export class DocumentWorkflow {
   }
   return this.store.managedDocument(c.projectId, c.taskId, name, revision);
  }
- private source(c: WorkflowToolContext, ref: Pick<DocumentSource, 'kind' | 'id' | 'revision'>) {
+ private source(c: DocumentToolContext, ref: Pick<DocumentSource, 'kind' | 'id' | 'revision'>) {
   const [scope, id, pack, ...rest] = ref.id.split('/');
   if (!scope || !id || rest.length) return undefined;
   if (ref.kind === 'document' || ref.kind === 'instruction') {
@@ -212,13 +249,13 @@ export class DocumentWorkflow {
   return this.chatReferences(c.projectId, c.taskId, scope as TaskPhase, id)
    .find(item => item.kind === ref.kind && item.id === ref.id)?.text;
  }
- private verifySource(c: WorkflowToolContext, input: unknown): DocumentSource {
+ private verifySource(c: DocumentToolContext, input: unknown): DocumentSource {
   const source = object(input), kind = source.kind;
-  if (kind !== 'document' && kind !== 'instruction' && kind !== 'message' && kind !== 'result') throw Error('参照元の種類を確認してください');
+  if (kind !== 'document' && kind !== 'instruction' && kind !== 'message' && kind !== 'result') throw new ManualToolInputError('参照元の種類を確認してください');
   const ref: DocumentSource = { kind, id: string(source.id), ...(source.revision === undefined ? {} : { revision: string(source.revision) }), text: string(source.text, maxText) };
   const original = this.source(c, ref);
   const start = source.start === undefined ? original?.indexOf(ref.text) ?? -1 : index(source.start);
-  if (start < 0 || original?.slice(start, start + ref.text.length) !== ref.text) throw Error('引用が参照元の原文と一致しません');
+  if (start < 0 || original?.slice(start, start + ref.text.length) !== ref.text) throw new ManualToolInputError('引用が参照元の原文と一致しません');
   return { ...ref, start };
  }
  private editable(phase: TaskPhase | null, name: string) {
@@ -228,31 +265,31 @@ export class DocumentWorkflow {
   if (phase === 'retrospective') return name === 'retrospective.md';
   return phase === 'finalization' && name === knowledgeName;
  }
- private edit(c: WorkflowToolContext, args: Arguments) {
+ private edit(c: DocumentToolContext, args: Arguments) {
   const name = string(args.name), base = args.revision === null ? null : string(args.revision);
   const update = string(args.update_id, 128);
   const draft = c.jobId ? this.jobDraft(c) : undefined;
-  if (draft ? !isWorkflowUpdateTarget(name) || draft.reason !== undefined : !c.taskId || !this.editable(c.phase, name)) throw Error('この文書は編集できません');
-  if (c.phase === 'finalization' && this.completion(c.projectId, c.taskId!, c.chatId)) throw Error('ナレッジは確定済みです');
+  if (draft ? !isWorkflowUpdateTarget(name) || draft.reason !== undefined : !c.taskId || !this.editable(c.phase, name)) throw new ManualToolInputError('この文書は編集できません');
+  if (c.phase === 'finalization' && this.completion(c.projectId, c.taskId!, c.chatId)) throw new ManualToolInputError('ナレッジは確定済みです');
   const edits = args.edits;
-  if (!Array.isArray(edits) || !edits.length || edits.length > 32) throw Error('更新項目数を確認してください');
+  if (!Array.isArray(edits) || !edits.length || edits.length > 32) throw new ManualToolInputError('更新項目数を確認してください');
   const current = this.read(c, name);
   const actor = c.sendId + '/' + update + '/' + createHash('sha256').update(JSON.stringify(args)).digest('hex');
   if (!draft) {
    const replay = this.store.replayManagedDocument(c.projectId, name === knowledgeName ? null : c.taskId!, name, actor);
    if (replay) return { name, revision: replay.revision, items: replay.items.map(({ id }) => id) };
   }
-  if ((current?.revision ?? null) !== base) throw Error('文書の最新版を取得してから更新してください');
+  if ((current?.revision ?? null) !== base) throw new ManualToolInputError('文書の最新版を取得してから更新してください');
   const pending = draft?.edits.get(name as InstructionKey);
   const items: DocumentItemInput[] = [...(pending?.items ?? current?.items ?? [])];
   for (const raw of edits) {
    const entry = object(raw);
    const id = entry.id === undefined ? undefined : string(entry.id);
    const at = id === undefined ? -1 : items.findIndex(item => item.id === id);
-   if (id !== undefined && at < 0) throw Error('更新する項目が見つかりません');
+   if (id !== undefined && at < 0) throw new ManualToolInputError('更新する項目が見つかりません');
    const previous = at < 0 ? undefined : items.splice(at, 1)[0];
    if (entry.remove === true) {
-    if (!previous) throw Error('削除する項目を指定してください');
+    if (!previous) throw new ManualToolInputError('削除する項目を指定してください');
     continue;
    }
    const item = entry.text === undefined && previous ? previous : {
@@ -260,11 +297,11 @@ export class DocumentWorkflow {
     sources: Array.isArray(entry.sources) && entry.sources.length <= 16 ? entry.sources.map(source => this.verifySource(c, source)) : []
    };
    const position = index(entry.index, at < 0 ? items.length : at);
-   if (position > items.length) throw Error('項目の挿入位置を確認してください');
+   if (position > items.length) throw new ManualToolInputError('項目の挿入位置を確認してください');
    items.splice(position, 0, item);
   }
   if (draft) {
-   if (!base) throw Error('指示の元の版が必要です');
+   if (!base) throw new ManualToolInputError('指示の元の版が必要です');
    draft.edits.set(name as InstructionKey, { key: name as InstructionKey, base, items });
    return { name, revision: base, staged: true };
   }
@@ -273,11 +310,11 @@ export class DocumentWorkflow {
   return { name, revision: result.revision, items: result.items.map(({ id }) => id) };
  }
 
- async call(c: WorkflowToolContext, name: string, input: unknown) {
+ async call(c: DocumentToolContext, name: string, input: unknown) {
   const args = object(input);
-  if (!this.tools(c.projectId, c.taskId, c.phase, c.jobId).some(tool => tool.name === name)) throw Error('この操作は利用できません');
+  if (!this.tools(c.projectId, c.taskId, c.phase, c.jobId).some(tool => tool.name === name)) throw new ManualToolInputError('この操作は利用できません');
   if (name === 'list_documents') {
-   const docs = c.jobId ? [this.read(c, knowledgeName), ...this.store.instructions().filter(item => isWorkflowUpdateTarget(item.key)).map(({ key }) => this.read(c, key))] :
+   const docs = c.manual ? c.manual.map(({ name, revision }) => this.read(c, name, revision)) : c.jobId ? [this.read(c, knowledgeName), ...this.store.instructions().filter(item => isWorkflowUpdateTarget(item.key)).map(({ key }) => this.read(c, key))] :
     [...this.store.managedDocuments(c.projectId, c.taskId!), this.read(c, knowledgeName),
      ...this.capturedInstructions.get(c.sendId)?.map(({ key, revision }) => this.read(c, key, revision)) ?? []];
    const rows = docs.flatMap(doc => doc ? [{ name: doc.name, revision: doc.revision, items: doc.items.length }] : []);
@@ -286,7 +323,7 @@ export class DocumentWorkflow {
   }
   if (name === 'read_document') {
    const doc = this.read(c, string(args.name), args.revision === undefined ? undefined : string(args.revision));
-   if (!doc) throw Error('文書が見つかりません');
+   if (!doc) throw new ManualToolInputError('文書が見つかりません');
    const itemIndex = index(args.item), item = doc.items[itemIndex];
    if (!item) return { name: doc.name, revision: doc.revision, item: null, next: null };
    const part = chunk(item.text, index(args.offset));
@@ -296,7 +333,7 @@ export class DocumentWorkflow {
     source: { kind: isInstructionKey(doc.name) ? 'instruction' : 'document', id: doc.name + '/' + item.id, revision: doc.revision } }, next };
   }
   if (name === 'list_chat_sources') {
-   if (!taskPhases.includes(args.phase as TaskPhase)) throw Error('フェーズを確認してください');
+   if (!taskPhases.includes(args.phase as TaskPhase)) throw new ManualToolInputError('フェーズを確認してください');
    const rows = this.chatReferences(c.projectId, c.taskId!, args.phase as TaskPhase), offset = index(args.offset);
    return { sources: rows.slice(offset, offset + maxPage).map(({ kind, id, text, role }) => ({ kind, id, role, excerpt: text.slice(0, 160) })),
     next: offset + maxPage < rows.length ? offset + maxPage : null };
@@ -304,13 +341,13 @@ export class DocumentWorkflow {
   if (name === 'read_source') {
    const text = this.source(c, { kind: args.kind as DocumentSource['kind'], id: string(args.id),
     ...(args.revision === undefined ? {} : { revision: string(args.revision) }) });
-   if (text === undefined) throw Error('参照元が見つかりません');
+   if (text === undefined) throw new ManualToolInputError('参照元が見つかりません');
    return chunk(text, index(args.offset));
   }
   if (name === 'edit_document') return this.edit(c, args);
   if (name === 'get_retrospective_signals') {
    const area = args.area;
-   if (area !== 'documents' && area !== 'execution') throw Error('調査対象を確認してください');
+   if (area !== 'documents' && area !== 'execution') throw new ManualToolInputError('調査対象を確認してください');
    return retrospectiveSignals(this.store, c.projectId, c.taskId!, area, index(args.offset));
   }
   if (name === 'finish_retrospective') {
@@ -318,16 +355,18 @@ export class DocumentWorkflow {
    const available = c.systemGenerated
     ? state === 'running' && this.reviewRuns.get(taskId)?.sendId === c.sendId
     : this.reviewIsAvailable(taskId) && (state === 'failed' || state === 'stopped');
-   if (!available) throw Error('現在は分析の完了を申告できません');
+   if (!available) throw new ManualToolInputError('現在は分析の完了を申告できません');
    const revision = string(args.revision), reason = string(args.reason, 4096);
-   if (!reason.trim()) throw Error('判断理由を指定してください');
-   if (this.read(c, 'retrospective.md')?.revision !== revision) throw Error('最新の反省会文書の版を指定してください');
-   this.reviewCompletions.set(c.sendId, revision);
+   if (!reason.trim()) throw new ManualToolInputError('判断理由を指定してください');
+   if (this.read(c, 'retrospective.md')?.revision !== revision) throw new ManualToolInputError('最新の反省会文書の版を指定してください');
+   if (c.manual) {
+    if (!state || !this.completeReview(c.projectId, taskId, state, revision)) throw new ManualToolInputError('現在は分析の完了を確定できません');
+   } else this.reviewCompletions.set(c.sendId, revision);
    return { revision };
   }
   if (name === 'finish_execution') {
    const outcome = args.outcome;
-   if (outcome !== 'completed' && outcome !== 'blocked') throw Error('実装結果を確認してください');
+   if (outcome !== 'completed' && outcome !== 'blocked') throw new ManualToolInputError('実装結果を確認してください');
    const reason = string(args.reason, 4096);
    this.database(c.projectId, db => db.query('INSERT OR IGNORE INTO document_execution_completion VALUES (?,?,?,?)')
     .run(c.taskId, c.sendId, outcome, reason));
@@ -335,7 +374,7 @@ export class DocumentWorkflow {
   }
   if (name === 'finish_knowledge') {
    const revision = string(args.revision), reason = string(args.reason, 4096);
-   if (this.store.managedDocument(c.projectId, null, knowledgeName)?.revision !== revision) throw Error('最新のナレッジ版を指定してください');
+   if (this.store.managedDocument(c.projectId, null, knowledgeName)?.revision !== revision) throw new ManualToolInputError('最新のナレッジ版を指定してください');
    this.database(c.projectId, db => db.query('INSERT OR IGNORE INTO document_knowledge_completion VALUES (?,?,?,?)')
     .run(c.taskId, c.chatId, revision, reason));
    return { revision };
@@ -344,7 +383,7 @@ export class DocumentWorkflow {
    this.jobDraft(c).reason = string(args.reason, 4096);
    return { prepared: true };
   }
-  throw Error('操作を確認してください');
+  throw new ManualToolInputError('操作を確認してください');
  }
 
  review(p: string, t: string) {
@@ -388,7 +427,7 @@ export class DocumentWorkflow {
   });
  }
  async runReview(p: string, t: string, retry = false) {
-  if (!this.store.canRunProject(p) || !this.reviewIsAvailable(t) || this.reviewRuns.has(t)) return;
+  if (!this.store.canRunProject(p) || !this.reviewIsAvailable(t) || this.reviewRuns.has(t) || this.chat.manualToolBusy(p, t)) return;
   const review = this.review(p, t);
   if (review?.state === 'done' || (!retry && (review?.state === 'failed' || review?.state === 'stopped'))) return;
   this.database(p, db => db.query(`INSERT INTO document_review VALUES (?,'running',NULL)
@@ -414,7 +453,7 @@ export class DocumentWorkflow {
    WHERE task_id=? AND state='running'`).run(t));
   if (failed.changes) this.changed(p, t);
  }
- finished(c: WorkflowToolContext, status: string) {
+ finished(c: DocumentToolContext, status: string) {
   this.capturedInstructions.delete(c.sendId);
   if (c.phase === 'execution' && c.taskId) return this.executionFinished(c,status);
   if (c.phase !== 'retrospective' || !c.taskId) return;
@@ -428,16 +467,19 @@ export class DocumentWorkflow {
   } else if (!revision || !this.reviewIsAvailable(t)) return;
   const state = this.review(p, t)?.state;
   if (!state || (c.systemGenerated ? state !== 'running' : state !== 'failed' && state !== 'stopped')) return;
-  if (status !== 'completed' || !revision || this.read(c, 'retrospective.md')?.revision !== revision) {
+  if (status !== 'completed' || !revision || !this.completeReview(p, t, state, revision)) {
    if (c.systemGenerated) this.reviewFailed(p, t);
-   return;
   }
-  this.database(p, db => db.query("UPDATE document_review SET state='done',error=NULL WHERE task_id=? AND state=?").run(t, state));
-  this.changed(p, t);
+ }
+ private completeReview(p: string, t: string, state: string, revision: string) {
+  if (this.store.managedDocument(p, t, 'retrospective.md')?.revision !== revision) return false;
+  const result = this.database(p, db => db.query("UPDATE document_review SET state='done',error=NULL WHERE task_id=? AND state=?").run(t, state));
+  if (result.changes) this.changed(p, t);
+  return result.changes > 0;
  }
  private readonly continuedExecution = new Map<string, string>();
  isExecutionContinuing(taskId: string) { return this.continuedExecution.has(taskId); }
- private executionFinished(c: WorkflowToolContext, status: string) {
+ private executionFinished(c: DocumentToolContext, status: string) {
   const t = c.taskId!, p = c.projectId;
   const result = this.database(p, db => db.query('SELECT 1 FROM document_execution_completion WHERE task_id=? AND send_id=?').get(t, c.sendId));
   if (result || status !== 'completed') {
@@ -478,6 +520,9 @@ export class DocumentWorkflow {
    provider: this.chat.providerForModel(history.selectedModel), model: history.selectedModel?.id ?? null });
   return true;
  }
+ manualToolReleased() {
+  if (this.jobsDeferredByManualTool) this.kickJobs();
+ }
  kickJobs() {
   if (this.workingJobs) { this.jobsRequested = true; return; }
   this.workingJobs = true;
@@ -496,7 +541,12 @@ export class DocumentWorkflow {
   }
  }
  private async runJobs() {
+  this.jobsDeferredByManualTool = false;
   for (let job = this.store.pendingInstructionJob(true); job; job = this.store.pendingInstructionJob(true)) {
+   if (this.chat.manualToolBusy(INSTRUCTIONS_CHAT_ID, null) || this.chat.manualToolBusy(job.projectId, job.taskId)) {
+    this.jobsDeferredByManualTool = true;
+    return;
+   }
    const draft: JobDraft = { job, edits: new Map() }, attemptId = crypto.randomUUID();
    this.drafts.set(job.id, draft);
    try {

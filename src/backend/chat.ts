@@ -58,7 +58,7 @@ const toolPackLimit = 1024 * 1024;
 const omission = '…（省略）…';
 const jsonBytes = (value:unknown) => Buffer.byteLength(JSON.stringify(value), 'utf8');
 
-function shorten(text:string, budget:number, measure:(text:string)=>number, keepEnd=false) {
+export function shorten(text:string, budget:number, measure:(text:string)=>number, keepEnd=false) {
  if(measure(text)<=budget)return text;
  if(measure(omission)>budget)return '';
  let low=0,high=Math.min(text.length,budget),result=omission;
@@ -108,7 +108,7 @@ function boundedTool(tool:NonNullable<Pack['tool']>) {
 }
 
 export class ModelUnavailable extends Error { constructor() { super('model unavailable'); } }
-const instructionTools:EmbeddedTool[]=[{type:'function',name:'list_instructions',description:'編集対象のキーと表示名を一覧する。本文は含まない。',inputSchema:{type:'object',properties:{},additionalProperties:false}},{type:'function',name:'get_instruction',description:'指定した編集対象の最新の未展開本文を取得する。',inputSchema:{type:'object',properties:{key:{type:'string'}},required:['key'],additionalProperties:false}},{type:'function',name:'update_instruction',description:'合意したインストラクションを保存する。expected_content に現在の本文を渡す。成功時は key、content、variables を返す。variables は既知の置換変数名をキーに、保存本文中の全出現位置を出現順の {line, column} 配列で返す。位置は {{ の先頭を 1 始まりで数え、column は Unicode コードポイント単位。変数がない場合と置換しない editor は空オブジェクト。',inputSchema:{type:'object',properties:{key:{type:'string'},content:{type:'string'},expected_content:{type:'string'}},required:['key','content','expected_content'],additionalProperties:false}}];
+export const instructionTools:EmbeddedTool[]=[{type:'function',name:'list_instructions',description:'編集対象のキーと表示名を一覧する。本文は含まない。',inputSchema:{type:'object',properties:{},additionalProperties:false}},{type:'function',name:'get_instruction',description:'指定した編集対象の最新の未展開本文を取得する。',inputSchema:{type:'object',properties:{key:{type:'string'}},required:['key'],additionalProperties:false}},{type:'function',name:'update_instruction',description:'合意したインストラクションを保存する。expected_content に現在の本文を渡す。成功時は key、content、variables を返す。variables は既知の置換変数名をキーに、保存本文中の全出現位置を出現順の {line, column} 配列で返す。位置は {{ の先頭を 1 始まりで数え、column は Unicode コードポイント単位。変数がない場合と置換しない editor は空オブジェクト。',inputSchema:{type:'object',properties:{key:{type:'string'},content:{type:'string'},expected_content:{type:'string'}},required:['key','content','expected_content'],additionalProperties:false}}];
 export class ChatService {
  private listeners=new Map<string,Set<(event:TopicEvent)=>void>>();
  subscribe(p:string,t:string|null,changed:(event:TopicEvent)=>void,phase:TaskPhase|null=t===null?null:'requirements'){const k=conversationKey(p,t,phase);let listeners=this.listeners.get(k);if(!listeners){listeners=new Set();this.listeners.set(k,listeners)}listeners.add(changed);return ()=>{listeners!.delete(changed);if(!listeners!.size)this.listeners.delete(k)}}
@@ -143,13 +143,34 @@ export class ChatService {
  private canRunProject(p:string){return p===INSTRUCTIONS_CHAT_ID||this.projectStorage?.canRun(p)!==false}
  projectBusy(p:string){
   const belongs=(value:string)=>JSON.parse(value)[0]===p;
-  return [...this.finalizingProjects.values()].includes(p)||[this.preparing,this.stopping,this.active.keys(),this.locks.keys()].some(entries=>[...entries].some(belongs))||
+  return [...this.finalizingProjects.values()].includes(p)||[this.preparing,this.stopping,this.active.keys(),this.locks.keys(),this.manualToolScopes].some(entries=>[...entries].some(belongs))||
    [...this.contextProbes.keys()].some(value=>belongs(JSON.parse(value)[0]));
  }
  projectFolderChanged(p:string){
   for(const scope of this.listeners.keys())if(JSON.parse(scope)[0]===p)this.notify(scope,{name:'chat.changed',data:{}});
  }
- private busy(p:string,t:string|null){const k=key(p,t);return this.preparing.has(k)||[...this.active.keys()].some(value=>{const [project,task,,jobId]=JSON.parse(value);return jobId===undefined&&project===p&&task===t})}
+ private readonly manualToolScopes = new Set<string>();
+ private overlaps(p:string,t:string|null,value:string) {
+  const [project,task,,job] = JSON.parse(value);
+  return job === undefined && project === p && (t === null || task === null || task === t);
+ }
+ manualToolBusy(p:string,t:string|null) {
+  return [...this.manualToolScopes].some(value => this.overlaps(p,t,value));
+ }
+ manualToolScopeBusy(p:string,t:string|null,folder?:string) {
+  const overlaps = (value:string) => this.overlaps(p,t,value);
+  return this.manualToolBusy(p,t) || [...this.preparing].some(overlaps) ||
+   [...this.stopping].some(overlaps) ||
+   [...this.active.keys(), ...this.locks.keys()].some(overlaps) ||
+   (folder !== undefined && this.finalizingProjects.has(folder));
+ }
+ reserveManualTool(p:string,t:string|null,folder?:string) {
+  if (this.manualToolScopeBusy(p,t,folder)) throw Error('busy');
+  const scope = key(p,t);
+  this.manualToolScopes.add(scope);
+  return () => { this.manualToolScopes.delete(scope); };
+ }
+ private busy(p:string,t:string|null){const k=key(p,t);return this.manualToolBusy(p,t)||this.preparing.has(k)||[...this.active.keys()].some(value=>{const [project,task,,jobId]=JSON.parse(value);return jobId===undefined&&project===p&&task===t})}
  private active=new Map<string,ActiveRun>();
  private contextProbes=new Map<string,Promise<ContextUsage|undefined>>();
  withIdleTask<T>(p:string,t:string,change:()=>T):T{key(p,t);if(this.stopping.has(key(p,t))||this.busy(p,t)||[...this.locks.keys()].some(value=>{const [project,task]=JSON.parse(value);return project===p&&task===t}))throw Error('busy');return change();}
@@ -200,7 +221,7 @@ export class ChatService {
  }
  async stopTask<T>(p:string,t:string,change:()=>T,validate:()=>void=()=>{}):Promise<T>{
   const taskKey=key(p,t);
-  if(this.stopping.has(taskKey))throw Error('busy');
+  if(this.stopping.has(taskKey)||this.manualToolBusy(p,t))throw Error('busy');
   this.stopping.add(taskKey);
   this.explicitStops.add(taskKey);
   try {
@@ -520,6 +541,61 @@ export class ChatService {
    this.agentStore?.saveAgentUsage(provider,account.identity,usage);
   }catch{ /* 保存できなくても今回の値は表示できる。 */ }
  }
+ callEventTool(projectId:string,taskId:string|null,history:{after:number;through:number},name:string,input:unknown) {
+  const args=eventToolArguments(name,input),provider=this.taskEvents;
+  if(name==='acknowledge_events'||!provider)throw Error('Invalid tool scope');
+  if((args.event_id!==undefined&&args.event_id>history.through)||(args.change_id!==undefined&&args.change_id>history.through))throw Error('Invalid event range');
+  let result:unknown;
+  if(name==='list_events'){
+   const after=args.after??history.after,through=args.through??history.through;
+   if(after>through||through>history.through)throw Error('Invalid event range');
+   const page=provider.events(projectId,args.task_id??taskId,after,through,args.limit??20,args.kind?[args.kind]:defaultEventKinds);
+   const events=args.kind?page.events:page.events.map(({id,type,taskId,phase,path,previousPath,from,to,details,version,previousVersion,operationId})=>({
+    id,type,taskId,phase,path,previousPath,from,to,version,previousVersion,
+    operationId:operationId??undefined,details:details?.result===undefined?undefined:{result:details.result}
+   }));
+   result={...page,events,nextCursor:page.nextCursor??page.lastEventId};
+  }else if(name==='get_event'){
+   if(!provider.event)throw Error('Unavailable');result=provider.event(projectId,args.event_id);
+  }else if(name==='get_file_change'){
+   if(!provider.change)throw Error('Unavailable');result=provider.change(projectId,args.event_id);
+  }else if(name==='get_file_version'){
+   if(!provider.version)throw Error('Unavailable');result=provider.version(projectId,args.path,args.change_id);
+  }else if(name==='get_execution_output'){
+   let after=0,operation:any;
+   while(!operation){const page=provider.events(projectId,null,after,history.through,100);operation=page.events.find(event=>event.operationId===args.operation_id&&typeof event.packId==='string');if(operation||!page.hasMore)break;const next=page.nextCursor??page.lastEventId;if(next<=after)throw Error('Invalid event page');after=next}
+   if(!operation)throw Error('Unknown operation');
+   if((operation.taskId!==null&&!validTaskId(operation.taskId))||(operation.taskId===null?operation.phase!==null:!isTaskPhase(operation.phase)))throw Error('Invalid output scope');
+   const source=typeof operation.chatId==='string'?this.workflowSources(projectId,operation.taskId,operation.phase,operation.chatId):undefined;
+   const pack=source?.packs.find(pack=>pack.packId===operation.packId);
+   if(pack){
+    const output=pack.tool?.output??pack.content;
+    const excerpt=shorten(output,excerptLimit,jsonBytes,true);
+    result={deleted:false,operation_id:args.operation_id,output:excerpt,status:pack.status,...(excerpt!==output?{omitted:true}:{})};
+   }else result={deleted:true,operation_id:args.operation_id};
+  }
+  if(result===undefined)throw Error('Unavailable output');
+  return result;
+ }
+ callInstructionTool(name:string,input:unknown) {
+  const args=input as Record<string,unknown>;
+  if(name==='list_instructions'){
+   if(!args||typeof args!=='object'||Array.isArray(args)||Object.keys(args).length)throw Error('Invalid list arguments');
+   return {ok:true,value:{instructions:this.instructionSource().map(({key})=>({key,name:instructionNames[key]}))}} as const;
+  }
+  if(name==='get_instruction'){
+   if(!args||typeof args!=='object'||Array.isArray(args)||Object.keys(args).length!==1||!isInstructionKey(args.key))throw Error('Invalid get arguments');
+   return {ok:true,value:this.instructionSource().find(item=>item.key===args.key)!} as const;
+  }
+  if(name!=='update_instruction'||!args||typeof args!=='object'||Array.isArray(args)||Object.keys(args).length!==3||Object.keys(args).some(key=>!['key','content','expected_content'].includes(key))||!isInstructionKey(args.key)||typeof args.content!=='string'||typeof args.expected_content!=='string')throw Error('Invalid update arguments');
+  try{
+   const result=this.instructionEditor!.update(args.key,args.content,args.expected_content) as Instruction;
+   this.notifyInstructionChanges();
+   return {ok:true,value:{...result,variables:instructionVariables(result.key,result.content)}} as const;
+  }catch(error){
+   return {ok:false,value:{error:error instanceof Error?error.message:'保存できませんでした',current:this.instructionSource().find(item=>item.key===args.key)??null}} as const;
+  }
+ }
  private async pendingTaskEvents(c:Conversation,session:Session|undefined){
   if(c.projectId===INSTRUCTIONS_CHAT_ID||!this.taskEvents)return undefined;
   this.taskEvents.capture(c.projectId,c.taskId);
@@ -796,54 +872,22 @@ export class ChatService {
    try{
     if(finished||active.controller.signal.aborted||!toolAllowed.has(name))throw Error('Invalid tool scope');
     if(c.projectId===INSTRUCTIONS_CHAT_ID){
-     const args=input as Record<string,unknown>;
-     if(name==='list_instructions'){if(!args||typeof args!=='object'||Array.isArray(args)||Object.keys(args).length)throw Error('Invalid list arguments');return toolResult({instructions:this.instructionSource().map(({key})=>({key,name:instructionNames[key]}))})}
-     if(name==='get_instruction'){if(!args||typeof args!=='object'||Array.isArray(args)||Object.keys(args).length!==1||!isInstructionKey(args.key))throw Error('Invalid get arguments');return toolResult(this.instructionSource().find(item=>item.key===args.key)!)}
-     if(!args||typeof args!=='object'||Array.isArray(args)||Object.keys(args).length!==3||Object.keys(args).some(name=>!['key','content','expected_content'].includes(name))||!isInstructionKey(args.key)||typeof args.content!=='string'||typeof args.expected_content!=='string')throw Error('Invalid update arguments');
-     try{const result=this.instructionEditor!.update(args.key,args.content,args.expected_content) as Instruction;this.emit(c,{name:'chat.changed',data:{}});return toolResult({...result,variables:instructionVariables(result.key,result.content)})}catch(error){return toolResult({error:error instanceof Error?error.message:'保存できませんでした',current:this.instructionSource().find(item=>item.key===args.key)??null},false)}
+     const result=this.callInstructionTool(name,input);
+     return result.ok?toolResult(result.value):toolResult(result.value,false);
     }
     if(workflow?.tools.some(tool=>tool.name===name)){
      const result=await workflow.provider.call(workflow.context,name,input);
      return {ok:true,text:boundedEmbeddedToolResult(result).contentItems[0]!.text};
     }
     if(!history||!this.taskEvents)throw Error('Invalid tool scope');
-    const args=eventToolArguments(name,input),provider=this.taskEvents;
-    if((args.event_id!==undefined&&args.event_id>history.through)||(args.change_id!==undefined&&args.change_id>history.through))throw Error('Invalid event range');
-    let result:unknown;
-    if(name==='list_events'){
-     const after=args.after??history.after,through=args.through??history.through;
-     if(after>through||through>history.through)throw Error('Invalid event range');
-     const page=provider.events(c.projectId,args.task_id??c.taskId,after,through,args.limit??20,args.kind?[args.kind]:defaultEventKinds);
-     const events=args.kind?page.events:page.events.map(({id,type,taskId,phase,path,previousPath,from,to,details,version,previousVersion,operationId})=>({
-      id,type,taskId,phase,path,previousPath,from,to,version,previousVersion,
-      operationId:operationId??undefined,details:details?.result===undefined?undefined:{result:details.result}
-     }));
-     result={...page,events,nextCursor:page.nextCursor??page.lastEventId};
-    }else if(name==='acknowledge_events'){
+    if(name==='acknowledge_events'){
+     const args=eventToolArguments(name,input);
      if(args.through<history.after||args.through>history.through)throw Error('Invalid acknowledgement');
      let through=args.through;await update((_ms,current)=>{through=current.lastEventId=Math.max(current.lastEventId,args.through)});
-     result={through};
-    }else if(name==='get_event'){
-     if(!provider.event)throw Error('Unavailable');result=provider.event(c.projectId,args.event_id);
-    }else if(name==='get_file_change'){
-     if(!provider.change)throw Error('Unavailable');result=provider.change(c.projectId,args.event_id);
-    }else if(name==='get_file_version'){
-     if(!provider.version)throw Error('Unavailable');result=provider.version(c.projectId,args.path,args.change_id);
-    }else if(name==='get_execution_output'){
-     let after=0,operation:any;
-     while(!operation){const page=provider.events(c.projectId,null,after,history.through,100);operation=page.events.find(event=>event.operationId===args.operation_id&&typeof event.packId==='string');if(operation||!page.hasMore)break;const next=page.nextCursor??page.lastEventId;if(next<=after)throw Error('Invalid event page');after=next}
-     if(!operation)throw Error('Unknown operation');
-     if((operation.taskId!==null&&!validTaskId(operation.taskId))||(operation.taskId===null?operation.phase!==null:!isTaskPhase(operation.phase)))throw Error('Invalid output scope');
-     const source=typeof operation.chatId==='string'?this.workflowSources(c.projectId,operation.taskId,operation.phase,operation.chatId):undefined;
-     const pack=source?.packs.find(pack=>pack.packId===operation.packId);
-     if(pack){
-      const output=pack.tool?.output??pack.content;
-      const excerpt=shorten(output,excerptLimit,jsonBytes,true);
-      result={deleted:false,operation_id:args.operation_id,output:excerpt,status:pack.status,...(excerpt!==output?{omitted:true}:{})};
-     }else result={deleted:true,operation_id:args.operation_id};
+     return toolResult({through});
     }
-    if(result===undefined||Buffer.byteLength(JSON.stringify(result),'utf8')>1048576)throw Error('Unavailable output');
-    return toolResult(result);
+    const result=this.callEventTool(c.projectId,c.taskId,history,name,input);
+    return {ok:true,text:boundedEmbeddedToolResult(result).contentItems[0]!.text};
    }catch(error){return toolResult({error:error instanceof EventToolArgumentsError?error.message:'Embedded tool request rejected or unavailable'},false)}
   };
   const targetPaths=(paths:readonly string[]=[])=>[...new Set(paths
