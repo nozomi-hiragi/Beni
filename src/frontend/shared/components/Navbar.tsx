@@ -26,8 +26,8 @@ export default function Navbar(props: NavbarProps) {
         <HomeIcon />
       </button>
     </Show>
-    <ManualTools scope={props.toolScope} page={props.toolsPage} unavailable={props.toolsUnavailable} />
     <strong class="min-w-0 truncate text-lg font-semibold tracking-tight">{props.title}</strong>
+    <ManualTools scope={props.toolScope} page={props.toolsPage} unavailable={props.toolsUnavailable} />
     <span class="flex-1" aria-hidden="true" />
     <UsageIndicators />
     <ul class="menu menu-horizontal rounded-box p-1">

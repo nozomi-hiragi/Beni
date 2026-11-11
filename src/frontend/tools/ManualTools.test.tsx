@@ -54,8 +54,10 @@ afterEach(() => {
 it('keeps the modal keyboard focus, ignores backdrop clicks, and lists the current scope', async () => {
   const { open, select, setCurrent, fetcher } = setup();
   const trigger = await screen.findByRole('button', { name: 'ツール' });
-  expect(screen.getByRole('button', { name: 'ホームへ戻る' }).nextElementSibling).toBe(trigger);
-  expect(trigger.nextElementSibling).toBe(screen.getByText('架空', { selector: 'strong' }));
+  const title = screen.getByText('架空', { selector: 'strong' });
+  expect(screen.getByRole('button', { name: 'ホームへ戻る' }).nextElementSibling).toBe(title);
+  expect(title.nextElementSibling).toBe(trigger);
+  expect(trigger.nextElementSibling?.getAttribute('aria-hidden')).toBe('true');
   const view = open();
   const dialog = screen.getByRole('dialog', { name: 'ツール' });
   const heading = view.getByRole('heading', { name: 'ツール' });
