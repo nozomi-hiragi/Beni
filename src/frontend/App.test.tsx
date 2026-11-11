@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { FakeWebSocket } from './test/test-events';
 import { cleanup, fireEvent, render, screen, within, waitFor } from '@solidjs/testing-library';
-import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, expect, it, onTestFinished, vi } from 'vitest';
 import App, { parseRoute } from './App';
 
 const projects = [{ id:'019a0000-0000-7000-8000-000000000001', name: '架空プロジェクト', folder: '/tmp/a' }, { id:'019a0000-0000-7000-8000-000000000002', name: '空プロジェクト', folder: '/tmp/b' }, { id:'019a0000-0000-7000-8000-000000000003', name: '別プロジェクト', folder: '/tmp/c' }];
@@ -228,4 +228,68 @@ it('recognizes a direct instruction management URL', async () => {
   expect(await screen.findByRole('region', {name:'インストラクション相談'})).toBeTruthy();
   expect(screen.queryByRole('heading', {level:1})).toBeNull();
   expect(screen.queryByRole('heading', {name:'設定',level:1})).toBeNull();
+});
+
+it('uses the current URL scope for manual tools and preserves the chat draft', async () => {
+  // jsdom implements the dialog element and open attribute without modal methods.
+  const dialog = HTMLDialogElement.prototype;
+  if (!dialog.showModal) {
+    Object.assign(dialog, {
+      showModal(this: HTMLDialogElement) { this.open = true; },
+      close(this: HTMLDialogElement) { this.open = false; },
+    });
+    onTestFinished(() => { Reflect.deleteProperty(dialog, 'showModal'); Reflect.deleteProperty(dialog, 'close'); });
+  }
+  const original = fetch;
+  const path = `/project/${projects[0].id}`;
+  const requests: string[] = [];
+  vi.stubGlobal('fetch', vi.fn((url: string, init?: RequestInit) => {
+    if (url === '/api/tools' && init?.method === 'POST') {
+      const request = JSON.parse(String(init.body));
+      return Promise.resolve(json({ operation: {
+        ...request, id: request.operationId, label: '架空プロジェクト / 一つ目', phase: 'requirements',
+        status: 'completed', createdAt: '2026-01-01T00:00:00.000Z', output: 'ツールの結果',
+      } }));
+    }
+    if (!url.startsWith('/api/tools?')) return original(url, init);
+    requests.push(url);
+    const search = new URL(url, location.href).searchParams;
+    const taskId = search.get('taskId');
+    return Promise.resolve(json({
+      scope: search.get('kind') === 'instructions' ? { kind: 'instructions' } : { kind: 'project', projectId: projects[0].id, taskId },
+      label: taskId ? '架空プロジェクト / 一つ目' : search.get('kind') === 'instructions' ? '共通のインストラクション' : '架空プロジェクト',
+      phase: taskId ? 'requirements' : null, revision: 'test', tools: taskId ? [{
+        name: 'list_events', description: 'イベント一覧を取得', category: 'events', effect: 'read',
+        inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+      }] : [],
+    }));
+  }));
+  pop(`${path}?task=${tasks[0].id}`);
+  render(() => <App />);
+  const draft = await screen.findByRole('textbox', { name: '希望や回答を入力' });
+  fireEvent.input(draft, { target: { value: 'チャットの下書き' } });
+  const open = () => {
+    fireEvent.click(screen.getByRole('button', { name: 'ツール' }));
+    return within(screen.getByRole('dialog', { name: 'ツール' }));
+  };
+  let view = open();
+  expect(await view.findByText(/対象：架空プロジェクト \/ 一つ目/)).toBeTruthy();
+  fireEvent.click(await view.findByRole('button', { name: /list_events/ }));
+  fireEvent.click(view.getByRole('button', { name: '実行' }));
+  expect(await view.findByText('ツールの結果')).toBeTruthy();
+  fireEvent.click(view.getByRole('button', { name: '閉じる' }));
+  expect(draft).toHaveProperty('value', 'チャットの下書き');
+  expect(within(screen.getByRole('log', { name: 'チャット履歴' })).queryByText('ツールの結果')).toBeNull();
+  pop(path);
+  view = open();
+  await view.findByText('対象：架空プロジェクト');
+  pop('/instructions');
+  await waitFor(() => expect(screen.queryByRole('dialog', { name: 'ツール' })).toBeNull());
+  view = open();
+  await view.findByText('対象：共通のインストラクション');
+  expect(requests).toEqual([
+    `/api/tools?kind=project&projectId=${projects[0].id}&taskId=${tasks[0].id}`,
+    `/api/tools?kind=project&projectId=${projects[0].id}`,
+    '/api/tools?kind=instructions',
+  ]);
 });

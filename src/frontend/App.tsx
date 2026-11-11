@@ -5,6 +5,7 @@ import Navbar from './shared/components/Navbar';
 import SettingsPage from './settings/SettingsPage';
 import InstructionsPage from './instructions/InstructionsPage';
 import ProjectPage from './project/ProjectPage';
+import type { ManualToolScope } from '../shared/manual-tools';
 
 type Route = { kind: 'home' } | { kind: 'settings' } | { kind: 'instructions' } | { kind: 'project'; id: string; task?: string; invalidTask: boolean } | { kind: 'not-found' };
 export function parseRoute(url: URL): Route {
@@ -23,6 +24,11 @@ export default function App() {
   const [route, setRoute] = createSignal<Route>(parseRoute(new URL(window.location.href)));
   const [projectTitle, setProjectTitle] = createSignal<{ id: string; name: string }>();
   const projectId = createMemo(() => { const current = route(); return current.kind === 'project' ? current.id : undefined; });
+  const toolScope = createMemo<ManualToolScope | undefined>(() => {
+    const current = route();
+    if (current.kind === 'instructions') return { kind: 'instructions' };
+    if (current.kind === 'project' && !current.invalidTask) return { kind: 'project', projectId: current.id, taskId: current.task };
+  });
   const projectRoute = () => { const current = route(); return current.kind === 'project' ? current : undefined; };
   const navigate = (path: string) => {
     if (path === `${window.location.pathname}${window.location.search}`) return;
@@ -36,7 +42,7 @@ export default function App() {
     onCleanup(() => window.removeEventListener('popstate', pop));
   });
   return <div class="flow-root" classList={{ 'instructions-shell': route().kind === 'instructions', 'project-shell': route().kind === 'project' }}>
-    <Navbar title={route().kind === 'project' ? (projectTitle()?.id === projectId() ? projectTitle()!.name : 'プロジェクト') : route().kind === 'settings' ? '設定' : route().kind === 'instructions' ? 'インストラクション管理' : 'Beni'} showHome={route().kind !== 'home'} onHome={home} onInstructions={() => navigate('/instructions')} onSettings={() => navigate('/settings')} />
+    <Navbar title={route().kind === 'project' ? (projectTitle()?.id === projectId() ? projectTitle()!.name : 'プロジェクト') : route().kind === 'settings' ? '設定' : route().kind === 'instructions' ? 'インストラクション管理' : 'Beni'} toolScope={toolScope()} toolsPage={route().kind} toolsUnavailable={projectRoute()?.invalidTask ? 'このプロジェクトのタスクが見つかりません' : undefined} showHome={route().kind !== 'home'} onHome={home} onInstructions={() => navigate('/instructions')} onSettings={() => navigate('/settings')} />
     <main class="mx-auto w-full px-2 py-2">
       <Show when={route().kind === 'home'}><HomePage onOpenProject={project => { setProjectTitle({ id: project.id, name: project.name }); navigate(`/project/${project.id}`); }} onOpenTask={(task, project) => { setProjectTitle({ id: project.id, name: project.name }); navigate(`/project/${project.id}?task=${task.id}`); }} /></Show>
       <Show when={projectId()} keyed>{id => <ProjectPage id={id} task={projectRoute()?.task} invalidTask={projectRoute()?.invalidTask ?? false} onHome={home} onTitle={name => setProjectTitle({ id, name })} onTaskChange={task => navigate(`/project/${id}${task === undefined ? '' : `?task=${task}`}`)} />}</Show>

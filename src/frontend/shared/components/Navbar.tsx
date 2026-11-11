@@ -3,9 +3,14 @@ import HomeIcon from './icons/HomeIcon';
 import DocumentIcon from './icons/DocumentIcon';
 import SettingsIcon from './icons/SettingsIcon';
 import UsageIndicators from './UsageIndicators';
+import type { ManualToolScope } from '../../../shared/manual-tools';
+import ManualTools from '../../tools/ManualTools';
 
 export interface NavbarProps {
   title: string;
+  toolScope?: ManualToolScope;
+  toolsUnavailable?: string;
+  toolsPage?: string;
   showHome: boolean;
   onHome: () => void;
   onInstructions: () => void;
@@ -23,6 +28,7 @@ export default function Navbar(props: NavbarProps) {
     <span class="flex-1" aria-hidden="true" />
     <UsageIndicators />
     <ul class="menu menu-horizontal rounded-box p-1">
+      <ManualTools scope={props.toolScope} page={props.toolsPage} unavailable={props.toolsUnavailable} />
       <li>
         <button type="button" class="tooltip tooltip-bottom" data-tip="インストラクション管理" aria-label="インストラクション管理" onClick={props.onInstructions}>
           <DocumentIcon />

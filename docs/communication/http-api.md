@@ -253,7 +253,7 @@ status/state は生成状態を表します。正常終了したアシスタン�
 
 `GET /api/instructions` は `{instructions: [{key, content}], editorState: {pending, busy}, provenance}` を返します。Markdownテンプレートを変数未展開で取得します。`pending` は保存された編集用プロンプトと会話に適用済みの本文の差、`busy` は編集相談の送信準備・生成中を示します。`provenance` は根拠を持つテンプレートだけを含む、指示キーから `DocumentProvenance` への対応です。
 
-`POST /api/instructions/apply` は `{expected_content: string}` を受け取り、保存された編集用本文と一致し、会話が実行中でないときに新しい空の会話へ切り替えます。成功時は `{editorState: {pending: false, busy: false}}` を返します。同一originを必須とし、本文の競合や実行中は409です。変更なしなら会話をリセットしません。成功時は `chat.changed` で各クライアントに通知します。適用リクエストだけは64KiBの本文がJSONエスケープで膨らむ場合に対応し、リクエスト上限を `65536 * 6 + 1024` バイトとします。他のAPIは64KiBの上限を維持します。本文自体のHTTP更新APIはありません。詳細は [インストラクション管理](../features/instructions.md) を参照してください。
+`POST /api/instructions/apply` は `{expected_content: string}` を受け取り、保存された編集用本文と一致し、会話が実行中でないときに新しい空の会話へ切り替えます。成功時は `{editorState: {pending: false, busy: false}}` を返します。同一originを必須とし、本文の競合や実行中は409です。変更なしなら会話をリセットしません。成功時は `chat.changed` で各クライアントに通知します。適用リクエストだけは64KiBの本文がJSONエスケープで膨らむ場合に対応し、リクエスト上限を `65536 * 6 + 1024` バイトとします。手動ツール API の上限は後述し、それ以外の API は64KiBの上限を維持します。本文自体のHTTP更新APIはありません。詳細は [インストラクション管理](../features/instructions.md) を参照してください。
 
 ### インストラクション編集相談
 
@@ -264,3 +264,23 @@ WebSocketも `chat` トピックに限りこのスコープを許可します。
 編集相談の送信では `instructionFocus`（`common`、各フェーズのキー、`editor` のいずれか）を必須とします。未選択・未知の対象は履歴追加前に拒否します。会話の `lastInstructionFocus` は最後に受理された送信の対象を表し、クリックによる選択とは別です。
 
 フォーカス対象のキー・本文は初回、対象変更、保存本文変更、新しいLLMセッション開始時に渡します。全テンプレートを毎回送信せず、編集相談専用の `list_instructions`・`get_instruction` で必要な指示を取得します。これらはLLMの埋め込みツールであり、追加のHTTPエンドポイントではありません。
+
+## 手動ツール
+
+Navbar の [ツール](../features/manual-tools.md) はモデルや CLI を呼ばず、Beni の埋め込みツールを直接実行する。会話やパックには操作内容を追加しない。
+
+対象 `scope` は、プロジェクトなら `{kind: "project", projectId, taskId?}`、インストラクションなら `{kind: "instructions"}` とする。タスクを指定する場合は所属プロジェクトを検証し、フェーズはサーバーが現在の状態から解決する。GET では同じ項目をクエリに指定する。
+
+| API | 入力・返却 |
+| --- | --- |
+| `GET /api/tools` | 対象を指定し、`{scope, label, phase, revision, tools, disabledReason?}` を取得する |
+| `POST /api/tools` | `{scope, revision, operationId, name, input}` を送り、`{operation}` を取得する |
+| `GET /api/tools/operations/:operationId` | 同じ対象をクエリに指定し、保存された `{operation}` を取得する |
+
+`tools` の各項目は `name`、`description`、`category`（`events`・`documents`・`instructions`）、`effect`（`read`・`write`・`complete`）、`inputSchema` を持つ。`revision` は一覧取得時の定義と実行条件を表し、実行受付時に再検証する。`disabledReason` がある場合は実行できない。
+
+`operation` は `id`、`scope`、`label`、`phase`、`name`、`input`、`status`、`createdAt`、`updatedAt` と、必要に応じて `output`・`error` を返す。状態は `running`・`completed`・`failed`・`interrupted`・`unknown`。新規操作の `phase` は受付時の実フェーズ（プロジェクト単体・指示は `null`）を保存する。結果は専用ダイアログで表示し、チャット同期には載せない。
+
+新規受付は202、同じ操作の再受付は200。不正な引数は400、対象・操作の不存在や別スコープの参照は404、実行条件の変更や競合は409、本文超過は413を返す。
+
+POST は既存 API と同じ origin 検証を適用する。本文上限は `65536 * 6 * 2 + 4096`（790528 バイト）とし、インストラクションの新旧本文がそれぞれ JSON エスケープで膨らむ場合も扱う。操作 ID の再利用は同じ対象・ツール・引数の場合だけ既存結果を返す。異なる入力での再利用、古い定義、実行中の競合は拒否する。通信切断時には GET で照合し、別 ID で自動再送しない。スコープ外の操作結果は返さない。

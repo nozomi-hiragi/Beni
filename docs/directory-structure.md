@@ -32,6 +32,7 @@ Beni/
 │   │   ├── project-files.ts          作業フォルダーの一覧・テキスト読み取り
 │   │   ├── rate-limits.ts            CLI が返す利用枠の正規化
 │   │   ├── embedded-tools.ts         LLM向けイベント参照ツールの定義・入力検証
+│   │   ├── manual-tools.ts           手動ツールの対象検証・直接実行・状態照合
 │   │   ├── terminal.ts               PTY・端末画面・操作権・終了処理
 │   │   ├── terminal.test.ts          シェルの存続・排他・画面復元・HTTP/WSのテスト
 │   │   ├── events.ts                 共通 WS の接続・購読・送信上限と解放処理
@@ -48,6 +49,7 @@ Beni/
 │   │   ├── task-phase.ts             共通のフェーズ識別子と検証
 │   │   ├── agent.ts                  Agent ID・登録情報・接続状態の共通型
 │   │   ├── chat-commands.ts          コマンドの一覧・接続先別の対応・入力解析
+│   │   ├── manual-tools.ts           手動ツールの API 型と引数スキーマ検証
 │   │   ├── communication.ts          パック・WS メッセージの型、受信検証、ハッシュ
 │   │   └── project-files.ts          プロジェクトファイル一覧・プレビューの型
 │   └── frontend/                     ブラウザーで動く SolidJS の画面
@@ -75,6 +77,9 @@ Beni/
 │       │       └── TreeView.tsx      項目の階層表示と選択
 │       ├── instructions/
 │       │   └── InstructionsPage.tsx インストラクション管理画面
+│       ├── tools/
+│       │   ├── ManualTools.tsx       Navbar のツール一覧・実行・結果ダイアログ
+│       │   └── ToolArguments.tsx     引数スキーマに応じた入力フォーム
 │       ├── settings/
 │       │   └── SettingsPage.tsx     登録済み Agent の接続状態と利用枠の確認
 │       ├── shared/

@@ -10,6 +10,7 @@ import { INSTRUCTIONS_CHAT_ID, validId, isProvider, type Provider } from '../sha
 import { validProjectId, validTaskId } from '../shared/ids';
 import { implementationPlanReady } from './documents';
 import { DocumentWorkflow } from './document-workflow';
+import { ManualTools, ManualToolRequestError, manualToolQueryScope } from './manual-tools';
 import { listProjectFiles, readProjectFile, validProjectFilePath } from './project-files';
 import type { DocumentVersion } from './document-table';
 import { isAbsolute, dirname, join, resolve } from 'node:path';
@@ -21,6 +22,8 @@ const maxListedFolders = 500;
 const maxRequestBodyBytes = 65536;
 // JSON の Unicode エスケープは本文の UTF-8 1 byte あたり最大 6 bytes。キー等の分も確保する。
 const maxInstructionApplyBodyBytes = maxRequestBodyBytes * 6 + 1024;
+// update_instruction は本文と競合確認用の旧本文を同じリクエストで送る。
+const maxManualToolBodyBytes = maxRequestBodyBytes * 2 * 6 + 4096;
 function requestAccess(publicOrigin?: string) {
  const configured = publicOrigin === undefined ? undefined : new URL(publicOrigin);
  if (configured && (configured.protocol !== 'https:' || configured.origin !== publicOrigin)) throw new Error('BENI_PUBLIC_ORIGIN must be an exact HTTPS origin');
@@ -82,6 +85,7 @@ const projectForScope = (store:Store,projectId:unknown,taskId:unknown) => {
 export function createHandler(store: Store, initialFolder = homedir(), chat = new ChatService(projectResolver(store),createAgents()), publicOrigin?: string, terminals = new TerminalService(), taskEventsChanged:(p:string,t:string)=>void=()=>{}, documentsChanged:(p:string,t:string)=>void=()=>{}) {
  const changed=(p:string,t:string)=>{taskEventsChanged(p,t);documentsChanged(p,t)};
  const workflow=new DocumentWorkflow(store,chat,projectResolver(store),changed,()=>chat.notifyInstructionChanges());
+ const manualTools=new ManualTools(store,chat,workflow);
  chat.setWorkflowTools(workflow);
  workflow.kickJobs();
  chat.setInstructions(()=>store.instructions());
@@ -160,6 +164,9 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
     }
    }
    if (url.pathname === '/api/terminals') {const p=url.searchParams.get('projectId');if(!scope(p,null))return json({error:'プロジェクトが見つかりません'},404);return json(terminals.list(p as string))}
+   if (url.pathname === '/api/tools') return json(manualTools.catalog(manualToolQueryScope(url.searchParams)));
+   const toolOperation = url.pathname.match(/^\/api\/tools\/operations\/([^/]+)$/);
+   if (toolOperation) return json({operation:manualTools.operation(manualToolQueryScope(url.searchParams),toolOperation[1]!)});
    if (url.pathname === '/api/instructions') {
     const editorState = await chat.instructionEditorState();
     const versions = instructionKeys.map(key => ({key,version:store.instructionDocument(key)!}));
@@ -243,16 +250,26 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
       instructionJob
      }});}catch{return json({error:'文書を読み込めませんでした'},500)} }
    return json({error:'見つかりません'},404);
-   } catch {return json({error:'保存データを読み込めませんでした'},500)}
+   } catch(error) {return error instanceof ManualToolRequestError?json({error:error.message},error.status):json({error:'保存データを読み込めませんでした'},500)}
   }
   if (request.method !== 'POST' || !access(request).sameOrigin || request.headers.get('content-type') !== 'application/json') return json({error:'アクセスできません'},403);
   try {
-   const bodyLimit = url.pathname === '/api/instructions/apply' ? maxInstructionApplyBodyBytes : maxRequestBodyBytes;
+   const bodyLimit = url.pathname === '/api/tools' ? maxManualToolBodyBytes :
+    url.pathname === '/api/instructions/apply' ? maxInstructionApplyBodyBytes : maxRequestBodyBytes;
    if (Number(request.headers.get('content-length') || 0)>bodyLimit) return json({error:'入力が長すぎます'},413);
    const body = await request.text();
    if (new TextEncoder().encode(body).byteLength > bodyLimit) return json({error:'入力が長すぎます'},413);
    const input = JSON.parse(body) as Record<string,unknown>;
    if (!input || typeof input !== 'object' || Array.isArray(input)) return json({error:'入力を確認してください'},400);
+   if (url.pathname === '/api/tools') {
+    try {
+     const result=manualTools.accept(input);
+     return json({operation:result.operation},result.status);
+    } catch (error) {
+     if (error instanceof ManualToolRequestError) return json({error:error.message},error.status);
+     return json({error:'操作を受け付けられませんでした'},500);
+    }
+   }
    if (agentId) {
     if (Object.keys(input).length) return json({error:'入力を確認してください'},400);
     return chat.hasAgent(agentId)?json(await chat.refreshAgentUsage(agentId)):json({error:'接続先が見つかりません'},404);
@@ -383,6 +400,7 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
     if(!validProjectId(p)||!scope(p,t))return json({error:'タスクが見つかりません'},404);
     const task=store.task(t)!;
     if(task.status!=='completed'||store.instructionJob(p,t)?.status!=='failed')return json({error:'再試行できる指示更新がありません'},409);
+    if (chat.manualToolBusy(p,t) || chat.manualToolBusy(INSTRUCTIONS_CHAT_ID,null)) return json({error:'ツールの処理中は再試行できません'},409);
     store.retryInstructionJob(p,t);
     workflow.kickJobs();
     changed(p,t);
@@ -398,6 +416,7 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
    if (renameMatch) {
     if (typeof input.name !== 'string' || !input.name.trim()) return json({error:'タスク名を入力してください'},400);
     if (!validTaskId(renameMatch[1]) || !scope(input.projectId, renameMatch[1])) return json({error:'タスクが見つかりません'},404);
+    if (chat.manualToolBusy(input.projectId as string,renameMatch[1]!)) return json({error:'ツールの処理中は名前を変更できません'},409);
     try { const task=store.renameTask(input.projectId as string, renameMatch[1]!, input.name); taskEventsChanged(input.projectId as string,renameMatch[1]!); return json(projectTask(task)); }
     catch { return json({error:'タスク名を保存できませんでした'},500); }
    }
@@ -436,7 +455,7 @@ export function createServerOptions(store:Store,initialFolder=homedir(),chat=new
   }},
  });
  const handle=createHandler(store,initialFolder,chat,publicOrigin,terminals,notifyTaskEvents,notifyDocuments);
- return {maxRequestBodySize:maxInstructionApplyBodyBytes,websocket,fetch(request:Request,server:Server<SocketData>){const url=new URL(request.url);if(url.pathname!=='/api/ws')return handle(request);if(request.method!=='GET'||!access(request).allowed||!access(request).sameOrigin||request.headers.get('sec-fetch-site')==='cross-site')return new Response('Forbidden',{status:403});if(!server.upgrade(request,{data:{ready:false,used:new Set(),subscriptions:new Map()}}))return new Response('WebSocket upgrade required',{status:400});return undefined}};
+ return {maxRequestBodySize:maxManualToolBodyBytes,websocket,fetch(request:Request,server:Server<SocketData>){const url=new URL(request.url);if(url.pathname!=='/api/ws')return handle(request);if(request.method!=='GET'||!access(request).allowed||!access(request).sameOrigin||request.headers.get('sec-fetch-site')==='cross-site')return new Response('Forbidden',{status:403});if(!server.upgrade(request,{data:{ready:false,used:new Set(),subscriptions:new Map()}}))return new Response('WebSocket upgrade required',{status:400});return undefined}};
 }
 export function dataPaths(environment: Record<string,string|undefined> = process.env, cwd = process.cwd()) {
  const dataDirectory = environment.BENI_DATA_DIR ? resolve(cwd,environment.BENI_DATA_DIR) : fileURLToPath(new URL('../../data',import.meta.url));
