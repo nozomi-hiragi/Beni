@@ -550,7 +550,7 @@ it('初回から実装実行中のタスクはexecution会話をreadOnlyで表�
  expect(posted).toEqual([]);
 });
 
-it('自動精査の進捗と再試行に応じて反省会のチャットと完了操作を切り替え、指示更新も再試行できる', async () => {
+it('自動精査の進捗と再試行に応じて反省会のチャットと完了操作を切り替え、タスク完了ワークフローも再試行できる', async () => {
   const projectId = '019a0000-0000-7000-8000-000000000001';
   const id = '019a0000-0000-7100-8000-000000000099';
   const task = { id, projectId, name: '精査の確認', phase: 'retrospective', status: 'idle' };
@@ -620,10 +620,10 @@ it('自動精査の進捗と再試行に応じて反省会のチャットと完�
   documents.push({ path: 'knowledge.md', name: 'knowledge.md', content: '# 次回に活かす知識', version: 1 });
   workflow.instructionJob = { status: 'failed', error: '更新に失敗しました' };
   notify();
-  fireEvent.click(await screen.findByRole('button', { name: 'インストラクションの更新を再試行' }));
-  await screen.findByText('インストラクションの更新 · 処理中');
+  fireEvent.click(await screen.findByRole('button', { name: 'タスク完了ワークフローを再試行' }));
+  await screen.findByText('タスク完了ワークフロー · 処理中');
   expect(screen.getByRole('tab', { name: 'ナレッジ' }).getAttribute('aria-selected')).toBe('true');
   expect(screen.getByRole('heading', { name: '次回に活かす知識' })).toBeTruthy();
-  expect(screen.queryByRole('button', { name: 'インストラクションの更新を再試行' })).toBeNull();
+  expect(screen.queryByRole('button', { name: 'タスク完了ワークフローを再試行' })).toBeNull();
   expect(retries).toEqual([`/api/tasks/${id}/stop-review`, `/api/tasks/${id}/retry-review`, `/api/tasks/${id}/retry-review`, `/api/tasks/${id}/retry-instructions`]);
 });

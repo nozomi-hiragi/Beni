@@ -54,6 +54,11 @@ it('uses a registered agent for models, command aliases, settings and usage', as
   const text = screen.getByRole<HTMLTextAreaElement>('textbox',{name:'希望や回答を入力'});
   fireEvent.click(options.getByRole('option',{name:'試験エージェント/Two'}));
   await waitFor(() => expect(models.value).toBe('test-agent:two'));
+  fireEvent.click(screen.getByRole('button',{name:'コマンド'}));
+  fireEvent.click(screen.getByText('会話操作',{selector:'summary'}));
+  expect(screen.getByRole('button',{name:'/inspect · 状態を調査'})).toBeTruthy();
+  expect(screen.queryByRole('button',{name:'/usage · 使用量を表示'})).toBeNull();
+  fireEvent.click(screen.getByRole('button',{name:'コマンド'}));
   fireEvent.input(text,{target:{value:'/ch'}});
   expect(screen.getByRole('option',{name:'/inspect · 状態を調査'})).toBeTruthy();
   expect(screen.queryByRole('option',{name:'/compact · 会話を圧縮'})).toBeNull();
@@ -103,6 +108,62 @@ it('preserves the selected model and history when the registry is empty', async 
   fireEvent.input(text,{target:{value:'新しい質問'}});
   fireEvent.submit(text.form!);
   expect(screen.getByRole<HTMLButtonElement>('button',{name:'送信'}).disabled).toBe(true);
+  fireEvent.input(text,{target:{value:'/'}});
+  expect(screen.queryByRole('listbox',{name:'スラッシュコマンド'})).toBeNull();
   expect(JSON.parse(localStorage.getItem(storageKey)!)).toEqual(saved);
   expect(fetchMock.mock.calls.some(([path]) => path.endsWith('/status') || path === '/api/chat/send')).toBe(false);
+});
+
+it('利用枠非対応でも接続状態の更新はPOSTで再確認する', async () => {
+  const agent: AgentInfo = {id:'local-agent',name:'ローカル接続',supportsUsage:false,commands:[]};
+  const status: AgentConnectionStatus = {availability:'not-installed',auth:'unknown',models:null,checkedAt:'2026-01-01T00:00:00Z',usage:'unknown'};
+  const fetchMock=vi.fn(async(path:string,init?:RequestInit)=>{
+    if(path==='/api/agents')return Response.json({agents:[agent]});
+    if(path==='/api/agents/local-agent/status')return Response.json(init?.method==='POST'?{...status,availability:'ready',auth:'not-required'}:status);
+    throw Error(path);
+  });
+  vi.stubGlobal('fetch',fetchMock);
+  render(()=><SettingsPage />);
+  const refresh=await screen.findByRole<HTMLButtonElement>('button',{name:'ローカル接続 の接続状態を更新'});
+  await waitFor(()=>expect(refresh.disabled).toBe(false));
+  fireEvent.click(refresh);
+  await waitFor(()=>expect(fetchMock).toHaveBeenCalledWith('/api/agents/local-agent/status',expect.objectContaining({method:'POST'})));
+  expect(await screen.findByText('認証不要')).toBeTruthy();
+});
+
+it.each([
+  {name:'Codex の空のコマンド定義',provider:'codex',registryStatus:200},
+  {name:'Claude の空のコマンド定義',provider:'claude',registryStatus:200},
+  {name:'登録 API の 404',provider:'codex',registryStatus:404},
+  {name:'登録 API の 405',provider:'codex',registryStatus:405},
+])('$name から固有候補や圧縮を推測しない', async ({provider,registryStatus}) => {
+  const agent: AgentInfo = {id:provider,name:'試験接続先',supportsUsage:false,supportsContextUsage:true,commands:[]};
+  const legacy = registryStatus !== 200;
+  const statusPath = legacy ? '/api/codex/status' : `/api/agents/${provider}/status`;
+  const models = [{id:'test',name:'Test'}];
+  const fetchMock = vi.fn(async (path:string) => {
+    if (path === '/api/agents') return legacy ? Response.json({}, {status:registryStatus}) : Response.json({agents:[agent]});
+    if (path === statusPath) return Response.json(legacy
+      ? {installed:true,auth:'chatgpt',models}
+      : {availability:'ready',auth:'not-required',models});
+    if (legacy && path === '/api/claude/status') return Response.json({installed:false,auth:'none',models:[]});
+    if (path.startsWith('/api/chat?')) return Response.json({id:'empty-commands',messages:[],selectedModel:{id:'test',name:'Test',provider},sessionProvider:provider,threadId:'saved-thread',contextUsage:{usedTokens:10,maxTokens:100}});
+    const packs = packResponse(path, []); if (packs) return packs;
+    throw new Error(path);
+  });
+  vi.stubGlobal('fetch',fetchMock);
+  render(() => <ChatPanel projectId="empty-commands" />);
+  await waitFor(() => { expect(chatModelPicker().value).toBe(`${provider}:test`); expect(chatModelPicker().disabled).toBe(false); });
+  const text = screen.getByRole<HTMLTextAreaElement>('textbox',{name:'希望や回答を入力'});
+  fireEvent.input(text,{target:{value:'/'}});
+  expect(screen.getAllByRole('option').map(option => option.textContent)).toEqual(['/clear · 履歴を残して新しい会話']);
+  fireEvent.input(text,{target:{value:'/review'}}); fireEvent.submit(text.form!);
+  expect(await screen.findByText('不明なコマンドです。')).toBeTruthy();
+  fireEvent.click(screen.getByRole('button',{name:'コマンド'}));
+  expect(screen.queryByText('生成',{selector:'summary'})).toBeNull();
+  fireEvent.contextMenu(screen.getByRole('img',{name:/コンテキスト:/}));
+  const compact = screen.getByRole<HTMLButtonElement>('menuitem',{name:'圧縮'});
+  expect(compact.disabled).toBe(true); fireEvent.click(compact);
+  expect(fetchMock.mock.calls.some(([path]) => path === statusPath)).toBe(true);
+  expect(fetchMock.mock.calls.some(([path]) => path === '/api/chat/send' || path === '/api/chat/commands')).toBe(false);
 });

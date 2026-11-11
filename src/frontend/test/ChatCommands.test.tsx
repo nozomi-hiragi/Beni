@@ -3,11 +3,27 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@solidjs/te
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { modelStatus, resetModelCache } from '../shared/model-cache';
 import { chatModelPicker, FakeWebSocket, packResponse, stubLegacyAgentFetch } from './test-events';
+import type { AgentInfo } from '../../shared/agent';
 import type { ChatCommand } from '../../shared/chat-commands';
 import type { ChatMessage, Conversation } from '../shared/types';
 import ChatPanel, { type ChatTabStatus } from '../shared/components/ChatPanel';
 
 const json = (data: unknown, status = 200) => ({ok: status < 400, status, json: async () => data}) as Response;
+const agents: readonly AgentInfo[] = [
+  {id:'codex',name:'Codex',supportsUsage:true,supportsContextUsage:true,commands:[
+    {name:'compact',description:'会話を圧縮',kind:'maintenance',requiresSession:true},
+    {name:'review',description:'変更をレビュー',kind:'generation',requiresSession:false,argumentHint:'[対象]'},
+    {name:'recap',description:'会話を要約',kind:'generation',requiresSession:false},
+  ]},
+  {id:'claude',name:'Claude',supportsUsage:true,supportsContextUsage:true,commands:[
+    {name:'compact',description:'会話を圧縮',kind:'maintenance',requiresSession:true},
+    {name:'usage',description:'使用量を表示',kind:'maintenance',requiresSession:true,aliases:['cost','stats']},
+    {name:'code-review',description:'コードをレビュー',kind:'generation',requiresSession:false,aliases:['review'],argumentHint:'[対象]'},
+    {name:'simplify',description:'コードを簡潔にする',kind:'generation',requiresSession:false},
+    {name:'security-review',description:'安全性をレビュー',kind:'generation',requiresSession:false},
+    {name:'recap',description:'会話を要約',kind:'generation',requiresSession:false},
+  ]},
+];
 let serial = 0;
 beforeEach(() => { resetModelCache(); localStorage.clear(); FakeWebSocket.instances = []; vi.stubGlobal('WebSocket', FakeWebSocket); });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
@@ -16,8 +32,9 @@ async function setup(options: {noModels?: boolean; claude?: boolean; taskId?: st
   const projectId = options.instructions ? 'instructions' : `commands-${++serial}`;
   const snapshot: Conversation = {id:`conversation-${++serial}`,projectId,taskId:options.taskId ?? null,threadId:'saved-thread',sessionProvider:'codex',selectedModel:options.noModels ? null : {id:'test',name:'Test',provider:'codex'},contextUsage:options.contextUsage,messages: options.messages ?? (options.working ? [{id:'assistant',sendId:'send',role:'assistant',content:'',provider:'codex',model:'test',createdAt:'',updatedAt:'',status:'streaming'}] : []),command:options.command};
   const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
-    if (url === '/api/codex/status') return json({installed:true,auth:'chatgpt',models: options.noModels ? [] : [{id:'test',name:'Test'}]});
-    if (url === '/api/claude/status') return json({installed:!!options.claude,auth:options.claude ? 'claude' : 'none',models:options.claude ? [{id:'sonnet',name:'Sonnet'}] : []});
+    if (url === '/api/agents') return json({agents});
+    if (url === '/api/agents/codex/status') return json({availability:'ready',auth:'subscription',models: options.noModels ? [] : [{id:'test',name:'Test'}]});
+    if (url === '/api/agents/claude/status') return json({availability:options.claude ? 'ready' : 'not-installed',auth:options.claude ? 'subscription' : 'none',models:options.claude ? [{id:'sonnet',name:'Sonnet'}] : []});
     if (url.startsWith('/api/chat?')) return json({...snapshot});
     const packs = packResponse(url, snapshot.messages); if (packs) return packs;
     if (url === '/api/chat/context-usage') return options.contextResponse?.(init) ?? json({});
@@ -31,7 +48,7 @@ async function setup(options: {noModels?: boolean; claude?: boolean; taskId?: st
     if (url === '/api/chat/send' || url === '/api/chat/interrupt') return json({});
     throw new Error(`${url}: ${init?.method}`);
   });
-  stubLegacyAgentFetch(fetchMock);
+  vi.stubGlobal('fetch', fetchMock);
   const onBusyChange = vi.fn();
   const onTabStatusChange = vi.fn<(taskId: string | undefined, status: ChatTabStatus, failed?: boolean) => void>();
   const tabStatus = () => onTabStatusChange.mock.lastCall?.[1];
@@ -409,6 +426,7 @@ it('limits candidates to the selected provider and resets keyboard selection whe
 
 it('opens tab status when no model is available', async () => {
   const {fetchMock,tabStatus} = await setup({noModels:true,tabStatus:true}); input('/');
+  expect(screen.queryByRole('listbox',{name:'スラッシュコマンド'})).toBeNull();
   expect(screen.queryByRole('option',{name:'/compact · 会話を圧縮'})).toBeNull();
   input('/compact'); expect((screen.getByRole('button',{name:'送信'}) as HTMLButtonElement).disabled).toBe(true);
   tabStatus()!.open();

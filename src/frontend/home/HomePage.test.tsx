@@ -136,6 +136,64 @@ describe('project selection and cancellation', () => {
     await waitFor(() => expect((screen.getByRole('combobox', { name: 'プロジェクト' }) as HTMLSelectElement).value).toBe('019a0000-0000-7000-8000-00000000000a'));
     expect(request.mock.calls.filter(([path]) => path === '/api/projects')).toHaveLength(1);
   });
+
+  it('changes the selected project folder, keeps failed input, and refreshes the selected project', async () => {
+    const project = { id: '019a0000-0000-7000-8000-000000000001', name: '移動したプロジェクト', folder: '/tmp/old' };
+    const moved = { ...project, folder: '/tmp/new' };
+    const failure = deferred<Response>();
+    const conflict = 'この作業フォルダーは使用中です';
+    let stateCalls = 0;
+    let folderPosts = 0;
+    const request = vi.fn(async (path: string, init?: RequestInit) => {
+      if (path === '/api/state') {
+        stateCalls++;
+        const current = stateCalls === 1 ? { ...project, folderAvailable: false, storageError: '旧データを確認してください' } : moved;
+        return json({ projects: [current], tasks: [] });
+      }
+      if (path === '/api/folders/list') return json({ path: moved.folder, parent: '/tmp', directories: [], truncated: false });
+      if (path === `/api/projects/${project.id}/folder` && init?.method === 'POST') {
+        expect(JSON.parse(String(init.body))).toEqual({ folder: moved.folder });
+        folderPosts++;
+        return folderPosts === 1 ? failure.promise : json(moved);
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal('fetch', request);
+    const onOpenProject = vi.fn();
+    render(() => <HomePage onOpenTask={vi.fn()} onOpenProject={onOpenProject} />);
+    await screen.findByRole('option', { name: project.name });
+    const select = screen.getByRole<HTMLSelectElement>('combobox', { name: 'プロジェクト' });
+    const change = screen.getByRole<HTMLButtonElement>('button', { name: '作業フォルダーを変更' });
+    fireEvent.change(select, { target: { value: '' } });
+    expect(change.disabled).toBe(true);
+    fireEvent.change(select, { target: { value: project.id } });
+    expect(screen.getByRole('status').textContent).toContain('作業フォルダーが見つかりません');
+    expect(screen.getByRole('alert').textContent).toBe('旧データを確認してください');
+
+    fireEvent.click(change);
+    const dialog = screen.getByRole('dialog', { name: '作業フォルダーを変更' });
+    const folder = screen.getByRole<HTMLInputElement>('textbox', { name: '作業フォルダー' });
+    expect(folder.value).toBe(project.folder);
+    fireEvent.click(screen.getByRole('button', { name: '参照' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'このフォルダを選択' }));
+    const save = screen.getByRole<HTMLButtonElement>('button', { name: '保存' });
+    fireEvent.click(save);
+    expect(save.disabled).toBe(true);
+    fireEvent.submit(save.closest('form')!);
+    expect(folderPosts).toBe(1);
+    failure.resolve({ ok: false, status: 409, json: async () => ({ error: conflict }) } as Response);
+    expect((await screen.findByText(conflict)).closest('dialog')).toBe(dialog);
+    expect(folder.value).toBe(moved.folder);
+
+    fireEvent.click(save);
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: '作業フォルダーを変更' })).toBeNull());
+    expect(stateCalls).toBe(2);
+    expect(select.value).toBe(project.id);
+    expect(screen.queryByText('旧データを確認してください')).toBeNull();
+    expect(screen.queryByText(/作業フォルダーが見つかりません/)).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'プロジェクトを開く' }));
+    expect(onOpenProject).toHaveBeenCalledWith(moved);
+  });
 });
 
 describe('task list sorting', () => {

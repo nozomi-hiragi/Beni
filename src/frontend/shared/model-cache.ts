@@ -1,7 +1,7 @@
 import { createSignal, untrack } from 'solid-js';
 import { api, ApiError } from './api';
 import { isAgentId, type AgentConnectionStatus, type AgentInfo } from '../../shared/agent';
-import { beniChatCommands, commandsForProvider, type ChatCommandDefinition } from '../../shared/chat-commands';
+import { beniChatCommands, type ChatCommandDefinition } from '../../shared/chat-commands';
 import type { ClaudeStatus, CodexStatus, Model, Provider } from './types';
 
 type Selection = Model & { rejected?: boolean };
@@ -51,7 +51,6 @@ export const modelStatus = (provider: Provider) => Object.hasOwn(statuses(), pro
 export const providerReady = (provider: Provider = 'codex') => !!registeredAgent(provider) && modelStatus(provider)?.availability === 'ready';
 export const availableModels = (): Model[] => registeredAgents().flatMap(({id: provider}) => modelStatus(provider)?.models?.map(model => ({...model, provider})) ?? []);
 export function providerCommands(provider?: Provider): readonly ChatCommandDefinition[] {
-  if (registry()?.legacy) return commandsForProvider(provider);
   const agent = provider === undefined ? undefined : registeredAgent(provider);
   if (!agent) return [];
   const commands: ChatCommandDefinition[] = agent.commands.filter(command => command.name !== 'compact').map(command => ({
@@ -63,8 +62,6 @@ export function providerCommands(provider?: Provider): readonly ChatCommandDefin
 }
 export function providerSupportsCompaction(provider: Provider | undefined): boolean {
   if (!provider) return false;
-  const current = registry();
-  if (current?.legacy) return provider === 'codex' || provider === 'claude';
   return registeredAgent(provider)?.commands.some(command => command.kind === 'maintenance' && command.name === 'compact') ?? false;
 }
 export function selectedModel(scope: string): Selection | undefined {

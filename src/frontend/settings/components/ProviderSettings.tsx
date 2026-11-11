@@ -32,7 +32,6 @@ export default function ProviderSettings(props: { agent: AgentInfo }) {
     finally { setLoading(false); }
   }
   async function refresh() {
-    if (!props.agent.supportsUsage) return loadConnection();
     setLoading(true); setError('');
     try {
       await refreshProviderStatus(props.agent.id);

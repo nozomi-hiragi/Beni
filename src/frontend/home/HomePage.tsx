@@ -3,6 +3,7 @@ import { api } from '../shared/api';
 import TaskCreate from './components/TaskCreate';
 import TaskList, { type SortKey } from './components/TaskList';
 import ProjectCreateDialog from './components/ProjectCreateDialog';
+import ProjectFolderDialog from './components/ProjectFolderDialog';
 import type { AppState, Project, Task } from '../shared/types';
 
 export interface HomeProps {
@@ -32,6 +33,7 @@ const [projectName, setProjectName] = createSignal('');
 const [folder, setFolder] = createSignal('');
 const [creatingTask, setCreatingTask] = createSignal(false);
 const [creatingProject, setCreatingProject] = createSignal(false);
+const [changingProjectFolder, setChangingProjectFolder] = createSignal(false);
 const [actionError, setActionError] = createSignal('');
 const taskListeners = new Set<(task: Task) => void>();
 const projectListeners = new Set<(project: Project) => void>();
@@ -45,6 +47,7 @@ export default function HomePage(props: HomeProps) {
   const [projectError, setProjectError] = createSignal('');
   const [loading, setLoading] = createSignal(true);
   const [folderPickerOpen, setFolderPickerOpen] = createSignal(false);
+  const [projectToMove, setProjectToMove] = createSignal<Project>();
   const [sortKey, setSortKey] = createSignal<SortKey>('id');
   const [sortDirection, setSortDirection] = createSignal<1 | -1>(-1);
   const sortDirections = new Map<SortKey, 1 | -1>([['id', -1], ['createdAt', 1], ['updatedAt', 1]]);
@@ -68,7 +71,9 @@ export default function HomePage(props: HomeProps) {
     });
   });
   const receiveTask = (task: Task) => setTasks(previous => [task, ...previous.filter(item => item.id !== task.id)]);
-  const receiveProject = (project: Project) => setProjects(previous => [project, ...previous.filter(item => item.id !== project.id)]);
+  const receiveProject = (project: Project) => setProjects(previous => previous.some(item => item.id === project.id)
+    ? previous.map(item => item.id === project.id ? project : item)
+    : [project, ...previous]);
   taskListeners.add(receiveTask);
   projectListeners.add(receiveProject);
   onCleanup(() => {
@@ -154,6 +159,37 @@ export default function HomePage(props: HomeProps) {
     }
   }
 
+  function openProjectFolderDialog() {
+    const project = selectedProject();
+    if (!project || changingProjectFolder()) return;
+    interactionVersion++;
+    setProjectToMove(project);
+  }
+
+  async function changeProjectFolder(project: Project, path: string) {
+    setChangingProjectFolder(true);
+    setActionError('');
+    try {
+      const changed = await api<Project>(`/api/projects/${encodeURIComponent(project.id)}/folder`, { folder: path });
+      for (const notify of projectListeners) notify(changed);
+      if (!alive) return;
+      const beforeReload = new Set(projects());
+      try {
+        const loaded = await api<AppState>('/api/state');
+        if (!alive) return;
+        setProjects(previous => {
+          const merged = new Map(loaded.projects.map(item => [item.id, item]));
+          for (const item of previous) if (!beforeReload.has(item)) merged.set(item.id, item);
+          return [...merged.values()].sort((a, b) => b.id.localeCompare(a.id));
+        });
+      } catch (cause) {
+        if (alive) setActionError(cause instanceof Error ? cause.message : '一覧を取得できませんでした');
+      }
+    } finally {
+      setChangingProjectFolder(false);
+    }
+  }
+
   async function createTask(event: SubmitEvent) {
     event.preventDefault();
     const project = selectedProject();
@@ -193,12 +229,14 @@ export default function HomePage(props: HomeProps) {
       projectId={projectId()}
       projects={projects()}
       creatingProject={creatingProject()}
+      changingProjectFolder={changingProjectFolder()}
       canCreate={canCreate()}
       selectedProject={selectedProject()}
       projectSelectRef={element => { projectSelect = element; }}
       onTaskName={value => { interactionVersion++; taskNameEditVersion++; setTaskName(value); }}
       onChooseProject={chooseProject}
       onCreateTask={createTask}
+      onChangeProjectFolder={openProjectFolderDialog}
       onOpenProject={props.onOpenProject}
     />
     <TaskList tasks={tasks()} loading={loading()} sortKey={sortKey()} sortDirection={sortDirection()} onSort={sort} onOpenTask={openTask} />
@@ -214,5 +252,11 @@ export default function HomePage(props: HomeProps) {
       onFolder={setFolder}
       onFolderPickerOpen={setFolderPickerOpen}
     />
+    <Show when={projectToMove()} keyed>{project => <ProjectFolderDialog
+      project={project}
+      saving={changingProjectFolder()}
+      onSave={path => changeProjectFolder(project, path)}
+      onClose={() => setProjectToMove(undefined)}
+    />}</Show>
   </section>;
 }

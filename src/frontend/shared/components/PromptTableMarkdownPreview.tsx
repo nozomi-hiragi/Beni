@@ -3,8 +3,7 @@ import { Portal } from 'solid-js/web';
 import type { DocumentProvenance, DocumentProvenanceDetail } from '../types';
 import { MarkdownArticle, renderMarkdown, type MarkdownPreviewProps } from './MarkdownPreview';
 import { phaseDocuments, phaseLabels } from '../phase-display';
-
-const instructionNames: Record<string, string> = { common: '全共通', editor: '編集相談用プロンプト', ...phaseLabels };
+import { instructionLabels } from '../instruction-display';
 
 function sourceLabel(source: DocumentProvenanceDetail['sources'][number]) {
   const name = source.id.split('/')[0]!;
@@ -16,7 +15,7 @@ function sourceLabel(source: DocumentProvenanceDetail['sources'][number]) {
       const document = phaseDocuments.find(item => item.name === name);
       return document ? `${document.label}ドキュメント` : /^[a-z][a-z0-9-]*\.md$/.test(name) ? name : 'ドキュメント';
     }
-    case 'instruction': return Object.hasOwn(instructionNames, name) ? instructionNames[name] : '種類不明のプロンプト';
+    case 'instruction': return Object.hasOwn(instructionLabels, name) ? instructionLabels[name] : '種類不明のプロンプト';
     case 'message':
     case 'result': {
       const label = source.kind === 'message' ? 'チャット' : '実行結果';

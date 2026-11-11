@@ -7,15 +7,15 @@ import PromptTableMarkdownPreview from '../shared/components/PromptTableMarkdown
 import ChatPanel from '../shared/components/ChatPanel';
 import ResizeHandle, { MAX_RATIO } from '../shared/components/ResizeHandle';
 import TabBar from '../shared/components/TabBar';
-import { phaseLabels } from '../shared/phase-display';
+import { instructionLabels as labels, taskCompletedInstructionKey } from '../shared/instruction-display';
 import { taskPhases as phases, type TaskPhase } from '../../shared/task-phase';
 
-const labels: Record<string, string> = { editor: '編集相談用プロンプト', common: '全共通', ...phaseLabels };
 const instructionTabs = [
   { id: 'editor', label: '編集用' },
   { id: 'instructions', label: 'インストラクション' },
+  { id: 'workflow', label: 'ワークフロー' },
 ];
-const variables = [
+const workflowVariables = [
   { name: 'project_directory', description: 'プロジェクトのディレクトリ' },
   { name: 'working_directory', description: '作業ディレクトリ' },
   { name: 'task_id', description: 'タスクID' },
@@ -23,10 +23,14 @@ const variables = [
   { name: 'phase', description: '現在のフェーズ' },
   { name: 'knowledge_path', description: 'ナレッジを埋め込みツールで参照する案内' },
   { name: 'knowledge_content', description: 'ナレッジの本文' },
+];
+const variables = [
+  ...workflowVariables,
   { name: 'execution_chat_path', description: '履歴抜粋を参照する案内（実装中）' },
   { name: 'retrospective_chat_path', description: '履歴抜粋を参照する案内（反省会）' },
 ];
 const variableLabels = Object.fromEntries(variables.map(variable => [variable.name, variable.description]));
+const workflowVariableLabels = Object.fromEntries(workflowVariables.map(variable => [variable.name, variable.description]));
 const embeddedTools = [
   { name: 'list_events', description: 'イベント一覧の取得' },
   { name: 'get_event', description: 'イベント詳細の取得' },
@@ -34,6 +38,13 @@ const embeddedTools = [
   { name: 'get_file_version', description: '過去のファイル版の取得' },
   { name: 'get_execution_output', description: 'ツール・コマンドの実行出力の取得' },
   { name: 'acknowledge_events', description: 'イベントの確認済み位置の更新' },
+];
+const workflowTools = [
+  { name: 'list_documents', description: '参照できる文書と版の一覧を取得' },
+  { name: 'read_document', description: '指定した版の文書を取得' },
+  { name: 'read_source', description: '引用元の原文を取得' },
+  { name: 'edit_document', description: '指示の変更を準備' },
+  { name: 'finish_instruction_update', description: '自動処理の完了と判断理由を申告' },
 ];
 export default function InstructionsPage() {
   const [instructions, setInstructions] = createSignal<{ key: string; content: string }[]>([]);
@@ -133,7 +144,7 @@ export default function InstructionsPage() {
           <Show when={loading()}><p role="status" class="mt-3 text-sm">読み込み中...</p></Show>
           <Show when={error()}><p role="alert" class="mt-3 text-sm text-error">{error()}</p></Show>
           <Show when={!loading() && !error()}>
-            <Show when={selectedGroup() === 'editor'} fallback={<>
+            <Show when={selectedGroup() === 'instructions'}>
               <h3 class="mt-4 text-sm font-bold">全共通</h3>
               <FocusPrompt label={labels.common} selected={instructionFocus() === 'common'} onSelect={() => setInstructionFocus('common')}><InstructionPreview variableLabels={variableLabels} instructionKey="common" /></FocusPrompt>
               <div role="tablist" aria-label="フェーズ別インストラクション" class="tabs tabs-border mt-6 flex-nowrap overflow-x-auto">
@@ -162,9 +173,16 @@ export default function InstructionsPage() {
               <div role="tabpanel" id={`${tabId}-panel`} aria-labelledby={`${tabId}-${selected()}`} tabIndex={0}>
                 <FocusPrompt label={labels[selected()]} selected={instructionFocus() === selected()} onSelect={() => setInstructionFocus(selected())}><InstructionPreview variableLabels={variableLabels} instructionKey={selected()} /></FocusPrompt>
               </div>
-            </>}>
+            </Show>
+            <Show when={selectedGroup() === 'editor'}>
               <h3 class="mt-4 text-sm font-bold">編集相談用プロンプト</h3>
               <FocusPrompt label={labels.editor} selected={instructionFocus() === 'editor'} onSelect={() => setInstructionFocus('editor')}><InstructionPreview instructionKey="editor" /></FocusPrompt>
+            </Show>
+            <Show when={selectedGroup() === 'workflow'}>
+              <h3 class="mt-4 text-sm font-bold">{labels[taskCompletedInstructionKey]}</h3>
+              <FocusPrompt label={labels[taskCompletedInstructionKey]} selected={instructionFocus() === taskCompletedInstructionKey} onSelect={() => setInstructionFocus(taskCompletedInstructionKey)}>
+                <InstructionPreview variableLabels={workflowVariableLabels} instructionKey={taskCompletedInstructionKey} />
+              </FocusPrompt>
             </Show>
           </Show>
         </div>
@@ -194,15 +212,15 @@ function InstructionReferences() {
     <TabBar label="変数・ツールの種類" tabs={instructionTabs} panelId={panelId} activeId={selectedGroup()} onSelect={setSelectedGroup} />
     <div role="tabpanel" id={panelId} aria-labelledby={`${panelId}-${selectedGroup()}`} tabIndex={0} class="min-h-0 min-w-0 flex-1 overflow-auto p-4 sm:p-6">
       <h2 class="mt-4 text-sm font-bold">変数</h2>
-      <Show when={selectedGroup() === 'instructions'} fallback={<p class="mt-3 text-sm">なし</p>}>
+      <Show when={selectedGroup() !== 'editor'} fallback={<p class="mt-3 text-sm">なし</p>}>
         <ul aria-label="埋め込み変数" class="mt-3 flex flex-wrap gap-2">
-          <For each={variables}>{variable => <li class="badge badge-soft badge-primary h-auto max-w-full whitespace-normal text-xs">{variable.description}</li>}</For>
+          <For each={selectedGroup() === 'workflow' ? workflowVariables : variables}>{variable => <li class="badge badge-soft badge-primary h-auto max-w-full whitespace-normal text-xs">{variable.description}</li>}</For>
         </ul>
       </Show>
       <h2 class="mt-6 text-sm font-bold">埋め込みツール</h2>
       <Show when={selectedGroup() === 'editor'} fallback={
         <dl aria-label="埋め込みツール" class="mt-2 grid grid-cols-1 gap-x-4 gap-y-1 text-sm sm:grid-cols-[max-content_1fr]">
-          <For each={embeddedTools}>{tool => <>
+          <For each={selectedGroup() === 'workflow' ? workflowTools : embeddedTools}>{tool => <>
             <dt class="break-all"><code>{tool.name}</code></dt>
             <dd class="min-w-0">{tool.description}</dd>
           </>}</For>

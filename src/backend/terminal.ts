@@ -19,6 +19,7 @@ export class TerminalService {
  private shuttingDown = false;
  constructor(private shell=process.env.SHELL || '/bin/sh') {}
  list(projectId:string) {return [...this.sessions.values()].filter(s=>s.info.projectId===projectId).map(s=>({...s.info}))}
+ projectBusy(projectId:string) {return [...this.sessions.values()].some(session=>session.info.projectId===projectId&&(session.info.status==='running'||session.closing||session.process?.exitCode===null))}
  has(projectId:string,id:string) {return this.sessions.get(id)?.info.projectId===projectId}
  private changed(projectId:string) {const event:TopicEvent={name:'terminal.changed',data:{sessions:this.list(projectId)}};for(const emit of this.changes.get(projectId)??[])emit(event)}
  create(projectId:string,folder:string,requestId:string):TerminalSession {

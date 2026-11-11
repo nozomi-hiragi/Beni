@@ -14,7 +14,13 @@ Beni/
 │   │   ├── server.test.ts            API・配信・文書管理・変更通知・保存先のテスト
 │   │   ├── instructions.ts           指示テンプレートの初期値と変数の置換
 │   │   ├── chat.ts                   会話の保存・再開・イベント配信・中断
+│   │   ├── chat-store.ts             チャットID・参照・JSON保存・操作復旧
+│   │   ├── chat-migration.ts         用途別の旧チャットの移行と検証
+│   │   ├── migrate-projects.ts       停止中に実行するプロジェクトDB配置移行CLI
+│   │   ├── migrate-tasks.ts          停止中に実行するタスクDB移行CLI
+│   │   ├── migrate-chats.ts          停止中に実行するチャット移行CLI
 │   │   ├── chat-history.ts           会話 JSON の変換と旧形式の読み取り
+│   │   ├── chat-files.ts             会話ファイル名と旧保存場所からの移行
 │   │   ├── claude.ts                 Claude の SDK 送信、CLI 操作、状態確認とストリーム変換
 │   │   ├── claude.test.ts            Claude の受信・権限設定・中断・接続失敗のテスト
 │   │   ├── chat.test.ts              会話の保存・再開・中断・分離、接続エラーのテスト
@@ -23,6 +29,10 @@ Beni/
 │   │   │   ├── index.ts              標準の Agent 一覧
 │   │   │   ├── codex.ts              Codex App Server との接続
 │   │   │   └── claude.ts             Claude の SDK・CLI 通信と共通型の変換
+│   │   ├── data-browser.ts         保存データの読み取り専用一覧・詳細・SQL閲覧
+│   │   ├── data-browser-files.ts   読み取り対象ファイル・ジャーナルの検証
+│   │   ├── data-sql.ts             SQL子プロセスの時間・並列数制限
+│   │   ├── data-sql-child.ts       読み取り専用SQL・スキーマ取得・結果の制限
 │   │   ├── data.ts                   メタデータ検証・保存と旧 Markdown が残ったタスクの復元
 │   │   ├── documents.ts              旧 Markdown の検出・取り込み補助と変更監視
 │   │   ├── document-table.ts         文書の項目・根拠と版の保存
@@ -38,16 +48,23 @@ Beni/
 │   │   ├── *.test.ts                 バックエンドの機能・API テスト
 │   │   ├── store/                    メタデータとデータベースへのアクセス
 │   │   │   ├── index.ts              プロジェクト・タスク・文書・指示・更新ジョブの管理
+│   │   │   ├── agents.ts             エージェント連携情報・利用枠の保存と旧形式の移行
+│   │   │   ├── flat-project-migration.ts  プロジェクトDBの平坦化・中断復旧
+│   │   │   ├── project-migration.ts  旧保存領域のコピー・検証・削除
+│   │   │   ├── task-table.ts         タスク情報のDB保存
+│   │   │   ├── task-migration.ts     旧タスクJSONの移行と検証
+│   │   │   ├── task-migration.test.ts タスク移行・中断復旧のテスト
 │   │   │   └── index.test.ts         メタデータ・復元のテスト
 │   │   └── test/                     バックエンドのテスト補助
 │   │       ├── dummy-agent.ts         Agent の共通処理を検証する実行先
 │   │       ├── fake-codex.ts          実サービスを使わず Codex 通信を模擬する実行ファイル
 │   │       └── fake-claude.ts         SDK の起動先と保守コマンドで使うテスト用 Claude CLI
 │   ├── shared/                       FE・BE 共通の通信定義
+│   │   ├── data-browser.ts           データ閲覧APIの一覧・詳細・SQL結果の型
 │   │   ├── ids.ts                    プロジェクト・タスクIDの生成と種別検証
 │   │   ├── task-phase.ts             共通のフェーズ識別子と検証
 │   │   ├── agent.ts                  Agent ID・登録情報・接続状態の共通型
-│   │   ├── chat-commands.ts          コマンドの一覧・接続先別の対応・入力解析
+│   │   ├── chat-commands.ts          コマンドの共通型・Beni の共通操作・候補内の別名解決・入力解析
 │   │   ├── communication.ts          パック・WS メッセージの型、受信検証、ハッシュ
 │   │   └── project-files.ts          プロジェクトファイル一覧・プレビューの型
 │   └── frontend/                     ブラウザーで動く SolidJS の画面
@@ -63,6 +80,7 @@ Beni/
 │       │       ├── TaskCreate.tsx    プロジェクトを選び、タスクを作成するフォーム
 │       │       ├── TaskList.tsx      タスク一覧と並べ替え操作
 │       │       ├── ProjectCreateDialog.tsx  プロジェクトの名前・フォルダーを指定するダイアログ
+│       │       ├── ProjectFolderDialog.tsx  作業フォルダーを再指定するダイアログ
 │       │       └── FolderPicker.tsx  バックエンドが動く環境のフォルダー選択
 │       ├── project/
 │       │   ├── ProjectPage.tsx       プロジェクトとタスクを確認し、作業画面を表示
@@ -77,6 +95,15 @@ Beni/
 │       │   └── InstructionsPage.tsx インストラクション管理画面
 │       ├── settings/
 │       │   └── SettingsPage.tsx     登録済み Agent の接続状態と利用枠の確認
+│       ├── data/
+│       │   ├── DataPage.tsx         データ種別ごとのタブの一覧・詳細・関連項目の閲覧
+│       │   ├── format-date.ts      日本時間の日時表示
+│       │   └── components/
+│       │       ├── DataDetail.tsx   詳細の切替・文書・会話・イベント
+│       │       ├── SqlBrowser.tsx     DB選択・SQL入力・スキーマ・結果表
+│       │       ├── RecordContents.tsx タスク・ワークフロー・エージェント
+│       │       ├── StoredValues.tsx 保存値のJSON・メタデータ表示
+│       │       └── Pagination.tsx  一覧と会話のページ切替
 │       ├── shared/
 │       │   ├── api.ts                バックエンドへの JSON リクエストとエラー処理
 │       │   ├── model-cache.ts        CLI の接続状態・利用枠とモデル選択の記憶
@@ -116,11 +143,12 @@ Beni/
 │   ├── directory-structure.md        この文書
 │   ├── data/                         データの仕様
 │   │   ├── README.md                 保存責任・正本・データの関係
+│   │   ├── storage.md                データ集約の採用仕様・移行条件
 │   │   ├── sqlite/                   SQLite の仕様
 │   │   │   └── README.md             保存責任と参照の方針
 │   │   └── beni/                     プロジェクト内データの仕様
 │   │       ├── README.md             文書の正本と復元の方針
-│   │       └── chat.md               .beni/chat の会話保存仕様
+│   │       └── chat.md               プロジェクトの会話保存仕様
 │   ├── communication/                通信仕様
 │   │   ├── README.md                 方針と文書の目次
 │   │   ├── http-api.md               HTTP API とパック同期の契約
@@ -135,6 +163,7 @@ Beni/
 │   │   ├── home.md                   ホーム画面
 │   │   ├── project-detail.md         プロジェクト詳細画面
 │   │   ├── project-settings.md       プロジェクトの登録と作業場所
+│   │   ├── data.md                   データ画面の閲覧仕様と編集案
 │   │   └── settings.md               設定画面
 │   ├── objects/                      オブジェクト仕様
 │   │   ├── README.md                 目次と各要素の関係
@@ -151,13 +180,11 @@ Beni/
 │   └── mockups/                      過去の画面・部品の検討用 HTML と CSS
 │       └── components/               部品ごとのモック
 ├── data/                             [データ] Beni 自身の既定保存先。実行時に作成
-│   ├── beni.sqlite                   プロジェクトの登録情報・インストラクション・指示更新キュー
-│   ├── rate-limits-<provider>.json   接続先ごとの利用枠キャッシュ
-│   ├── chat/
-│   │   ├── instructions.json         インストラクション編集相談の会話
-│   │   ├── instruction-history/      編集用指示の適用前の会話（会話ID.json）
-│   │   └── history/                  リセット前の編集相談の会話（会話ID.json）
-│   └── instruction-editor/           編集相談CLIの作業先（書き込み不可）
+│   ├── beni.sqlite                   プロジェクトの登録情報・インストラクション・指示更新キュー・エージェント連携情報
+│   ├── chats/                       全用途の会話・アーカイブ（<chatId>.json）
+│   ├── instruction-editor/           編集相談CLIの作業先（書き込み不可）
+│   └── projects/
+│       └── <projectId>.sqlite         タスク情報・文書・版・根拠・イベント・ワークフロー
 ├── node_modules/                     [生成] インストールした依存パッケージ
 ├── README.md                         概要、起動方法、保存先、機能、テスト方法
 ├── AGENTS.md                         このリポジトリで作業するエージェント向けの指示
@@ -175,3 +202,5 @@ Beni/
 保存先の変更と以前のデータの扱いは [README のデータの保存先](../README.md#データの保存先) を参照してください。
 
 ソースの配置と公開 URL は別です。静的ファイルの URL は [HTTP API の静的配信](communication/http-api.md#静的配信) を参照してください。
+
+永続データの詳細な配置と旧 `.beni` からの移行は [保存データの集約](data/storage.md) を参照してください。

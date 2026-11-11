@@ -5,7 +5,7 @@ import InstructionsPage from './InstructionsPage';
 import { communication } from '../shared/communication';
 vi.mock('../shared/communication',()=>({communication:{subscribe:vi.fn(()=>vi.fn())}}));
 const chatMock = vi.hoisted(()=>({busyChange: undefined as ((busy:boolean)=>void)|undefined}));
-vi.mock('../shared/components/ChatPanel',()=>({default: (props: {projectId:string; instructionFocus?:string|null; onBusyChange?:(busy:boolean)=>void})=>{chatMock.busyChange=props.onBusyChange;return <div data-testid="instructions-chat">{props.projectId}</div>}}));
+vi.mock('../shared/components/ChatPanel',()=>({default: (props: {projectId:string; instructionFocus?:string|null; onBusyChange?:(busy:boolean)=>void})=>{chatMock.busyChange=props.onBusyChange;return <div data-testid="instructions-chat" data-instruction-focus={props.instructionFocus}>{props.projectId}</div>}}));
 afterEach(()=>{cleanup();vi.unstubAllGlobals()});
 it('loads templates and switches the Markdown preview with descriptive variable badges',async()=>{
  const executionContent = '# Execution instructions';
@@ -28,7 +28,7 @@ it('loads templates and switches the Markdown preview with descriptive variable 
  expect(projectTools.textContent).toContain('list_events');
  expect(projectTools.textContent).not.toContain('list_instructions');
  expect(projectTools.textContent).not.toContain('get_instruction');
- expect(screen.getAllByRole('tab')).toHaveLength(10);
+ expect(screen.getAllByRole('tab')).toHaveLength(12);
  expect(screen.getByRole('tab',{name:'要件定義'}).getAttribute('aria-selected')).toBe('true');
  expect(screen.getByRole('tabpanel',{name:'要件定義'}).textContent).toContain('Requirements タスクID');
  const common=screen.getByRole('region',{name:'全共通のフォーカス対象'});
@@ -62,14 +62,41 @@ it('loads templates and switches the Markdown preview with descriptive variable 
  fireEvent.click(within(screen.getByRole('tablist',{name:'プロンプトの種類'})).getByRole('tab',{name:'編集用'}));
  expect(screen.getByRole('heading',{name:'Editor {{working_directory}} {{custom}}'}).querySelector('.badge')).toBeNull();
 });
-it('shows a loading failure',async()=>{
- vi.stubGlobal('fetch',vi.fn().mockRejectedValue(Error('offline')));
+
+it('shows the task completion workflow with provenance and passes its focus to the chat',async()=>{
+ const key = 'task.completed';
+ const content = '# 確認する {{knowledge_content}}';
+ const fetch = vi.fn().mockResolvedValueOnce({ok:true,json:async()=>({
+  instructions:[{key:'common',content:'共通の指示'},{key,content}],
+  provenance:{[key]:{revision:'workflow-revision',items:[{id:'workflow-item',start:0,end:content.length}]}},
+ })}).mockResolvedValueOnce({ok:true,json:async()=>({reason:'完了時の処理の根拠',sources:[]})});
+ vi.stubGlobal('fetch',fetch);
  render(()=> <InstructionsPage/>);
- expect((await screen.findByRole('alert')).textContent).toContain('読み込めませんでした');
+ await screen.findByText('共通の指示');
+ const prompts=within(screen.getByRole('tablist',{name:'プロンプトの種類'}));
+ fireEvent.click(prompts.getByRole('tab',{name:'ワークフロー'}));
+ const panel=within(screen.getByRole('tabpanel',{name:'ワークフロー'}));
+ const focus=panel.getByRole('region',{name:'タスク完了のフォーカス対象'});
+ const heading=within(focus).getByRole('heading',{name:'確認する ナレッジの本文'});
+ fireEvent.mouseOver(heading);
+ expect(await screen.findByText('完了時の処理の根拠')).toBeTruthy();
+ const query = new URL(fetch.mock.calls[1]![0], 'http://localhost').searchParams;
+ expect(Object.fromEntries(query)).toEqual({name:key,revision:'workflow-revision',itemId:'workflow-item'});
+ expect(focus.getAttribute('aria-current')).toBe('false');
+ fireEvent.click(heading);
+ expect(focus.getAttribute('aria-current')).toBe('true');
+ expect(screen.getByRole('heading',{name:'フォーカス: タスク完了'})).toBeTruthy();
+ expect(screen.getByTestId('instructions-chat').getAttribute('data-instruction-focus')).toBe(key);
 });
 
-it.each([{}, {instructions:null}, {instructions:[]}, {instructions:[{key:'editor',content:'# Editor instructions'},{key:'common'}]}])('shows malformed responses as a loading failure: %j',async data=>{
- vi.stubGlobal('fetch',vi.fn().mockResolvedValue({ok:true,json:async()=>data}));
+it.each([
+ {name:'offline',error:new Error('offline')},
+ {name:'missing instructions',data:{}},
+ {name:'null instructions',data:{instructions:null}},
+ {name:'empty instructions',data:{instructions:[]}},
+ {name:'missing content',data:{instructions:[{key:'editor',content:'# Editor instructions'},{key:'common'}]}},
+])('shows a loading failure for $name',async ({error,data})=>{
+ vi.stubGlobal('fetch',error ? vi.fn().mockRejectedValue(error) : vi.fn().mockResolvedValue({ok:true,json:async()=>data}));
  render(()=> <InstructionsPage/>);
  expect((await screen.findByRole('alert')).textContent).toContain('読み込めませんでした');
  expect(screen.queryByRole('tablist',{name:'フェーズ別インストラクション'})).toBeNull();
@@ -198,7 +225,9 @@ it('selects prompt content by click and keyboard while keeping focus separate fr
  expect(document.activeElement).toBe(editorTab);
  expect(screen.getByRole('region',{name:'編集相談用プロンプトのフォーカス対象'}).classList.contains('aura')).toBe(true);
  fireEvent.keyDown(editorTab,{key:'End'});
- expect(within(screen.getByRole('tablist',{name:'プロンプトの種類'})).getByRole('tab',{name:'インストラクション'}).getAttribute('aria-selected')).toBe('true');
+ expect(within(screen.getByRole('tablist',{name:'プロンプトの種類'})).getByRole('tab',{name:'ワークフロー'}).getAttribute('aria-selected')).toBe('true');
+ fireEvent.keyDown(document.activeElement!,{key:'ArrowLeft'});
+ expect(document.activeElement).toBe(within(screen.getByRole('tablist',{name:'プロンプトの種類'})).getByRole('tab',{name:'インストラクション'}));
  fireEvent.keyDown(document.activeElement!,{key:'ArrowLeft'});
  expect(document.activeElement).toBe(editorTab);
 });
@@ -225,10 +254,10 @@ it('keeps pending content visible when apply fails',async()=>{
  fireEvent.click(within(screen.getByRole('tablist',{name:'プロンプトの種類'})).getByRole('tab',{name:'編集用'}));
  expect(await screen.findByText('New editor')).toBeTruthy();
 });
-it.each([false,true])('disables apply while editor is busy: %s',async busy=>{
- vi.stubGlobal('fetch',vi.fn().mockResolvedValue({ok:true,json:async()=>({instructions:[{key:'editor',content:'Editor'}],editorState:{pending:true,busy}})}));
+it('disables apply while editor is busy',async()=>{
+ vi.stubGlobal('fetch',vi.fn().mockResolvedValue({ok:true,json:async()=>({instructions:[{key:'editor',content:'Editor'}],editorState:{pending:true,busy:true}})}));
  render(()=> <InstructionsPage/>);
- expect((await screen.findByRole('button',{name:'適用'}) as HTMLButtonElement).disabled).toBe(busy);
+ expect((await screen.findByRole('button',{name:'適用'}) as HTMLButtonElement).disabled).toBe(true);
 });
 it('hides apply when no editor changes are pending',async()=>{
  vi.stubGlobal('fetch',vi.fn().mockResolvedValue({ok:true,json:async()=>({instructions:[{key:'editor',content:'Editor'}],editorState:{pending:false,busy:false}})}));
@@ -242,6 +271,7 @@ it('disables apply while the chat is busy',async()=>{
  vi.stubGlobal('fetch',vi.fn().mockResolvedValue({ok:true,json:async()=>({instructions:[{key:'editor',content:'Editor'}],editorState:{pending:true,busy:false}})}));
  render(()=> <InstructionsPage/>);
  const button=await screen.findByRole('button',{name:'適用'}) as HTMLButtonElement;
+ expect(button.disabled).toBe(false);
  chatMock.busyChange?.(true);
  expect(button.disabled).toBe(true);
  chatMock.busyChange?.(false);
@@ -279,13 +309,21 @@ it('switches reference tabs independently with correctly categorized variables a
  expect(document.activeElement).toBe(references.getByRole('tab',{name:'インストラクション'}));
  expect(prompts.getByRole('tab',{name:'編集用'}).getAttribute('aria-selected')).toBe('true');
  expect(within(panel()).getAllByRole('listitem')).toHaveLength(9);
+ const workflow=references.getByRole('tab',{name:'ワークフロー'});
  fireEvent.keyDown(document.activeElement!,{key:'ArrowRight'});
- expect(document.activeElement).toBe(editor);
- fireEvent.keyDown(editor,{key:'End'});
- expect(document.activeElement).toBe(references.getByRole('tab',{name:'インストラクション'}));
+ expect(document.activeElement).toBe(workflow);
+ expect(within(panel()).getAllByRole('listitem')).toHaveLength(7);
+ expect(within(panel()).getByText('ナレッジの本文')).toBeTruthy();
+ expect(within(panel()).queryByText('履歴抜粋を参照する案内（反省会）')).toBeNull();
+ expect(Array.from(panel().querySelectorAll('dt'),term=>term.textContent)).toEqual([
+  'list_documents','read_document','read_source','edit_document','finish_instruction_update',
+ ]);
  fireEvent.keyDown(document.activeElement!,{key:'Home'});
  expect(document.activeElement).toBe(editor);
+ fireEvent.keyDown(editor,{key:'End'});
+ expect(document.activeElement).toBe(workflow);
+ fireEvent.keyDown(document.activeElement!,{key:'Home'});
  fireEvent.keyDown(editor,{key:'ArrowLeft'});
- expect(document.activeElement).toBe(references.getByRole('tab',{name:'インストラクション'}));
+ expect(document.activeElement).toBe(workflow);
  expect(new Set(screen.getAllByRole('tab').map(tab=>tab.id)).size).toBe(screen.getAllByRole('tab').length);
 });
