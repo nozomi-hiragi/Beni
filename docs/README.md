@@ -25,6 +25,7 @@
   - [要求・根拠を追跡できる文書管理](traceable-documents-design.md)
   - [インストラクション管理](features/instructions.md)
   - [LLM チャット連携](features/llm-chat.md)
+  - [Navbar のツール](features/manual-tools.md)
   - [タスク検索（未実装）](features/task-search.md)
   - [プロジェクト内ターミナル](features/terminal.md)
 
