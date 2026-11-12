@@ -5,11 +5,11 @@
   "scripts": {
     "start": "bun run build && bun src/backend/server.ts",
     "test": "bun run build && bun test src/backend/server.test.ts src/backend/data-browser.test.ts src/backend/manual-tools.test.ts src/backend/store/index.test.ts src/backend/store/flat-project-migration.test.ts src/backend/store/task-migration.test.ts src/backend/project-events.test.ts src/backend/chat.test.ts src/backend/chat-migration.test.ts src/backend/claude.test.ts src/backend/agents/*.test.ts src/backend/terminal.test.ts && bun run test:ui",
-    "build:css": "tailwindcss -i ./src/frontend/tailwind.css -o ./dist/frontend/generated.css --minify",
-    "typecheck": "tsc -p tsconfig.json",
-    "build:ui": "bun run typecheck && vite build",
+    "build:css": "bun --bun run tailwindcss -i ./src/frontend/tailwind.css -o ./dist/frontend/generated.css --minify",
+    "typecheck": "bun --bun run tsc -p tsconfig.json",
+    "build:ui": "bun run typecheck && bun --bun run vite build",
     "build": "bun run build:ui && bun run build:css",
-    "test:ui": "node --conditions=browser ./node_modules/vitest/vitest.mjs run --config vitest.config.ts"
+    "test:ui": "bun --bun --conditions=browser run vitest run --config vitest.config.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.319",
