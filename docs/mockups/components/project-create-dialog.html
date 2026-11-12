@@ -1,0 +1,12 @@
+<link rel="stylesheet" href="beni-layout.css">
+<dialog id="projectCreateDialog" aria-labelledby="projectCreateTitle">
+  <form method="dialog" class="project-dialog-form">
+    <h2 id="projectCreateTitle">プロジェクトを作成</h2>
+    <label for="projectName">プロジェクト名</label>
+    <input id="projectName" required placeholder="アプリ上の名前">
+    <label for="projectFolder">フォルダ</label>
+    <div class="folder-picker"><input id="projectFolder" required placeholder="フォルダのパス"><button type="button" disabled>参照</button></div>
+    <div class="dialog-actions"><button type="submit" value="cancel" formnovalidate>キャンセル</button><button type="submit" value="create">作成</button></div>
+  </form>
+</dialog>
+<script>document.getElementById('projectCreateDialog').showModal();</script>

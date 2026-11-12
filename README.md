@@ -1,118 +1,92 @@
 # Beni
 
-Bunで継続実行し、LinearのAgent Session WebhookをCloudflare Tunnel経由で受け取り、承認済みの作業をローカルのCodexで実行します。
+複数のコーディングエージェントを使い、依頼から計画・実行・監修までを支援するアプリケーションです。
 
-## セットアップ
+## 現在の機能
 
-Bun 1.4.2以降、Git、Codexの認証済み環境、`cloudflared`が必要です。資格情報の保存には`Bun.secrets`を使います。OS固有の動作はまずmacOSで確認します。
+- 作業フォルダーを登録し、ホームの一覧からプロジェクトやタスクを開けます。
+- 要件定義、仕様整理、実装手順、実装中、反省会、終了の各フェーズを進められます。タスク文書の版・根拠・引用を確認し、反省会で得た知識をプロジェクトに引き継げます。 [プロジェクト詳細画面](docs/screens/project-detail.md)
+- インストール・ログイン済みの Codex CLI と Claude Code CLI に接続できます。会話と実装担当のモデルを選び、会話を再開し、取得できた利用枠やコンテキスト使用量を確認できます。 [LLM チャット連携](docs/features/llm-chat.md)
+- 作業フォルダー内のファイルを読み取り専用でプレビューできます。ターミナルではサーバー側のシェルを操作でき、複数画面の間で入力権を切り替えられます。ターミナルは macOS・Linux が対象です。 [ターミナル仕様](docs/features/terminal.md)
+- インストラクションを管理し、タスク完了時のワークフローを設定できます。 [インストラクション管理](docs/features/instructions.md) · [ワークフロー](docs/features/workflows.md)
+- Navbar の「ツール」から、表示中の対象に応じた Beni の埋め込みツールを直接実行できます。 [手動ツール](docs/features/manual-tools.md)
+- データ画面で文書の過去版、チャット、タスク、イベント、エージェントの保存情報を閲覧できます。DB タブでは読み取り専用 SQL で検索・集計できます。 [データ画面](docs/screens/data.md)
 
-```sh
-bun install --frozen-lockfile
-bun index.ts --help
-```
+## 起動
 
-Linearで自分のOAuthアプリを作成します。Redirect URIとWebhook URLは、後述の`publicBaseUrl`配下に揃えます。
+次の環境を用意します。
 
-- Redirect URI: `https://your-tunnel.example/oauth/callback`
-- Webhook URL: `https://your-tunnel.example/webhooks/linear`
+- PTY と drain 通知に対応した [Bun](https://bun.sh/) 1.4.3 以上。
+- ビルド・UI テスト用の Node.js。22.22.2 以上の22系、24.15.0 以上の24系、または26以上。
+- エージェントを使う場合は、公式 Codex CLI または Claude Code CLI をインストールし、自身のサブスクリプションのアカウントでログインします。対応条件は [LLM チャット連携](docs/features/llm-chat.md) を参照してください。
 
-WebhookはAgent Session Event向けに設定し、署名検証用シークレットを控えます。認証はPKCEを使用するためClient Secretを設定ファイルへ書く必要はありません。
-
-Cloudflare Tunnelを用意し、公開ホスト名をローカルの`127.0.0.1:oauthPort`（初期3456）へ転送します。リポジトリ直下の`.env.example`を参考に、作業ディレクトリへ`.env`を置きキーだけ設定します（値はリポジトリに入れない）。
-
-```sh
-# .env（キー名のみ。値は各自の環境へ）
-BENI_CLOUDFLARE_TUNNEL_TOKEN=
-BENI_LINEAR_WEBHOOK_SECRET=
-```
-
-リポジトリの外に`~/.config/beni/config.json`を作成します。`XDG_CONFIG_HOME`を設定している場合は、その下の`beni/config.json`が初期パスです。
-
-```json
-{
-  "clientId": "YOUR_LINEAR_OAUTH_CLIENT_ID",
-  "projectId": "YOUR_LINEAR_PROJECT_UUID",
-  "publicBaseUrl": "https://your-tunnel.example",
-  "maxConcurrent": 2,
-  "taskTimeoutMs": 1800000,
-  "maxContextRounds": 10
-}
-```
-
-`publicBaseUrl`はHTTPSのoriginのみ（パス・クエリ・認証情報なし）です。OAuth Redirect URIとLinear Webhook URLの公開起点になります。`projectId`はLinearのプロジェクトUUIDです。対象のローカルディレクトリは引数で指定するか、そのルートで起動します。Gitに初回commitがあるリポジトリを指定してください。対象プロジェクトに未コミット変更があっても、実行の起点はcommit済みのHEADです。
+リポジトリを取得し、そのディレクトリで起動します。
 
 ```sh
-# ブラウザでOAuthを許可する。トークンはOSの資格情報ストアに保存される
-# （RedirectがpublicBaseUrl経由のため、Tunnelの転送先がoauthPortへ届く状態であること）
-bun /path/to/beni/index.ts login /path/to/project
-
-# フォアグラウンドで常時実行する（ローカルWebhook受信 + Tunnel起動）
-bun /path/to/beni/index.ts /path/to/project
-
-# 対象プロジェクトのルートで実行する場合
-bun /path/to/beni/index.ts
-
-# 別の設定ファイルを使う
-bun /path/to/beni/index.ts /path/to/project --config /path/to/config.json
-
-# 保存済み状態の確認と、接続解除
-bun /path/to/beni/index.ts status /path/to/project
-bun /path/to/beni/index.ts logout /path/to/project
+git clone https://github.com/nozomi-hiragi/Beni.git
+cd Beni
+bun install
+bun run start
 ```
 
-`login`の待受は10分で終了します。`run`はCtrl+CまたはSIGTERMで停止します。自動デーモン化やOSのログイン項目の追加は行いません。
+**v0.2.0 は旧版とデータ互換性がありません。** 旧データの移行はサポートしません。旧版のデータ領域や作業フォルダー内の `.beni/` を引き継がず、新しい環境で利用を開始してください。
 
-## 作業フロー
+起動時に SolidJS の TypeScript と Tailwind CSS・daisyUI のスタイルをビルドします。
 
-1. 登録プロジェクトでAgentにメンションまたは委任する。
-2. LinearがWebhookを送り、BeniがTunnel経由で受け取り対象Sessionを処理する。情報の不足を質問するか、Backlogのサブイシューとして計画を提案する。
-3. 依頼者がLinearで`/approve 1`など、表示された計画番号を承認する。自由文の承認・修正も解釈する。
-4. サブイシューごとに専用のローカルブランチとworktreeで実装・検証し、commitして親ブランチへ順次統合する。
-5. 親ブランチをレビューする。Beniはpush・GitHub PR作成・親イシューの完了を行わない。
+ブラウザーで http://127.0.0.1:3210/ を開きます。ポートは `BENI_PORT` で変更できます。
 
-`stop` signal、`/stop`、`stop`、`停止`を受けると実行中のCodexを中断します。再開は依頼者が`再開`または`/resume`と送信します。停止の検知はWebhook配信に依存します。
+Beni のバックエンドは一つだけ起動します。一つのバックエンドへ複数のブラウザーや端末から接続できます。詳細は [動作条件](docs/specification.md#動作条件) を参照してください。
 
-再起動時も実行途中だった処理は自動再開しません。計画への承認は最新の提案と結び付け、外部で工程の内容や依存関係が変更された場合は実行を止めます。部分的なAPI更新の後は同じ識別子を照合して重複を防ぎます。起動時に一度だけSession一覧の追いつき取得を行うことがありますが、定期ポーリングを主経路にはしません。
+### Tailscale 経由で起動する
 
-## 設定と保存先
+サーバー側と閲覧する端末を Tailscale に接続します。チャットのハッシュ確認にブラウザーの暗号 API を使うため、Tailscale Serve の HTTPS URL で開きます。
 
-追加の設定:
-
-| 設定 | 用途 |
-| --- | --- |
-| `oauthPort` | ローカルHTTP待受（OAuthコールバックとWebhook）のポート。初期値3456 |
-| `publicBaseUrl` | 公開HTTPS origin。Redirect URIとWebhook URLの起点。必須 |
-| `model` | Codexのモデル。省略時は既存設定を使う |
-| `dataDir` | DBとworktreeの保存先。初期値`~/.local/share/beni`。対象リポジトリの外に置く |
-| `projects` | 複数対象の配列。各要素に`path`と`projectId`を指定する |
-
-`projects`だけを指定する場合はトップレベルの`projectId`を省略できます。同じリポジトリへの作業は直列化し、別リポジトリは`maxConcurrent`まで並列で処理します。同じ保存先で複数プロセスは起動できません。
-
-DBにはSession・処理済みActivityの識別子、承認・計画・実行状態、受信Webhookのキューなど復旧に必要な情報を保存します。全会話やAPI応答は保存しません。worktreeと完了記録は自動削除しません。Codex自身の履歴保存はCodexの設定に従います。
-
-Codexの計画処理は読み取り専用、実行処理はworkspace-writeで動作します。実行時のネットワークは許可しますが、権限の自動昇格はしません。BeniはLinear更新を担当し、子Codexへの継承MCP・アプリ連携を無効化します。
-
-## 検証
+まずサーバー側で、HTTPS の443番から Beni の3210番への転送を有効にします。
 
 ```sh
-bun run typecheck
-bun test
-
-# 実際のCodex認証と利用枠を使う明示的な実行試験
-bun scripts/smoke.ts
+tailscale serve --bg --https=443 http://127.0.0.1:3210
 ```
 
-通常のテストは外部サービスを使わず、一時Gitリポジトリで承認、停止・再開、計画改訂、再起動、ローカル統合を確認します。`smoke.ts`は実際のCodexで加算関数とテストを作成し、親ブランチでテストを実行します。確認用ファイルは一時ディレクトリに残し、終了時に場所を表示します。この試験のLinear部分は模擬実装です。
+表示された HTTPS URL を `BENI_PUBLIC_ORIGIN` に指定し、Beni のディレクトリで起動します。以下のホスト名は架空のサンプルなので、実際に表示されたものへ置き換えてください。末尾の `/` やパスは付けません。すでに Beni を起動している場合は、停止してからこのコマンドで起動し直します。
 
-**受信方式:** 通常運転はWebhook + Cloudflare Tunnelです。起動時の追いつき取得以外に、ポーリングを主経路にはしません。
+```sh
+BENI_PUBLIC_ORIGIN=https://example-node.example-tailnet.ts.net bun run start
+```
 
-## ドキュメント
+閲覧する端末で `https://example-node.example-tailnet.ts.net` を開きます。HTTPS の標準ポート443を使うため、URLにポート番号は不要です。IPアドレスへのHTTP接続ではなく、このHTTPS URLを使ってください。
 
-- [アプリケーション動作フロー](docs/application-workflow.md)
-- [確認事項への回答と実装方針](docs/implementation-questions.md)
-- [Linear OAuth / PKCE](https://linear.app/developers/oauth-2-0-authentication)
-- [Linear Agent Session](https://linear.app/developers/agent-interaction)
-- [Linear Webhooks](https://linear.app/developers/webhooks)
-- [Linear API制限](https://linear.app/developers/rate-limiting)
-- [Codex SDK](https://developers.openai.com/codex/sdk)
-- [Bunの資格情報ストア](https://bun.sh/docs/runtime/secrets)
+`BENI_PUBLIC_ORIGIN` は起動したプロセスだけに適用される環境変数です。設定ファイルには保存されないため、次回も同じ指定で起動します。Beni 自体は `127.0.0.1:3210` で待ち受け、指定した公開ホストと Origin を許可します。`BENI_PORT` を変える場合は、Serve の転送先ポートも合わせます。
+
+Serve の設定は `--bg` によりバックグラウンドで維持されます。確認と解除は次のコマンドで行います。解除しても Beni 自体は停止しません。
+
+```sh
+# 転送設定を確認
+tailscale serve status
+
+# HTTPS の転送を解除
+tailscale serve --https=443 off
+```
+
+この手順は Tailscale 内向けの公開です。Beni 自体には認証機能がないため、接続できる端末は Tailscale のアクセス制御で管理します。
+
+## データの保存先
+
+Beni が管理するデータは、Beni ルートの `data/` にまとめて保存します。`BENI_DATA_DIR` で保存先を変更できます。相対指定は起動時の作業ディレクトリを基準にします。
+
+- `beni.sqlite`: プロジェクト情報（ID・名前・日時・作業フォルダー）、インストラクションの版、更新ジョブと移行状態。
+- `projects/<projectId>.sqlite` にタスク情報・文書・版・ナレッジ・イベントを保存します。
+- `chats/<chatId>.json` に全用途の会話とアーカイブを保存します。所属とチャットIDの参照は `beni.sqlite` で管理します。
+
+作業フォルダーがなくても、Beni のデータ領域に保存済みの文書・会話・履歴は閲覧できます。フォルダーを移した場合は、ホームでプロジェクトを選び「作業フォルダーを変更」から再指定します。
+
+バックアップは Beni を停止してデータ領域全体を保存してください。`BENI_DATA_DIR` の変更だけでは既存データを移動しません。会話は平文で保存されるため、実データを公開リポジトリへ追加しないでください。
+
+## テスト
+
+型チェック、フロントエンドのビルド、バックエンドテスト、UI テストを実行します。チャットテストは偽エージェントを使うため、実際のアカウントは不要です。
+
+```sh
+bun run test
+```
+
+- [仕様書](docs/README.md)

@@ -1,0 +1,15 @@
+@import url("../beni-layout.css");
+
+#projectView:target {
+  display: block !important;
+}
+
+#settingsView:target {
+  display: block !important;
+}
+
+#exampleTree:target {
+  display: block !important;
+  position: static;
+  width: auto;
+}

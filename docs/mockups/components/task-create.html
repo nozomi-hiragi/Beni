@@ -1,0 +1,25 @@
+<link rel="stylesheet" href="beni-layout.css">
+<form class="box create" id="createForm">
+      <div class="field"><label for="taskName">タスク名</label><input id="taskName" placeholder="タスク名を入力"></div>
+      <div class="field"><label for="project">プロジェクト</label><select id="project">
+          <option value="">選択してください</option>
+          <option>サンプルプロジェクト</option>
+          <option value="new">＋ 新規プロジェクト作成</option>
+        </select></div><button id="create" disabled>タスク作成</button>
+    </form>
+<div data-include="project-create-dialog"></div>
+
+<script>
+(async () => {
+ const node = document.querySelector('[data-include="project-create-dialog"]');
+ try {
+  const response = await fetch('project-create-dialog.html'); if (!response.ok) throw new Error('load'); node.innerHTML = await response.text();
+  const nameInput = document.getElementById('taskName'), project = document.getElementById('project'), create = document.getElementById('create'), dialog = document.getElementById('projectCreateDialog');
+  function updateCreate() { create.disabled = !nameInput.value.trim() || !project.value || project.value === 'new'; }
+  nameInput.addEventListener('input', updateCreate);
+  project.addEventListener('change', () => { if (project.value === 'new') { project.value = ''; dialog.showModal(); } updateCreate(); });
+  dialog.addEventListener('close', () => { if (dialog.returnValue === 'create') { const option = new Option(document.getElementById('projectName').value, document.getElementById('projectName').value); project.add(option, project.querySelector('[value=new]')); project.value = option.value; } updateCreate(); });
+  document.getElementById('createForm').addEventListener('submit', event => event.preventDefault());
+ } catch { document.body.insertAdjacentText('beforeend', 'ダイアログを読み込めませんでした。'); }
+})();
+</script>
