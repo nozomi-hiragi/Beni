@@ -1,4 +1,4 @@
-// @vitest-environment beni-jsdom
+// @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@solidjs/testing-library';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { DataDetail, DataList, DataSqlCatalog, DataSqlResult, DataSummary } from '../../shared/data-browser';

@@ -1,6 +1,6 @@
 import { createSignal } from 'solid-js';
 import { resetModelCache } from '../../shared/model-cache';
-// @vitest-environment beni-jsdom
+// @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@solidjs/testing-library';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import Workspace from './Workspace';

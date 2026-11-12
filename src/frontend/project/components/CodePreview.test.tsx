@@ -1,4 +1,4 @@
-// @vitest-environment beni-jsdom
+// @vitest-environment jsdom
 import { cleanup, render } from '@solidjs/testing-library';
 import { afterEach, expect, it } from 'vitest';
 import CodePreview from './CodePreview';

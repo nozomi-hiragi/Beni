@@ -133,7 +133,6 @@ Beni/
 │       │       └── icons/             ナビゲーションや利用枠表示のアイコン
 │       └── test/                     複数の実装をまたぐテストとテスト補助
 │           ├── WorkspaceTrees.test.tsx  タスク・文書ツリーのテスト
-│           ├── jsdom-environment.mjs  Bun 上で動く Vitest の jsdom 環境
 │           ├── test-events.ts        WS とパックを模擬するテスト補助
 │           ├── ChatCommands.test.tsx  スラッシュコマンドのテスト
 │           ├── ClaudeChat.test.tsx     Claude チャットのテスト
