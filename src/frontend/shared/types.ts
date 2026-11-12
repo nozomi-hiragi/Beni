@@ -4,7 +4,7 @@ import type { Provider } from '../../shared/communication';
 export type { UsageWindow } from '../../shared/agent';
 export type { Provider } from '../../shared/communication';
 
-export interface Project { id: string; name: string; folder: string }
+export interface Project { id: string; name: string; folder: string; storageError?: string; folderAvailable?: false }
 export interface Task { createdAt?: string | null; updatedAt?: string | null; id: string; projectId: string; name: string; phase: string; status: string }
 export interface DocumentProvenance {
   revision: string;

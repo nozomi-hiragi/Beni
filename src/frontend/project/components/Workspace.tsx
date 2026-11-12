@@ -463,10 +463,10 @@ export default function Workspace(props: WorkspaceProps) {
               }</Show>
               <Show when={actualPhase() === 'finalization' && detail()?.task.status === 'completed' && instructionJob()}>{job =>
                 <div class="flex flex-wrap items-center gap-2 border-b border-base-300 px-3 py-2 text-sm">
-                  <p role="status">インストラクションの更新 · {instructionJobLabels[job().status]}</p>
+                  <p role="status">タスク完了ワークフロー · {instructionJobLabels[job().status]}</p>
                   <Show when={job().status === 'failed'}>
                     <Show when={job().error}><p class="text-error">{job().error}</p></Show>
-                    <button type="button" class="btn btn-sm" disabled={advancing()} onClick={() => void workflowAction('retry-instructions')}>インストラクションの更新を再試行</button>
+                    <button type="button" class="btn btn-sm" disabled={advancing()} onClick={() => void workflowAction('retry-instructions')}>タスク完了ワークフローを再試行</button>
                   </Show>
                 </div>
               }</Show>

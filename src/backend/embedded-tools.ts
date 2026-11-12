@@ -1,4 +1,5 @@
 import { validTaskId } from '../shared/ids';
+import { workflowEventTypes } from './project-events';
 
 export type EmbeddedTool = {type:'function';name:string;description:string;inputSchema:Record<string,unknown>};
 export type EmbeddedToolResult = {contentItems:{type:'inputText';text:string}[];success:boolean};
@@ -8,11 +9,11 @@ const tool=(name:string,description:string,properties:Record<string,unknown>,req
 export const defaultEventKinds=[
  'document.created','document.updated','document.renamed','document.deleted',
  'phase.changed','task.created','task.renamed','task.completed','task.reopened','task.deleted',
- 'execution.started','execution.finished','operation.started','operation.finished'
+ 'execution.started','execution.finished','operation.started','operation.finished', ...workflowEventTypes
 ];
-const eventKindPattern='^(?:document|phase|task|execution|operation|tool)\\.[a-z]+$';
+const eventKindPattern='^(?:(?:document|phase|task|execution|operation|tool)\\.[a-z]+|workflow\\.(?:started|completed|failed))$';
 export const eventTools:EmbeddedTool[]=[
- tool('list_events','Read a summary of relevant changes. Defaults to the current task (all project tasks in General), 20 events, and document, phase, task, execution, and operation changes. Set kind to an exact event type such as tool.finished. Continue using nextCursor if hasMore is true.',{after:integer,through:integer,limit:{type:'integer',minimum:1,maximum:100,default:20},task_id:{type:'string'},kind:{type:'string',pattern:eventKindPattern}}),
+ tool('list_events','Read a summary of relevant changes. Defaults to the current task (all project tasks in General), 20 events, and document, phase, task, execution, operation, and workflow changes. Set kind to an exact event type such as tool.finished. Continue using nextCursor if hasMore is true.',{after:integer,through:integer,limit:{type:'integer',minimum:1,maximum:100,default:20},task_id:{type:'string'},kind:{type:'string',pattern:eventKindPattern}}),
  tool('get_event','Read one event in this project.',{event_id:id},['event_id']),
  tool('get_file_change','Read the recorded file change for an event.',{event_id:id},['event_id']),
  tool('get_file_version','Restore a recorded file version without changing the file.',{path:{type:'string'},change_id:id},['path','change_id']),

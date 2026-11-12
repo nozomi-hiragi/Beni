@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
-import { existsSync, readFileSync } from 'node:fs';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
+import { mkdir, mkdtemp, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { ManualToolOperation, ManualToolRequest, ManualToolScope, ManualToolsCatalog } from '../shared/manual-tools';
@@ -92,8 +92,33 @@ test('手動ツールの一覧は実フェーズと所有範囲を検証し、�
  } finally { await close(); }
 });
 
+test('作業フォルダーの変更と手動操作を排他し、旧世代や消失後の実行を拒否する', async () => {
+ const { client, project, scope, folder, root, close } = await fixture();
+ try {
+  const original = await client.catalog(scope);
+  const request = client.request(original, 'list_events');
+  const moved = join(root, 'moved');
+  await mkdir(moved);
+  const changeFolder = (folder: string) => client.post('/api/projects/' + project.id + '/folder', {folder});
+  expect((await client.accept(request)).status).toBe(202);
+  expect((await changeFolder(moved)).status).toBe(409);
+  expect((await client.settled(scope, request.operationId)).status).toBe('completed');
+  expect((await changeFolder(moved)).status).toBe(200);
+  expect((await changeFolder(folder)).status).toBe(200);
+  expect((await client.accept(client.request(original, 'list_events'))).status).toBe(409);
+
+  const current = await client.catalog(scope);
+  const unavailable = client.request(current, 'list_events');
+  await rename(folder, join(root, 'unavailable'));
+  expect((await client.get('/api/tools' + query(scope))).status).toBe(409);
+  expect((await client.accept(unavailable)).status).toBe(409);
+  await writeFile(folder, '');
+  expect((await client.accept(unavailable)).status).toBe(409);
+ } finally { await close(); }
+});
+
 test('イベント取得の上限を受付時に固定し、通常のチャット履歴・パック・カーソルに影響しない', async () => {
- const { client, store, project, task, scope, folder, agent, close } = await fixture();
+ const { client, store, project, task, scope, root, agent, close } = await fixture();
  try {
   const body = { projectId: project.id, taskId: task.id, phase: 'requirements', content: '要件の入力', model: null };
   expect((await client.post('/api/chat/send', body)).status).toBe(202);
@@ -108,7 +133,7 @@ test('イベント取得の上限を受付時に固定し、通常のチャッ�
   }
   expect(before.messages.at(-1)?.status).toBe('completed');
   const packs = await (await client.get(packsPath)).text();
-  const history = join(folder, '.beni', 'chat', task.id, 'requirements.json');
+  const history = join(root, 'chats', before.id + '.json');
   const previousJson = readFileSync(history, 'utf8');
   const catalog = await client.catalog(scope);
   const input = client.request(catalog, 'list_events');
@@ -139,7 +164,7 @@ test('イベント取得の上限を受付時に固定し、通常のチャッ�
 });
 
 test('文書の版・引用・編集先を検証し、入れ子の型と省略・null・false・0を区別する', async () => {
- const { client, store, project, task, scope, agent, folder, close } = await fixture();
+ const { client, store, project, task, scope, agent, close } = await fixture();
  try {
   store.selectTaskPhase(project.id, task.id, 'requirements', 'documents');
   const catalog = await client.catalog(scope);
@@ -171,7 +196,7 @@ test('文書の版・引用・編集先を検証し、入れ子の型と省略�
   expect((await client.accept(read)).status).toBe(202);
   expect(JSON.parse((await client.settled(scope, read.operationId)).output!)).toMatchObject({revision:document.revision,item:{text:edit.text}});
   expect(agent.requests).toHaveLength(0);
-  expect(existsSync(join(folder, '.beni', 'chat', task.id, 'documents.json'))).toBe(false);
+  expect(store.chats.list({projectId:project.id,taskId:task.id,phase:'documents'})).toHaveLength(0);
  } finally { await close(); }
 });
 
@@ -252,7 +277,7 @@ test('インストラクションの直接更新を会話なしで実行し、�
   expect(operation.status).toBe('completed');
   const revision = store.instructionDocument('editor')!.revision;
   expect(revision).not.toBe(previous.revision);
-  expect(existsSync(join(root, 'chat', 'instructions.json'))).toBe(false);
+  expect(store.chats.list({projectId:'instructions',taskId:null,phase:null})).toHaveLength(0);
   expect(agent.requests).toHaveLength(0);
   const conflict = client.request(catalog, 'update_instruction', {...request.input, content:'古い入力での上書き'});
   expect((await client.accept(conflict)).status).toBe(202);
@@ -304,12 +329,12 @@ test('HTTP サーバーが JSON エスケープされた上限サイズの新旧
 });
 
 test('反省会の完了は停止後の有効な最新版・理由があるときだけ確定する', async () => {
- const { client, store, project, task, scope, agent, folder, close } = await fixture();
+ const { client, store, project, task, scope, agent, close } = await fixture();
  try {
   store.selectTaskPhase(project.id, task.id, 'requirements', 'retrospective');
   const initial = await client.catalog(scope);
   expect(initial.tools.some(tool => tool.name === 'finish_retrospective')).toBe(false);
-  const review = (state: string) => withDatabase(folder, db =>
+  const review = (state: string) => withDatabase(store.projectDatabasePath(project.id), db =>
    db.query("INSERT OR REPLACE INTO document_review(task_id,state,error) VALUES (?,?,NULL)").run(task.id, state));
   review('pending');
   const pending = await client.catalog(scope);
@@ -333,7 +358,7 @@ test('反省会の完了は停止後の有効な最新版・理由があると�
   expect((await client.catalog(scope)).tools.some(tool => tool.name === 'finish_retrospective')).toBe(false);
   expect(store.task(task.id)?.phase).toBe('retrospective');
   expect(agent.requests).toHaveLength(0);
-  expect(existsSync(join(folder,'.beni','chat',task.id,'retrospective.json'))).toBe(false);
+  expect(store.chats.list({projectId:project.id,taskId:task.id,phase:'retrospective'})).toHaveLength(0);
   store.setTaskCompleted(project.id, task.id, true, 'retrospective');
   expect((await client.catalog(scope)).tools.every(tool => tool.effect === 'read')).toBe(true);
  } finally { await close(); }

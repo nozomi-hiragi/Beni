@@ -1,6 +1,7 @@
 import { Show } from 'solid-js';
 import HomeIcon from './icons/HomeIcon';
 import DocumentIcon from './icons/DocumentIcon';
+import DataIcon from './icons/DataIcon';
 import SettingsIcon from './icons/SettingsIcon';
 import UsageIndicators from './UsageIndicators';
 import type { ManualToolScope } from '../../../shared/manual-tools';
@@ -13,6 +14,7 @@ export interface NavbarProps {
   toolsPage?: string;
   showHome: boolean;
   onHome: () => void;
+  onData: () => void;
   onInstructions: () => void;
   onSettings: () => void;
 }
@@ -25,10 +27,15 @@ export default function Navbar(props: NavbarProps) {
       </button>
     </Show>
     <strong class="min-w-0 truncate text-lg font-semibold tracking-tight">{props.title}</strong>
+    <ManualTools scope={props.toolScope} page={props.toolsPage} unavailable={props.toolsUnavailable} />
     <span class="flex-1" aria-hidden="true" />
     <UsageIndicators />
     <ul class="menu menu-horizontal rounded-box p-1">
-      <ManualTools scope={props.toolScope} page={props.toolsPage} unavailable={props.toolsUnavailable} />
+      <li>
+        <button type="button" class="tooltip tooltip-bottom" data-tip="データ" aria-label="データ" onClick={props.onData}>
+          <DataIcon />
+        </button>
+      </li>
       <li>
         <button type="button" class="tooltip tooltip-bottom" data-tip="インストラクション管理" aria-label="インストラクション管理" onClick={props.onInstructions}>
           <DocumentIcon />

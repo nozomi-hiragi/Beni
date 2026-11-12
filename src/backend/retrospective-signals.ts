@@ -1,4 +1,3 @@
-import { resolve } from 'node:path';
 import type { DocumentVersion } from './document-table';
 import { withDatabase, type ProjectEventDetails } from './project-events';
 import type { Store } from './store';
@@ -52,9 +51,8 @@ type Anomaly = {
 };
 
 function executionSignals(store: Store, projectId: string, taskId: string, offset: number) {
-  // taskDocumentFolder は対象タスクとプロジェクトの所属を検証する。
-  const folder = resolve(store.taskDocumentFolder(projectId, taskId), '../../..');
-  return withDatabase(folder, db => db.transaction(() => {
+  return withDatabase(store.projectDatabasePath(projectId), db => db.transaction(() => {
+    if (!db.query('SELECT 1 FROM tasks WHERE id=?').get(taskId)) throw Error('Unknown task');
     const rows = db.query<ToolRow, [string]>(`
       SELECT event.id, event.type, event.operation_id, event.details
       FROM events AS event

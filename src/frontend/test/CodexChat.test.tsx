@@ -480,7 +480,7 @@ it('同時パネルは一覧取得を共有し、ローカル選択は再初期�
  expect(calls).toBe(2);
 });
 
-it('requires instruction focus and sends the selection captured at submit', async () => {
+it.each(['common','task.completed'])('requires instruction focus and sends %s captured at submit', async selectedFocus => {
  const sent:unknown[]=[];
  stubLegacyAgentFetch(vi.fn((url:string,init?:RequestInit)=>{
   if(url==='/api/codex/status') return Promise.resolve(json({installed:true,auth:'chatgpt',models:[{id:'test',name:'Test'}]}));
@@ -496,10 +496,10 @@ it('requires instruction focus and sends the selection captured at submit', asyn
  expect(submit.disabled).toBe(true);
  fireEvent.submit(submit.closest('form')!);
  expect(sent).toHaveLength(0);
- setFocus('common');
+ setFocus(selectedFocus);
  await waitFor(()=>expect(submit.disabled).toBe(false));
  fireEvent.click(submit);
  setFocus('editor');
  await waitFor(()=>expect(sent).toHaveLength(1));
- expect(sent[0]).toMatchObject({projectId:'instructions',instructionFocus:'common',content:'指示を整えて'});
+ expect(sent[0]).toMatchObject({projectId:'instructions',instructionFocus:selectedFocus,content:'指示を整えて'});
 });

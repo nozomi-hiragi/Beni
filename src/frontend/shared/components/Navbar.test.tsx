@@ -13,7 +13,7 @@ it('displays the current title and only shows the home button outside home', asy
   const onInstructions = vi.fn();
   const [title, setTitle] = createSignal('Beni');
   const [showHome, setShowHome] = createSignal(false);
-  render(() => <Navbar title={title()} showHome={showHome()} onHome={onHome} onSettings={onSettings} onInstructions={onInstructions} />);
+  render(() => <Navbar title={title()} showHome={showHome()} onHome={onHome} onData={vi.fn()} onSettings={onSettings} onInstructions={onInstructions} />);
 
   expect(screen.getByText('Beni')).toBeTruthy();
   expect(screen.queryByRole('button', { name: 'ホームへ戻る' })).toBeNull();

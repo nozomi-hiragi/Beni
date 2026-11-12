@@ -297,17 +297,27 @@ test('Claude local command は固定allowlistとresumeを要求し、通常タ�
   const run=await begin(`/${name}`);try{await until(run.closed);expect(run.events.find(event=>event.method==='item/agentMessage/delta')?.params.delta).toBe(`/${name} isn't available in this environment.`);expect(run.events.some(event=>event.method==='thread/command/output')).toBe(false)}finally{run.rpc.close()}
  }
 });
-test('Claude local command の既知拒否、model fallback、無効な出力を成功として配信しない',async()=>{
+test.each([
+ 'unavailable','not-listed','outcome-unavailable_headless',
+ 'fallback','stream-fallback','failure','empty','non-text','oversize','multibyte-oversize',
+ 'missing-source','non-string-source','different-command','alias-command','nonempty-args','missing-args','missing-session',
+ 'mixed-tool','invalid-content','combined-oversize','legacy-oversize',
+ 'outcome-failed','outcome-unknown','outcome-restart_required','outcome-success','outcome-null',
+ 'no-init','parent-only','empty-parent',
+])('Claude local command は %s の失敗を出力なしで通知する',async mode=>{
+ process.env.FAKE_CLAUDE_COMMAND=mode;
  try{
-  for(const mode of ['unavailable','not-listed','fallback','stream-fallback','failure','empty','non-text','oversize','multibyte-oversize']){
-   process.env.FAKE_CLAUDE_COMMAND=mode;const run=await prepareCommand();
-   try{
-    await run.started.catch(()=>{});await until(run.closed);
-    expect(run.events.map(event=>event.method)).toEqual(['turn/started','turn/completed']);
-    expect(run.events.at(-1)?.params.turn).toMatchObject({status:'failed',error:{code:['unavailable','not-listed'].includes(mode)?'COMMAND_UNAVAILABLE':'COMMAND_NOT_PERFORMED'}});
-    expect(JSON.stringify(run.events)).not.toContain('Private');expect(JSON.stringify(run.events)).not.toContain('Model fallback');
-   }finally{run.rpc.close()}
-  }
+  const run=await prepareCommand();
+  try{
+   await run.started.catch(()=>{});await until(run.closed);
+   expect(run.events.map(event=>event.method)).toEqual(['turn/started','turn/completed']);
+   const code=['unavailable','not-listed','outcome-unavailable_headless'].includes(mode)?'COMMAND_UNAVAILABLE':'COMMAND_NOT_PERFORMED';
+   expect(run.events.at(-1)?.params.turn).toMatchObject({status:'failed',error:{code}});
+   const events=JSON.stringify(run.events);
+   expect(events).not.toContain('Private');
+   expect(events).not.toContain('Model fallback');
+   expect(events).not.toContain('Raw');
+  }finally{run.rpc.close()}
  }finally{delete process.env.FAKE_CLAUDE_COMMAND}
 });
 test('Claude local command は64KiBを改変せず返し、親イベントを除外し、別sessionとdisconnectは完了にしない',async()=>{
@@ -380,19 +390,6 @@ test('Claude local command はsynthetic本文を使い、raw sourceとresultの�
     expect(run.events.map(event=>event.method)).toEqual(['turn/started','thread/command/output','turn/completed']);
     expect(run.events[1].params.output).toBe('Usage: 3 fictional requests\n');
     expect(run.events.at(-1)?.params.turn.status).toBe('completed');expect(JSON.stringify(run.events)).not.toContain('Raw fixture');
-   }finally{run.rpc.close()}
-  }
- }finally{delete process.env.FAKE_CLAUDE_COMMAND}
-});
-test('Claude local synthetic のmetadata、canonical本文、outcome、累計UTF8上限を厳密に検証する',async()=>{
- try{
-  for(const mode of ['missing-source','non-string-source','different-command','alias-command','nonempty-args','missing-args','missing-session','mixed-tool','invalid-content','combined-oversize','legacy-oversize','outcome-failed','outcome-unknown','outcome-restart_required','outcome-success','outcome-null','outcome-unavailable_headless','no-init','parent-only','empty-parent']){
-   process.env.FAKE_CLAUDE_COMMAND=mode;const run=await prepareCommand();
-   try{
-    await run.started.catch(()=>{});await until(run.closed);
-    expect(run.events.map(event=>event.method)).toEqual(['turn/started','turn/completed']);
-    expect(run.events.at(-1)?.params.turn).toMatchObject({status:'failed',error:{code:mode==='outcome-unavailable_headless'?'COMMAND_UNAVAILABLE':'COMMAND_NOT_PERFORMED'}});
-    expect(JSON.stringify(run.events)).not.toContain('Raw');expect(JSON.stringify(run.events)).not.toContain('Private');
    }finally{run.rpc.close()}
   }
  }finally{delete process.env.FAKE_CLAUDE_COMMAND}

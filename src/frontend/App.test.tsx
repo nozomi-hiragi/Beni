@@ -9,6 +9,10 @@ const tasks = [{id:'019a0000-0000-7100-8000-00000000000b', projectId:'019a0000-0
 const json = (data: unknown) => ({ ok: true, json: async () => data }) as Response;
 beforeEach(() => {
   history.replaceState(null, '', '/');
+  // jsdom has no layout or ResizeObserver; chat scrolling is tested separately.
+  vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} });
+  FakeWebSocket.instances = [];
+  vi.stubGlobal('WebSocket', FakeWebSocket);
   vi.stubGlobal('fetch', vi.fn((url: string) => {
     if (url === '/api/instructions') return Promise.resolve(json({instructions:[{key:'editor',content:'編集相談用の指示'},{key:'common',content:'共通の指示'},{key:'requirements',content:'要件の指示'}]}));
     if (url === '/api/chat?projectId=instructions') return Promise.resolve(json({messages:[]}));
@@ -18,10 +22,6 @@ beforeEach(() => {
     throw new Error(`Unexpected URL ${url}`);
   }));
 });
-beforeEach(() => {
-  // jsdom has no layout or ResizeObserver; chat scrolling is tested separately.
-  vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} });
-  FakeWebSocket.instances = []; vi.stubGlobal('WebSocket', FakeWebSocket); });
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); history.replaceState(null, '', '/'); });
 const pop = (url: string) => { history.replaceState(null, '', url); window.dispatchEvent(new PopStateEvent('popstate')); };
@@ -73,12 +73,8 @@ it('does not recognize arbitrary or unsafe URL paths', () => {
 it('does not let a late project lookup change a newer page', async () => {
   let release!: (response: Response) => void;
   const pending = new Promise<Response>(resolve => { release = resolve; });
-  vi.stubGlobal('fetch', vi.fn((url: string) => {
-    if (url === '/api/instructions') return Promise.resolve(json({instructions:[{key:'editor',content:'編集相談用の指示'},{key:'common',content:'共通の指示'},{key:'requirements',content:'要件の指示'}]}));
-    if (url === '/api/chat?projectId=instructions') return Promise.resolve(json({messages:[]}));
-    if (url === '/api/state') return pending;
-    throw new Error(`Unexpected URL ${url}`);
-  }));
+  const original = fetch;
+  vi.stubGlobal('fetch', vi.fn((url: string, init?: RequestInit) => url === '/api/state' ? pending : original(url, init)));
   pop('/project/019a0000-0000-7000-8000-000000000001');
   render(() => <App />);
   expect(await screen.findByText('読み込み中...')).toBeTruthy();
@@ -95,16 +91,15 @@ it('never labels another project with the previous project name while loading or
   let calls = 0;
   let rejectSecond!: (error: Error) => void;
   const pending = new Promise<Response>((_, reject) => { rejectSecond = reject; });
-  vi.stubGlobal('fetch', vi.fn((url: string) => {
-    if (url === '/api/instructions') return Promise.resolve(json({instructions:[{key:'editor',content:'編集相談用の指示'},{key:'common',content:'共通の指示'},{key:'requirements',content:'要件の指示'}]}));
-    if (url === '/api/chat?projectId=instructions') return Promise.resolve(json({messages:[]}));
+  const original = fetch;
+  vi.stubGlobal('fetch', vi.fn((url: string, init?: RequestInit) => {
     if (url === '/api/state') {
       calls++;
       return calls <= 2 ? Promise.resolve(json({projects,tasks})) : pending;
     }
     const task = tasks.find(item => url === `/api/tasks/${item.id}`);
     if (task) return Promise.resolve(json({task,messages:[],documents:[]}));
-    throw new Error(`Unexpected URL ${url}`);
+    return original(url, init);
   }));
   pop('/project/019a0000-0000-7000-8000-000000000001?task=019a0000-0000-7100-8000-00000000000b');
   render(() => <App />);
@@ -187,10 +182,6 @@ it('updates the URL after deletion and refuses a deleted task from cached histor
 });
 
 it('opens instruction management from the header and keeps it separate from settings through history', async () => {
-  const original = fetch;
-  vi.stubGlobal('fetch', vi.fn((url: string, init?: RequestInit) => url === '/api/instructions'
-    ? Promise.resolve(json({instructions: [{key:'editor',content:'編集相談用の指示'}, {key:'common',content:'共通の指示'}, {key:'requirements',content:'要件の指示'}]}))
-    : original(url, init)));
   render(() => <App />);
   fireEvent.click(screen.getByRole('button', {name:'インストラクション管理'}));
   expect(location.pathname).toBe('/instructions');
@@ -230,6 +221,39 @@ it('recognizes a direct instruction management URL', async () => {
   expect(screen.queryByRole('heading', {name:'設定',level:1})).toBeNull();
 });
 
+it('returns from the DB tab to the default data view using the header button', async () => {
+  const original = fetch;
+  const observedAt = '2026-01-02T03:04:05.000Z';
+  const request = vi.fn((url: string, init?: RequestInit) => {
+    if (url === '/api/data/sql?database=app') {
+      return Promise.resolve(json({database: 'app', databases: [{id: 'app', name: 'アプリDB', source: 'data/beni.sqlite'}], tables: [], observedAt}));
+    }
+    if (url === '/api/data/sql' && init?.method === 'POST') {
+      expect(JSON.parse(String(init.body))).toEqual({database: 'app', sql: 'SELECT * FROM "projects" LIMIT 500'});
+      return Promise.resolve(json({columns: ['name'], rows: [], elapsedMs: 1, truncated: false, observedAt}));
+    }
+    if (url.startsWith('/api/data?')) {
+      return Promise.resolve(json({records: [], scopes: [], total: 0, offset: 0, limit: 50, errors: [], observedAt}));
+    }
+    return original(url, init);
+  });
+  vi.stubGlobal('fetch', request);
+  pop('/data?view=db&database=app&table=projects');
+  render(() => <App />);
+  expect(screen.getByRole('tab', {name:'DB'}).getAttribute('aria-selected')).toBe('true');
+  expect(await screen.findByText('0 行 · 1 ms')).toBeTruthy();
+
+  fireEvent.click(screen.getByRole('button', {name:'データ'}));
+  expect(location.pathname).toBe('/data');
+  expect(location.search).toBe('');
+  expect(screen.getByRole('tab', {name:'ファイル'}).getAttribute('aria-selected')).toBe('true');
+  expect(await screen.findByText('0 ファイル')).toBeTruthy();
+
+  pop('/data?view=db&database=app&table=projects');
+  expect(screen.getByRole('tab', {name:'DB'}).getAttribute('aria-selected')).toBe('true');
+  expect(await screen.findByText('0 行 · 1 ms')).toBeTruthy();
+});
+
 it('uses the current URL scope for manual tools and preserves the chat draft', async () => {
   // jsdom implements the dialog element and open attribute without modal methods.
   const dialog = HTMLDialogElement.prototype;
@@ -258,7 +282,7 @@ it('uses the current URL scope for manual tools and preserves the chat draft', a
     return Promise.resolve(json({
       scope: search.get('kind') === 'instructions' ? { kind: 'instructions' } : { kind: 'project', projectId: projects[0].id, taskId },
       label: taskId ? '架空プロジェクト / 一つ目' : search.get('kind') === 'instructions' ? '共通のインストラクション' : '架空プロジェクト',
-      phase: taskId ? 'requirements' : null, revision: 'test', tools: taskId ? [{
+      phase: taskId ? 'requirements' : null, revision: 'test', tools: taskId || search.get('kind') === 'instructions' ? [{
         name: 'list_events', description: 'イベント一覧を取得', category: 'events', effect: 'read',
         inputSchema: { type: 'object', properties: {}, additionalProperties: false },
       }] : [],
@@ -268,11 +292,11 @@ it('uses the current URL scope for manual tools and preserves the chat draft', a
   render(() => <App />);
   const draft = await screen.findByRole('textbox', { name: '希望や回答を入力' });
   fireEvent.input(draft, { target: { value: 'チャットの下書き' } });
-  const open = () => {
-    fireEvent.click(screen.getByRole('button', { name: 'ツール' }));
+  const open = async () => {
+    fireEvent.click(await screen.findByRole('button', { name: 'ツール' }));
     return within(screen.getByRole('dialog', { name: 'ツール' }));
   };
-  let view = open();
+  let view = await open();
   expect(await view.findByText(/対象：架空プロジェクト \/ 一つ目/)).toBeTruthy();
   fireEvent.click(await view.findByRole('button', { name: /list_events/ }));
   fireEvent.click(view.getByRole('button', { name: '実行' }));
@@ -281,11 +305,9 @@ it('uses the current URL scope for manual tools and preserves the chat draft', a
   expect(draft).toHaveProperty('value', 'チャットの下書き');
   expect(within(screen.getByRole('log', { name: 'チャット履歴' })).queryByText('ツールの結果')).toBeNull();
   pop(path);
-  view = open();
-  await view.findByText('対象：架空プロジェクト');
+  expect(screen.queryByRole('button', { name: 'ツール' })).toBeNull();
   pop('/instructions');
-  await waitFor(() => expect(screen.queryByRole('dialog', { name: 'ツール' })).toBeNull());
-  view = open();
+  view = await open();
   await view.findByText('対象：共通のインストラクション');
   expect(requests).toEqual([
     `/api/tools?kind=project&projectId=${projects[0].id}&taskId=${tasks[0].id}`,

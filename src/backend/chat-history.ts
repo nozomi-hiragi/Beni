@@ -44,6 +44,7 @@ type ConversationFields = {
   workflowJobId?: string;
   command?: ChatCommand;
   appliedEditorContent?: string;
+  folderGeneration?: number;
 };
 
 type ProviderNames = Record<Provider, { name: string; models: Record<string, string> }>;
@@ -76,8 +77,9 @@ type StoredProvider = {
   messageData?: Record<string, ResumeIds>;
   unassignedSession?: StoredSession & { active?: true };
 };
-export type StoredConversation = Omit<ConversationFields, 'packs'> & {
+export type StoredConversation = Omit<ConversationFields, 'packs' | 'id'> & {
   version: 3;
+  chatId: string;
   selectedModelId: string | null;
   providers: Record<Provider, StoredProvider>;
   messages: StoredMessage[];
@@ -148,15 +150,18 @@ function commandFields(value: unknown): ChatCommand | undefined {
 }
 
 function conversationFields(value: Record<string, unknown>): Omit<ConversationFields, 'packs'> {
-  const { id, projectId, taskId, phase, appliedEditorContent, workflowJobId } = value;
+  const { projectId, taskId, phase, appliedEditorContent, workflowJobId, folderGeneration } = value;
+  const id = value.chatId ?? value.id;
+  if (value.chatId !== undefined && value.id !== undefined && value.chatId !== value.id) invalid();
   if (!nonempty(id) || !nonempty(projectId) || (taskId !== null && !nonempty(taskId)) ||
       (phase !== null && !isTaskPhase(phase) && !(value.version === 1 && taskId === null && phase === undefined)) ||
-      !optionalString(appliedEditorContent) || !optionalString(workflowJobId)) invalid();
+      !optionalString(appliedEditorContent) || !optionalString(workflowJobId) || (folderGeneration !== undefined && !count(folderGeneration))) invalid();
   const command = commandFields(value.command);
   return {
     id, projectId, taskId, phase: phase ?? null,
     ...(appliedEditorContent === undefined ? {} : { appliedEditorContent }),
     ...(workflowJobId === undefined ? {} : { workflowJobId }),
+    ...(folderGeneration === undefined ? {} : { folderGeneration }),
     ...(command === undefined ? {} : { command }),
   };
 }
@@ -492,9 +497,9 @@ export function encodeChatHistory(c: Conversation, providerName?: (provider: Pro
       ...(content === textContent(packs) ? {} : { contentOverride: content }),
     };
   });
-  const { id, projectId, taskId, phase, command, workflowJobId, appliedEditorContent } = c;
+  const { id, projectId, taskId, phase, command, workflowJobId, appliedEditorContent, folderGeneration } = c;
   return {
-    version: 3, id, projectId, taskId, phase, selectedModelId: selected ? modelKey(selectedProvider, selected.id) : null,
-    providers, messages, command, workflowJobId, appliedEditorContent,
+    version: 3, chatId: id, projectId, taskId, phase, selectedModelId: selected ? modelKey(selectedProvider, selected.id) : null,
+    providers, messages, command, workflowJobId, appliedEditorContent, folderGeneration,
   };
 }

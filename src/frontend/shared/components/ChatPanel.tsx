@@ -6,6 +6,7 @@ import { ChatSync } from '../chat-sync';
 import { followChatBottom } from '../chat-scroll';
 import type { Pack, TaskPhase } from '../../../shared/communication';
 import { isTaskPhase } from '../../../shared/task-phase';
+import { taskCompletedInstructionKey } from '../instruction-display';
 import { findChatCommand, parseChatCommand, type ChatCommand, type ChatCommandDefinition } from '../../../shared/chat-commands';
 import type { ContextUsage } from '../../../shared/agent';
 import { availableModels, chooseModel, loadModels, modelIsAvailable, modelLabel, modelScope, modelStatus, modelValue, providerCommands, providerName, providerReady, providerSupportsCompaction, registeredAgent, registeredAgents, rejectModel, selectedModel } from '../model-cache';
@@ -132,7 +133,7 @@ export default function ChatPanel(props: { projectId: string; taskId?: string; p
     if ((provider === 'codex' || provider === 'claude') && (status.auth === 'api-key' || status.auth === 'other')) return `${name} はサブスクリプション以外の認証方式です。設定を確認してください。`;
     return `${name} の接続状態を設定で確認してください。`;
   };
-  const commandFor = (name: string, provider = selectedProvider()) => findChatCommand(name, provider, providerCommands(provider));
+  const commandFor = (name: string, provider = selectedProvider()) => findChatCommand(name, providerCommands(provider));
   const permittedCommands = () => providerCommands(modelAvailable() ? selectedProvider() : undefined)
     .filter(item => item.name !== 'compact' && (item.kind !== 'message' || props.projectId !== 'instructions'));
   createEffect(() => { selectedProvider(); setActiveSuggestion(-1); });
@@ -381,7 +382,7 @@ export default function ChatPanel(props: { projectId: string; taskId?: string; p
     });
   });
   createEffect(() => props.onBusyChange?.(busy()));
-  const validInstructionFocus = () => props.projectId !== 'instructions' || props.instructionFocus === 'common' || props.instructionFocus === 'editor' || isTaskPhase(props.instructionFocus);
+  const validInstructionFocus = () => props.projectId !== 'instructions' || props.instructionFocus === 'common' || props.instructionFocus === 'editor' || props.instructionFocus === taskCompletedInstructionKey || isTaskPhase(props.instructionFocus);
   function openStatus() {
     if (conversation() && statusDialog && !statusDialog.open) statusDialog.showModal();
   }

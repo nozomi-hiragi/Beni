@@ -1,20 +1,23 @@
-import { instructionNames, instructionVariables, composeInstructions, defaultInstructions, isInstructionKey, type InstructionKey, type Instruction } from './instructions';
+import type { Store } from './store';
+import { instructionNames, instructionVariables, composeInstructions, defaultInstructions, isInstructionKey, type InstructionKey, type Instruction, type taskCompletedInstructionKey } from './instructions';
 import { projectKnowledge } from './documents';
 import { join, dirname, relative, isAbsolute } from 'node:path';
 import { defaultEventKinds, EventToolArgumentsError, eventTools, eventToolArguments, boundedEmbeddedToolResult, type EmbeddedTool } from './embedded-tools';
-import { readFileSync, lstatSync, readdirSync, realpathSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
+import { Database } from 'bun:sqlite';
 import { isTaskPhase, type TaskPhase } from '../shared/task-phase';
 import { createHash, randomUUID } from 'node:crypto';
-import { directory, projectRoot, readJson, writeJson } from './data';
+import { directory, projectRoot } from './data';
+import { ChatStore, type ChatScope } from './chat-store';
 import { validProjectId, validTaskId } from '../shared/ids';
-import { INSTRUCTIONS_CHAT_ID, packHash, packHeader, validPack, isProvider, type Provider, type Pack, type TopicEvent } from '../shared/communication';
+import { INSTRUCTIONS_CHAT_ID, packHash, packHeader, isProvider, type Provider, type Pack, type TopicEvent } from '../shared/communication';
 
 import { parseChatCommand } from '../shared/chat-commands';
 import { isAgentId, type AgentConnectionStatus, type AgentInfo, type ContextUsage, type RateLimitUsage } from '../shared/agent';
 import { type Agent, type AgentEvent, type AgentHost, type AgentOutcome, type AgentRequest, type AgentStatus, type AgentToolEvent, type AgentUsage } from './agents/agent';
 import { createAgents } from './agents';
 import { restoreRateLimitUsage } from './rate-limits';
-import { decodeChatHistory, emptySession, encodeChatHistory, modelKey, parseContextUsage, sessionSnapshot, type Conversation, type Message, type Session, type State } from './chat-history';
+import { emptySession, encodeChatHistory, modelKey, parseContextUsage, sessionSnapshot, type Conversation, type Message, type Session, type State } from './chat-history';
 
 type ActiveRun = {controller:AbortController; done?:Promise<void>};
 const sessionTarget = (session:Session|undefined, agentId:Provider):AgentRequest['target'] =>
@@ -47,7 +50,6 @@ export type WorkflowToolsProvider = {
 };
 type WorkflowRun = {provider:WorkflowToolsProvider;context:WorkflowToolContext;tools:EmbeddedTool[]};
 type WorkflowJob = {id:string;finished:(status:State)=>void};
-const uuidPattern=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const digest = (value:string) => createHash('sha256').update(value).digest('hex');
 const now = () => new Date().toISOString();
 
@@ -123,17 +125,30 @@ export class ChatService {
  private executionFinished:(p:string,t:string)=>void=()=>{};
  setExecutionFinished(callback:(p:string,t:string)=>void){this.executionFinished=callback}
  private finishExecution(p:string,t:string){if(!this.explicitStops.has(key(p,t)))this.executionFinished(p,t)}
- private finalizingProjects=new Set<string>();
+ private finalizingProjects=new Map<string,string>();
  private finalizationFinished:(p:string,t:string,started:boolean)=>void|Promise<void>=()=>{};
  setFinalizationFinished(callback:(p:string,t:string,started:boolean)=>void|Promise<void>){this.finalizationFinished=callback}
  private instructionSource:()=>Instruction[]=()=>defaultInstructions;
  setInstructions(source:()=>Instruction[]){this.instructionSource=source}
  private instructionEditor?:{directory:string;update:(key:unknown,content:unknown,expected:unknown)=>unknown};
- setInstructionEditor(editor:{directory:string;update:(key:unknown,content:unknown,expected:unknown)=>unknown}){this.instructionEditor=editor}
+ setInstructionEditor(editor:{directory:string;update:(key:unknown,content:unknown,expected:unknown)=>unknown}){
+  this.instructionEditor=editor;
+ }
  private taskEvents?:TaskEventsProvider;
  setTaskEvents(provider:TaskEventsProvider){this.taskEvents=provider}
  private workflowTools?:WorkflowToolsProvider;
  setWorkflowTools(provider:WorkflowToolsProvider){this.workflowTools=provider}
+ private projectStorage?:{chats:ChatStore;generation:(id:string)=>number;canRun:(id:string)=>boolean;workflowJobEvent:(projectId:string,jobId:string)=>typeof taskCompletedInstructionKey};
+ setProjectStorage(storage:NonNullable<ChatService['projectStorage']>){this.projectStorage=storage}
+ private canRunProject(p:string){return p===INSTRUCTIONS_CHAT_ID||this.projectStorage?.canRun(p)!==false}
+ projectBusy(p:string){
+  const belongs=(value:string)=>JSON.parse(value)[0]===p;
+  return [...this.finalizingProjects.values()].includes(p)||[this.preparing,this.stopping,this.active.keys(),this.locks.keys(),this.manualToolScopes].some(entries=>[...entries].some(belongs))||
+   [...this.contextProbes.keys()].some(value=>belongs(JSON.parse(value)[0]));
+ }
+ projectFolderChanged(p:string){
+  for(const scope of this.listeners.keys())if(JSON.parse(scope)[0]===p)this.notify(scope,{name:'chat.changed',data:{}});
+ }
  private readonly manualToolScopes = new Set<string>();
  private overlaps(p:string,t:string|null,value:string) {
   const [project,task,,job] = JSON.parse(value);
@@ -159,7 +174,7 @@ export class ChatService {
  private active=new Map<string,ActiveRun>();
  private contextProbes=new Map<string,Promise<ContextUsage|undefined>>();
  withIdleTask<T>(p:string,t:string,change:()=>T):T{key(p,t);if(this.stopping.has(key(p,t))||this.busy(p,t)||[...this.locks.keys()].some(value=>{const [project,task]=JSON.parse(value);return project===p&&task===t}))throw Error('busy');return change();}
- async startTask<T>(p:string,t:string,change:()=>T,rollback:()=>void,model:string|null,cwd:string,documents:string,provider:Provider=this.defaultAgentId):Promise<T>{
+ async startTask<T>(p:string,t:string,change:()=>T,rollback:()=>void,model:string|null,cwd:string,documents:string|undefined,provider:Provider=this.defaultAgentId):Promise<T>{
   const task=this.withIdleTask(p,t,change),taskKey=key(p,t);
   this.stopping.add(taskKey);
   this.startRollbacks.set(taskKey,rollback);
@@ -168,11 +183,11 @@ export class ChatService {
    return task;
   }catch(error){this.startRollbacks.delete(taskKey);rollback();throw error}finally{this.stopping.delete(taskKey)}
  }
- async startFinalization<T>(p:string,t:string,change:()=>T,rollback:()=>void,cwd:string,documents:string):Promise<T>{
+ async startFinalization<T>(p:string,t:string,change:()=>T,rollback:()=>void,cwd:string,documents?:string):Promise<T>{
   const taskKey=key(p,t),project=realpathSync(cwd);
   this.withIdleTask(p,t,()=>{
    if(this.finalizingProjects.has(project))throw Error('busy');
-   this.finalizingProjects.add(project);
+   this.finalizingProjects.set(project,p);
    this.stopping.add(taskKey);
   });
   try {
@@ -182,13 +197,10 @@ export class ChatService {
     const previous=await this.load(p,t,'finalization');
     if(!previous.messages.length)return;
     // フェーズ移行より先に現行会話を空にし、復旧時に前回の送信と区別する。
-    if(!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(previous.id))throw Error('Invalid history id');
-    const history=directory(join(dirname(this.path(p,t,'finalization')),'history'));
-    this.writeHistory(join(history,`${previous.id}.json`),previous);
-    await this.save({version:1,id:randomUUID(),projectId:p,taskId:t,phase:'finalization',lastEventId:0,selectedModel:null,threadId:null,sessionId:null,messages:[],packs:[]});
+    this.replace(previous,{...this.empty(previous),selectedModel:null});
     return previous;
    });
-   const restore=async()=>{if(previous)await this.locked(finalizationKey,async()=>{await this.save(previous);this.emit(previous,{name:'chat.changed',data:{}})})};
+   const restore=async()=>{if(previous)await this.locked(finalizationKey,async()=>{this.chatStorage(p).restore(previous,previous.id);this.emit(previous,{name:'chat.changed',data:{}})})};
    let task:T;
    try {task=change()}catch(error){await restore();throw error}
    try {
@@ -261,77 +273,70 @@ export class ChatService {
  providerForModel(model:{provider?:Provider}|null|undefined):Provider{return model?model.provider??'codex':this.defaultAgentId}
  setTaskActivity(activity:(projectId:string,taskId:string)=>void){this.activity=activity}
  private async locked<T>(k:string,fn:()=>Promise<T>):Promise<T>{const prior=this.locks.get(k)??Promise.resolve();const job=prior.catch(()=>{}).then(fn);this.locks.set(k,job);try{return await job}finally{if(this.locks.get(k)===job)this.locks.delete(k)}}
- private chatDirectory(path:string,create:boolean){
-  if(create)return directory(path);
-  const stat=lstatSync(path);
-  if(!stat.isDirectory()||stat.isSymbolicLink())throw Error('Invalid chat directory');
-  return path;
+ private standaloneStorage=new Map<string,ChatStore>();
+ private chatStorage(p:string){
+  if(this.projectStorage)return this.projectStorage.chats;
+  const root=p===INSTRUCTIONS_CHAT_ID?this.instructionEditor!.directory:projectRoot(this.resolveProjectFolder(p));
+  let storage=this.standaloneStorage.get(root);
+  if(!storage){storage=new ChatStore(new Database(join(root,'beni.sqlite')),root);this.standaloneStorage.set(root,storage)}
+  return storage;
  }
- private path(p:string,t:string|null,phase:TaskPhase|null,create=true,jobId?:string){
+ private chatScope(p:string,t:string|null,phase:TaskPhase|null,jobId?:string):ChatScope{
   conversationKey(p,t,phase);
-  const root=this.chatDirectory(p===INSTRUCTIONS_CHAT_ID
-   ?join(this.instructionEditor!.directory,'chat')
-   :join(projectRoot(this.resolveProjectFolder(p)),'chat'),create);
   if(jobId!==undefined){
-   if(t!==null||p===INSTRUCTIONS_CHAT_ID)throw Error('Invalid workflow job scope');
-   return join(this.chatDirectory(join(root,'workflow-jobs'),create),`${digest(jobId)}.json`);
+   if(t!==null||p===INSTRUCTIONS_CHAT_ID||!this.projectStorage)throw Error('Invalid workflow job scope');
+   this.projectStorage.workflowJobEvent(p,jobId);
   }
-  if(t!==null)return join(this.chatDirectory(join(root,t),create),`${phase}.json`);
-  return join(root,p===INSTRUCTIONS_CHAT_ID?'instructions.json':'general.json');
+  return {projectId:p,taskId:t,phase,workflowJobId:jobId};
  }
- private historyDirectory(p:string,path:string){
-  return this.chatDirectory(join(dirname(path),p===INSTRUCTIONS_CHAT_ID?'instruction-history':'history'),false);
+ private empty(scope:ChatScope):Conversation{
+  const {projectId,taskId,phase,workflowJobId}=scope;
+  return {projectId,taskId,phase,workflowJobId,id:'',selectedModel:null,version:1,lastEventId:0,threadId:null,sessionId:null,messages:[],packs:[]};
  }
- private writeHistory(path:string,c:Conversation){writeJson(path,encodeChatHistory(c,id=>this.agents.get(id)?.name))}
- private async save(c:Conversation,activity=false){this.writeHistory(this.path(c.projectId,c.taskId,c.phase,true,c.workflowJobId),c);if(activity&&c.taskId!==null)this.activity(c.projectId,c.taskId)}
- private validateHistory(value:unknown,p:string,t:string|null,phase:TaskPhase|null,jobId?:string):Conversation {
-  const c=decodeChatHistory(value);
-  if(c.workflowJobId!==jobId||c.projectId!==p||c.taskId!==t||c.phase!==phase)throw Error('Invalid history');
-  if(!Array.isArray(c.packs)||c.packs.some((pack,i)=>!validPack(pack)||pack.sequence!==i+1)||new Set(c.packs.map(pack=>pack.packId)).size!==c.packs.length)throw Error('Invalid history');
-  return c;
+ private encode(c:Conversation){
+  if(c.projectId!==INSTRUCTIONS_CHAT_ID&&this.projectStorage)c.folderGeneration=this.projectStorage.generation(c.projectId)||undefined;
+  return encodeChatHistory(c,id=>this.agents.get(id)?.name);
+ }
+ private replace(previous:Conversation,next:Conversation){
+  return this.chatStorage(previous.projectId).create(previous,id=>this.encode({...next,id}),previous.id);
+ }
+ private async save(c:Conversation,activity=false){
+  this.chatStorage(c.projectId).save(c,this.encode(c));
+  if(activity&&c.taskId!==null)this.activity(c.projectId,c.taskId);
  }
  private async load(p:string,t:string|null,phase:TaskPhase|null,jobId?:string):Promise<Conversation>{
-  const path=this.path(p,t,phase,true,jobId);
-  try {const raw=readJson(path);const c=this.validateHistory(raw,p,t,phase,jobId);const needsSave=(raw.version===1&&(raw.phase===undefined||raw.lastEventId===undefined))||(p===INSTRUCTIONS_CHAT_ID&&c.appliedEditorContent===undefined);if(p===INSTRUCTIONS_CHAT_ID)c.appliedEditorContent??=this.savedEditor();if(needsSave)await this.save(c);return c}
-  catch(e:any){if(e.code!=='ENOENT')throw e;const c:Conversation={workflowJobId:jobId,selectedModel:null,version:1,id:randomUUID(),projectId:p,taskId:t,phase,lastEventId:0,threadId:null,sessionId:null,messages:[],packs:[]};if(p===INSTRUCTIONS_CHAT_ID){c.appliedEditorContent=this.savedEditor();await this.save(c)}return c}
+  const scope=this.chatScope(p,t,phase,jobId),storage=this.chatStorage(p);
+  storage.recover(scope);
+  let c=storage.read(scope);
+  if(!c){
+   const initial=this.empty(scope);
+   if(p===INSTRUCTIONS_CHAT_ID)initial.appliedEditorContent=this.savedEditor();
+   return storage.create(scope,id=>this.encode({...initial,id}));
+  }
+  const needsSave=p===INSTRUCTIONS_CHAT_ID&&c.appliedEditorContent===undefined;
+  if(needsSave)c.appliedEditorContent=this.savedEditor();
+  const generation=p===INSTRUCTIONS_CHAT_ID?0:this.projectStorage?.generation(p)??0;
+  if((c.folderGeneration??0)!==generation){
+   Object.assign(c,emptySession());delete c.sessions;delete c.unassignedSessions;delete c.sessionProvider;c.folderGeneration=generation;
+  }
+  if(needsSave)await this.save(c);
+  return c;
+ }
+ getById(p:string,t:string|null,phase:TaskPhase|null,chatId:string,jobId?:string){
+  return this.chatStorage(p).read(this.chatScope(p,t,phase,jobId),chatId);
  }
  workflowSources(p:string,t:string|null,phase:TaskPhase|null,chatId?:string,sendId?:string,jobId?:string){
-  try {
-   const path=this.path(p,t,phase,false,jobId);
-   let conversation:Conversation|undefined;
-   try{conversation=this.validateHistory(readJson(path),p,t,phase,jobId)}catch(error:any){if(error.code!=='ENOENT')throw error}
-   if(chatId!==undefined&&conversation?.id!==chatId){
-    if(jobId!==undefined||!uuidPattern.test(chatId))return undefined;
-    const history=this.historyDirectory(p,path);
-    conversation=this.validateHistory(readJson(join(history,`${chatId}.json`)),p,t,phase);
-    if(conversation.id!==chatId)return undefined;
-   }
-   if(!conversation)return undefined;
-   return {
-    chatId:conversation.id,
-    messages:conversation.messages.filter(message=>sendId===undefined||message.sendId===sendId),
-    packs:conversation.packs.filter(pack=>sendId===undefined||pack.sendId===sendId)
-   };
-  }catch(error:any){if(error.code!=='ENOENT')throw error;return undefined}
+  const conversation=this.chatStorage(p).read(this.chatScope(p,t,phase,jobId),chatId);
+  if(!conversation)return undefined;
+  return {
+   chatId:conversation.id,
+   messages:conversation.messages.filter(message=>sendId===undefined||message.sendId===sendId),
+   packs:conversation.packs.filter(pack=>sendId===undefined||pack.sendId===sendId)
+  };
  }
  workflowHistoryIds(p:string,t:string|null,phase:TaskPhase|null):string[]{
-  const ids=new Set<string>();
-  try{
-   const path=this.path(p,t,phase,false);
-   try{ids.add(this.validateHistory(readJson(path),p,t,phase).id)}catch(error:any){if(error.code!=='ENOENT')throw error}
-   const history=this.historyDirectory(p,path);
-   for(const entry of readdirSync(history)){
-    const id=entry.endsWith('.json')?entry.slice(0,-5):'';
-    if(!uuidPattern.test(id))continue;
-    let raw:ReturnType<typeof readJson>;
-    try{raw=readJson(join(history,entry))}catch(error:any){if(error.code==='ENOENT')continue;throw error}
-    if((raw.phase??null)!==phase)continue;
-    const archived=this.validateHistory(raw,p,t,phase);
-    if(archived.id!==id)throw Error('Invalid history id');
-    ids.add(id);
-   }
-  }catch(error:any){if(error.code!=='ENOENT')throw error}
-  return [...ids];
+  const scope=this.chatScope(p,t,phase),storage=this.chatStorage(p);
+  return storage.list(scope).map(ref=>storage.read(scope,ref.chatId)!.id);
  }
  async workflowJob(jobId:string,p:string,cwd:string,prompt:string,provider:Provider,model:string|null):Promise<State>{
   if(!jobId||p===INSTRUCTIONS_CHAT_ID)throw Error('Invalid workflow job');
@@ -342,22 +347,17 @@ export class ChatService {
  }
  private phaseReference(p:string,t:string,phase:'execution'|'retrospective'){
   const heading=phase==='execution'?'実装の会話抜粋':'反省会の会話抜粋';
-  try{
-   const source=this.validateHistory(readJson(this.path(p,t,phase,false)),p,t,phase);
-   return conversationExcerpt(source.messages,heading);
-  }catch(error:any){
-   if(error.code!=='ENOENT')throw error;
-   return conversationExcerpt([],heading);
-  }
+  return conversationExcerpt(this.chatStorage(p).read(this.chatScope(p,t,phase))?.messages??[],heading);
  }
- async get(p:string,t:string|null,phase:TaskPhase|null=t===null?null:'requirements'){const k=conversationKey(p,t,phase);return this.locked(k,async()=>{const c=await this.load(p,t,phase);if(!this.active.has(k)){let changed=false;if(c.command?.status==='running'){c.command.status='unknown';c.command.error='コマンドの結果を確認できませんでした';changed=true;}const events:TopicEvent[]=[];for(const m of c.messages)if(m.status==='pending'||m.status==='streaming'){m.status='unknown';m.updatedAt=now();changed=true}for(const pack of c.packs)if(pack.state==='streaming'){this.closePack(pack,pack.role==='user'?'completed':'unknown',events);changed=true}if(changed){await this.save(c);if(t!==null&&phase==='execution')this.finishExecution(p,t);for(const event of events)this.emit(c,event);this.emit(c,{name:'chat.changed',data:{}})}}return c})}
+
+ async get(p:string,t:string|null,phase:TaskPhase|null=t===null?null:'requirements'){const k=conversationKey(p,t,phase);return this.locked(k,async()=>{const c=await this.load(p,t,phase);if(!this.active.has(k)){let changed=false;if(c.command?.status==='running'){c.command.status='unknown';c.command.error='コマンドの結果を確認できませんでした';changed=true;}const events:TopicEvent[]=[];for(const m of c.messages)if(m.status==='pending'||m.status==='streaming'){m.status='unknown';m.updatedAt=now();changed=true}for(const pack of c.packs)if(pack.state==='streaming'){this.closePack(pack,pack.role==='user'?'completed':'unknown',events);changed=true}if(changed){await this.save(c);if(t!==null&&phase==='execution'&&this.canRunProject(p))this.finishExecution(p,t);for(const event of events)this.emit(c,event);this.emit(c,{name:'chat.changed',data:{}})}}return c})}
 
  async getContextUsage(p:string,t:string|null,phase:TaskPhase|null,provider:Provider,model:string,cwd:string,options:{refresh?:boolean;scopeCurrent?:()=>boolean}={}){
   const k=conversationKey(p,t,phase),taskKey=key(p,t);
   const agent=this.agents.get(provider);
   if(!agent?.getContextUsage||phase==='finalization')return;
   const modelId=modelKey(provider,model);
-  const idle=()=>!this.stopping.has(taskKey)&&!this.busy(p,t)&&options.scopeCurrent?.()!==false;
+  const idle=()=>this.canRunProject(p)&&!this.stopping.has(taskKey)&&!this.busy(p,t)&&options.scopeCurrent?.()!==false;
   const result=await this.locked(k,async()=>{
    if(!idle())return;
    const c=await this.load(p,t,phase);
@@ -410,12 +410,7 @@ export class ChatService {
    const content=this.savedEditor();
    if(content!==expected)throw Error('conflict');
    if(previous.appliedEditorContent===content)return {pending:false,busy:false};
-   // 現在の会話は置換が成功するまで維持し、履歴を先に保存する。
-   if(!/^[0-9a-f-]{36}$/.test(previous.id))throw Error('Invalid history id');
-   const history=directory(join(this.instructionEditor!.directory,'chat','instruction-history'));
-   this.writeHistory(join(history,`${previous.id}.json`),previous);
-   const current:Conversation={version:1,id:randomUUID(),projectId:p,taskId:null,phase:null,lastEventId:0,selectedModel:previous.selectedModel,threadId:null,sessionId:null,messages:[],packs:[],appliedEditorContent:content};
-   await this.save(current);
+   const current=this.replace(previous,{...this.empty(previous),selectedModel:previous.selectedModel,appliedEditorContent:content});
    this.emit(current,{name:'chat.changed',data:{}});
    return {pending:false,busy:false};
   });
@@ -424,24 +419,47 @@ export class ChatService {
  async pack(p:string,t:string|null,id:string,phase:TaskPhase|null=t===null?null:'requirements'){const c=await this.get(p,t,phase);const pack=c.packs.find(pack=>pack.packId===id);if(!pack)throw Error('not found');if(pack.state!=='closed')throw Error('not closed');return {pack}}
  async ack(p:string,t:string|null,id:string,hash:string,phase:TaskPhase|null=t===null?null:'requirements'){const {pack}=await this.pack(p,t,id,phase);return await packHash(pack)===hash?{matched:true as const}:{matched:false as const,pack}}
  private usageAccounts = new Map<Provider, UsageAccount>();
- private usageDirectory?: string;
+ private agentStore?: Store;
  private statusChecks = new Map<Provider, Promise<AgentStatus>>();
  private usageRefreshes = new Map<Provider, Promise<AgentConnectionStatus>>();
- setUsageDirectory(path: string) {
-  this.usageDirectory = path;
+ setAgentStore(store: Store) {
+  this.agentStore = store;
+  store.registerAgents(this.agentList());
  }
- private usagePath(provider: Provider) {
-  return this.usageDirectory && join(directory(this.usageDirectory), `rate-limits-${provider}.json`);
+ private invalidatedStatuses = new Set<Provider>();
+ private statusGenerations = new Map<Provider, number>();
+ private invalidateAgent(agentId:Provider) {
+  this.statusGenerations.set(agentId,(this.statusGenerations.get(agentId)??0)+1);
+  this.statusChecks.delete(agentId);
+  this.invalidatedStatuses.add(agentId);
+  try{this.agentStore?.invalidateAgentStatus(agentId)}catch{ /* 次回はメモリでも再確認する。 */ }
  }
- private checkAgent(agent:Agent):Promise<AgentStatus> {
-  const pending=this.statusChecks.get(agent.id);
-  if(pending)return pending;
-  const request=agent.getStatus().then(status=>{
+ private checkAgent(agent:Agent,refresh=false):Promise<AgentStatus> {
+  if(!refresh){
+   const pending=this.statusChecks.get(agent.id);
+   if(pending)return pending;
+   let saved:AgentStatus|undefined;
+   if(!this.invalidatedStatuses.has(agent.id))try{saved=this.agentStore?.agentStatus(agent.id)}catch{ /* 破損時は再確認する。 */ }
+   if(saved){
+    this.usageForAccount(agent.id,saved.availability==='ready'?saved.accountKey:undefined);
+    return Promise.resolve(saved);
+   }
+  }
+  const generation=(this.statusGenerations.get(agent.id)??0)+1;
+  this.statusGenerations.set(agent.id,generation);
+  const request=agent.getStatus().then(async status=>{
+   if(this.statusGenerations.get(agent.id)!==generation)return this.checkAgent(agent);
    this.usageForAccount(agent.id,status.availability==='ready'?status.accountKey:undefined);
+   if(this.agentStore){
+    try{this.agentStore.saveAgentStatus(agent.id,status);this.invalidatedStatuses.delete(agent.id)}catch{this.invalidatedStatuses.add(agent.id) /* 保存できなくても今回の確認値を使う。 */ }
+   }
    return status;
-  }).finally(()=>this.statusChecks.delete(agent.id));
+  }).finally(()=>{if(this.statusChecks.get(agent.id)===request)this.statusChecks.delete(agent.id)});
   this.statusChecks.set(agent.id,request);
   return request;
+ }
+ private invalidateOutcome(agentId:Provider,outcome:AgentOutcome) {
+  if(outcome.status==='unknown'||outcome.status==='failed'&&['unavailable','model-unavailable','unsupported'].includes(outcome.code))this.invalidateAgent(agentId);
  }
  private publicStatus(provider:Provider,status:AgentStatus):AgentConnectionStatus {
   const {accountKey,...publicStatus}=status;
@@ -463,7 +481,7 @@ export class ChatService {
  private async fetchAgentUsage(provider:Provider) {
   const agent=this.agents.get(provider);
   if(!agent)return this.agentStatus(provider);
-  const status=await this.checkAgent(agent);
+  const status=await this.checkAgent(agent,true);
   const account=this.usageAccounts.get(provider);
   if(status.availability==='ready'&&agent.getUsage){
    const update=await agent.getUsage().catch(()=>undefined);
@@ -491,14 +509,18 @@ export class ChatService {
   if(this.usageAccounts.get(provider)?.identity===identity)return;
   let usage:RateLimitUsage='unknown';
   try{
-   const path=this.usagePath(provider);
-   const saved=path?readJson(path):undefined;
-   if(saved?.version===1&&saved.identity===identity)usage=restoreRateLimitUsage(saved.usage);
+   const saved=this.agentStore?.agentUsage(provider);
+   if(saved?.identity===identity)usage=saved.usage;
   }catch{ /* キャッシュがなくても利用枠は再取得できる。 */ }
   this.usageAccounts.set(provider,{identity,usage});
  }
  private applyUsage(provider:Provider,account:UsageAccount,update:AgentUsage) {
-  if(this.usageAccounts.get(provider)!==account||update.accountKey!==account.identity)return;
+  if(this.usageAccounts.get(provider)!==account||update.accountKey===undefined)return;
+  if(update.accountKey!==account.identity){
+   account.usage='unknown';
+   this.invalidateAgent(provider);
+   return;
+  }
   const usage=restoreRateLimitUsage(update.usage);
   if(usage==='unknown')return;
   if(account.usage!=='unknown'&&Date.parse(usage.observedAt)<Date.parse(account.usage.observedAt))return;
@@ -516,8 +538,7 @@ export class ChatService {
   }
   account.usage=usage;
   try{
-   const path=this.usagePath(provider);
-   if(path)writeJson(path,{version:1,identity:account.identity,usage});
+   this.agentStore?.saveAgentUsage(provider,account.identity,usage);
   }catch{ /* 保存できなくても今回の値は表示できる。 */ }
  }
  callEventTool(projectId:string,taskId:string|null,history:{after:number;through:number},name:string,input:unknown) {
@@ -604,6 +625,7 @@ export class ChatService {
   if(legacy)delete c.unassignedSessions![provider];
  }
  async command(p:string,t:string|null,command:string,cwd:string,documentDirectory?:string,phase:TaskPhase|null=t===null?null:'requirements',options:{args?:string;provider?:Provider;model?:string|null}={}){
+  if(!this.canRunProject(p))throw Error('working folder unavailable');
   const args=options.args?.trim()??'';
   if(phase==='finalization'||!validCommandName(command)||args.length>16384||(options.provider!==undefined&&!isProvider(options.provider)))throw Error('invalid command');
   if(p===INSTRUCTIONS_CHAT_ID){if(t!==null||phase!==null||documentDirectory||!this.instructionEditor)throw Error('Invalid chat scope');cwd=directory(join(this.instructionEditor.directory,'instruction-editor'))}
@@ -614,12 +636,10 @@ export class ChatService {
    const c=await this.load(p,t,phase);
    if(command==='clear'||command==='new'||command==='reset'){
     if(args)throw Error('invalid command');
-    // 履歴を先に保存し、新しい会話の置換が成功するまで元の会話を維持する。
-    if(!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(c.id))throw Error('Invalid history id');
-    const history=directory(join(dirname(this.path(p,t,phase)),'history'));
-    this.writeHistory(join(history,`${c.id}.json`),c);
-    const current:Conversation={version:1,id:randomUUID(),projectId:p,taskId:t,phase,lastEventId:0,selectedModel:c.selectedModel,threadId:null,sessionId:null,messages:[],packs:[],...(c.appliedEditorContent!==undefined?{appliedEditorContent:c.appliedEditorContent}:{}),command:{id:randomUUID(),name:'clear',status:'completed'}};
-    await this.save(current);this.emit(current,{name:'chat.changed',data:{}});
+    const current=this.replace(c,{...this.empty(c),selectedModel:c.selectedModel,
+     ...(c.appliedEditorContent!==undefined?{appliedEditorContent:c.appliedEditorContent}:{}),
+     command:{id:randomUUID(),name:'clear',status:'completed'}});
+    this.emit(current,{name:'chat.changed',data:{}});
     return {command:{...current.command!}};
    }
    const selected=c.selectedModel;
@@ -634,7 +654,8 @@ export class ChatService {
     ?sessionTarget(requestedModel?modelSession(c,modelKey(provider,requestedModel)):undefined,provider)
     :{mode:'ephemeral' as const};
    if(definition.requiresSession&&target.mode!=='resume')throw Error('no thread');
-   const status=await this.checkAgent(agent);
+   let status=await this.checkAgent(agent);
+   if(requestedModel&&!status.models?.some(item=>item.id===requestedModel))status=await this.checkAgent(agent,true);
    if(status.availability!=='ready')throw Error('unavailable');
    const modelId=requestedModel??status.models?.[0]?.id;
    if(!modelId||!status.models?.some(model=>model.id===modelId))throw Error('unavailable');
@@ -679,6 +700,7 @@ export class ChatService {
    });
    if(outcome.status==='completed'&&!accepted)outcome={status:'unknown'};
   }catch{outcome={status:'unknown'}}
+  this.invalidateOutcome(agent.id,outcome);
   try{
    await this.locked(k,async()=>{
     const current=await this.load(c.projectId,c.taskId,c.phase);
@@ -707,7 +729,7 @@ export class ChatService {
   const jobId=job?.id;
   const workflowProvider=p===INSTRUCTIONS_CHAT_ID?undefined:this.workflowTools;
 
-  if(phase==='finalization'&&(!reserved||!documentDirectory))throw Error('invalid phase');
+  if(phase==='finalization'&&(!reserved||(!documentDirectory&&!workflowProvider)))throw Error('invalid phase');
   const agent=this.agents.get(provider);
   if(!agent)throw Error('unavailable');
   const parsedCommand=job?undefined:parseChatCommand(content);
@@ -721,11 +743,13 @@ export class ChatService {
   if(p===INSTRUCTIONS_CHAT_ID)cwd=directory(join(this.instructionEditor!.directory,'instruction-editor'));
   const taskKey=key(p,t);
   const scope=conversationKey(p,t,phase),k=job?JSON.stringify([p,t,phase,jobId]):scope;
+  if(!this.canRunProject(p))throw Error('working folder unavailable');
   if(!job&&((this.stopping.has(taskKey)&&!reserved)||this.busy(p,t)))throw Error('busy');
   if(!job)this.preparing.add(taskKey);
   try {
    const managed=workflowProvider?.context(p,t,phase,jobId);
    if(job&&!managed)throw Error('Unavailable workflow job');
+   if(phase==='finalization'&&!documentDirectory&&!managed)throw Error('invalid phase');
    const workflowTools=managed?workflowProvider!.tools(p,t,phase,jobId):[];
    const names=new Set(job?[]:eventTools.map(tool=>tool.name));
    for(const tool of workflowTools){
@@ -738,8 +762,8 @@ export class ChatService {
    const workingDirectory=managed?cwd:phase==='finalization'&&knowledge?dirname(knowledge):documentDirectory&&(phase==='execution'||phase==='retrospective')?cwd:documentDirectory??cwd;
    let knowledgeContent=managed?.knowledge??(knowledge?'':undefined);
    if(knowledge)try{knowledgeContent=readFileSync(knowledge,'utf8')}catch(error:any){if(phase!=='finalization'||error.code!=='ENOENT')throw error}
-   const executionHistory=documentDirectory&&phase==='retrospective'&&t!==null?this.path(p,t,'execution'):undefined;
-   const retrospectiveHistory=documentDirectory&&phase==='finalization'&&t!==null?this.path(p,t,'retrospective'):undefined;
+   const executionHistory=(managed||documentDirectory)&&phase==='retrospective'&&t!==null?'Beni が添付する実装の会話抜粋':undefined;
+   const retrospectiveHistory=(managed||documentDirectory)&&phase==='finalization'&&t!==null?'Beni が添付する反省会の会話抜粋':undefined;
    const phaseReference=t!==null&&(executionHistory||retrospectiveHistory)?this.phaseReference(p,t,executionHistory?'execution':'retrospective'):undefined;
    const phaseReferenceHash=phaseReference===undefined?undefined:digest(phaseReference);
    const renderInstructions=(context=managed)=>p===INSTRUCTIONS_CHAT_ID?'':job?context!.text:composeInstructions(this.instructionSource(),context||documentDirectory?phase:null,{
@@ -747,8 +771,8 @@ export class ChatService {
     task_directory:context?'Beni のタスク文書（埋め込みツールで参照）':documentDirectory,phase:phase??undefined,
     knowledge_path:context?context.knowledgePath??'Beni のプロジェクトナレッジ（埋め込みツールで参照）':knowledge,
     knowledge_content:context?JSON.stringify(context.knowledge):knowledgeContent===undefined?undefined:JSON.stringify(knowledgeContent),
-    execution_chat_path:context&&executionHistory?'Beni が添付する実装の会話抜粋':executionHistory,
-    retrospective_chat_path:context&&retrospectiveHistory?'Beni が添付する反省会の会話抜粋':retrospectiveHistory
+    execution_chat_path:executionHistory,
+    retrospective_chat_path:retrospectiveHistory
    },!!context)
     +(context?'\n\n'+context.text:'')
     +(phaseReference!==undefined?'\n\n別フェーズの会話は Beni が添える会話抜粋を資料として利用する。保存済みのチャット JSON は丸ごと読み込まない。':'')
@@ -768,7 +792,8 @@ export class ChatService {
     const priorSession=requestedModel===undefined?undefined:modelSession(c,modelKey(provider,requestedModel))
      ??(allowUnassigned?unassignedSession(c,provider):undefined);
     const history=job||!agent.supportsEmbeddedTools?undefined:await this.pendingTaskEvents(c,priorSession);
-    const status=await this.checkAgent(agent);
+    let status=await this.checkAgent(agent);
+    if(requestedModel&&!status.models?.some(item=>item.id===requestedModel))status=await this.checkAgent(agent,true);
     const access=writable?'workspace-write':'read-only';
     if(status.availability!=='ready'||!agent.accessModes.includes(access))throw Error('unavailable');
     model=requestedModel??status.models?.[0]?.id??null;
@@ -1066,9 +1091,11 @@ export class ChatService {
    }
    const code=outcome.status==='failed'?outcome.code:undefined;
    const status=eventFailed?'failed':outcome.status==='completed'&&!accepted?'unknown':outcome.status;
+   this.invalidateOutcome(provider,status==='unknown'?{status:'unknown'}:outcome);
    await finish(status,code==='model-unavailable'?'MODEL_UNAVAILABLE':undefined,
     !accepted&&(!dispatched||outcome.status==='failed'));
   }catch{
+   if(dispatched&&!active.controller.signal.aborted)this.invalidateAgent(provider);
    await finish(eventFailed||!dispatched?'failed':'unknown',undefined,!dispatched).catch(()=>{});
   }
  }

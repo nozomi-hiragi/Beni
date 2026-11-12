@@ -1,5 +1,7 @@
+import { DataBrowserError } from './data-browser';
+import { DataSqlError } from './data-sql';
 import { instructionKeys, isInstructionKey, type InstructionKey } from './instructions';
-import { Store } from './store/index';
+import { InstructionJobBusy, ProjectFolderError, Store } from './store/index';
 import { ChatService, ModelUnavailable } from './chat';
 import { createAgents } from './agents';
 import { TerminalService, TerminalError } from './terminal';
@@ -8,6 +10,7 @@ import type { Server } from 'bun';
 import { isTaskPhase, type TaskPhase } from '../shared/task-phase';
 import { INSTRUCTIONS_CHAT_ID, validId, isProvider, type Provider } from '../shared/communication';
 import { validProjectId, validTaskId } from '../shared/ids';
+import { assertChatMigrationReady } from './chat-migration';
 import { implementationPlanReady } from './documents';
 import { DocumentWorkflow } from './document-workflow';
 import { ManualTools, ManualToolRequestError, manualToolQueryScope } from './manual-tools';
@@ -21,7 +24,7 @@ import { fileURLToPath } from 'node:url';
 const maxListedFolders = 500;
 const maxRequestBodyBytes = 65536;
 // JSON の Unicode エスケープは本文の UTF-8 1 byte あたり最大 6 bytes。キー等の分も確保する。
-const maxInstructionApplyBodyBytes = maxRequestBodyBytes * 6 + 1024;
+const maxEscapedBodyBytes = maxRequestBodyBytes * 6 + 1024;
 // update_instruction は本文と競合確認用の旧本文を同じリクエストで送る。
 const maxManualToolBodyBytes = maxRequestBodyBytes * 2 * 6 + 4096;
 function requestAccess(publicOrigin?: string) {
@@ -69,28 +72,27 @@ async function listFolders(path: string) {
 
 const row = (value: unknown): Record<string, any> => value as Record<string, any>;
 const projectTask = (value: unknown) => { const t = row(value); return {id:t.id, projectId:t.project_id, name:t.name, phase:t.phase, status:t.status, createdAt:t.createdAt, updatedAt:t.updatedAt}; };
-const documentFolder = (store:Store,project:any, task:any) => store.taskDocumentFolder(project.id,task.id);
-const projectResolver = (store:Store) => (projectId:string) => {
- const project=store.projects().map(row).find(project=>project.id===projectId);
- if(!project)throw Error('Project not found');
- return project.folder as string;
-};
+const projectResolver = (store:Store) => (projectId:string) => store.workingFolder(projectId);
 const projectForScope = (store:Store,projectId:unknown,taskId:unknown) => {
-  if (!validProjectId(projectId) || (taskId!==null && !validTaskId(taskId))) return null;
-  const project=store.projects().map(row).find(p=>p.id===projectId);
-  if (!project) return null;
-  if (taskId!==null) {const task=store.task(taskId);if(!task || row(task).project_id!==projectId)return null}
-  return project;
- };
+ if (!validProjectId(projectId) || (taskId!==null && !validTaskId(taskId))) return null;
+ const project=store.project(projectId);
+ if (!project || project.storageError) return null;
+ if (taskId!==null && store.task(taskId)?.project_id!==projectId) return null;
+ return project;
+};
 export function createHandler(store: Store, initialFolder = homedir(), chat = new ChatService(projectResolver(store),createAgents()), publicOrigin?: string, terminals = new TerminalService(), taskEventsChanged:(p:string,t:string)=>void=()=>{}, documentsChanged:(p:string,t:string)=>void=()=>{}) {
+ const dataBrowser=store.dataBrowser();
  const changed=(p:string,t:string)=>{taskEventsChanged(p,t);documentsChanged(p,t)};
  const workflow=new DocumentWorkflow(store,chat,projectResolver(store),changed,()=>chat.notifyInstructionChanges());
+ chat.setProjectStorage({
+  chats:store.chats,generation:id=>store.projectFolderGeneration(id),canRun:id=>store.canRunProject(id),
+  workflowJobEvent:(projectId,jobId)=>store.workflowJobEvent(projectId,jobId)
+ });
  const manualTools=new ManualTools(store,chat,workflow);
  chat.setWorkflowTools(workflow);
- workflow.kickJobs();
  chat.setInstructions(()=>store.instructions());
  chat.setInstructionEditor({directory:store.dataDirectory,update:(key,content,expected)=>store.updateInstruction(key,content,expected)});
- chat.setUsageDirectory(store.dataDirectory);
+ chat.setAgentStore(store);
  chat.setExecutionFinished((p,t)=>{
   const task=store.task(t);
   if(task?.phase!=='execution'||task.status==='completed')return;
@@ -102,7 +104,6 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
   const task=store.task(t);
   if(task?.phase!=='finalization'||task.status!=='idle')return;
   if(started&&await workflow.complete(p,t)){
-   store.setTaskCompleted(p,t,true,'finalization');
    workflow.kickJobs();
   }else{
    store.rollbackTaskFinalization(p,t);
@@ -118,6 +119,7 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
   event:(p,id)=>store.projectEvent(p,id),change:(p,id)=>store.projectFileChange(p,id),version:(p,path,id)=>store.projectFileVersion(p,path,id),
   append:(p,input)=>{const event=store.recordProjectEvent(p,input);if(event.taskId!==null)taskEventsChanged(p,event.taskId);return event}
  });
+ workflow.kickJobs();
  const chatScope=(p:unknown,t:unknown)=>p===INSTRUCTIONS_CHAT_ID&&t===null?{folder:store.dataDirectory}:projectForScope(store,p,t);
  const access=requestAccess(publicOrigin);
  const scope=(p:unknown,t:unknown)=>projectForScope(store,p,t);
@@ -125,6 +127,8 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
   task.phase==='finalization' ? store.managedDocument(task.projectId,null,'knowledge.md',
    task.status==='completed' ? revision : undefined) : undefined;
  const recoverTask=async (task:ReturnType<typeof projectTask>, opened=false)=>{
+  if(!store.canRunProject(task.projectId))return;
+  if(task.status==='completed'&&store.recoverTaskCompletion(task.projectId,task.id))workflow.kickJobs();
   if(task.phase==='execution'&&!workflow.isExecutionContinuing(task.id))await chat.recoverExecution(task.projectId,task.id);
   if(task.phase==='finalization'&&task.status==='idle')await chat.recoverFinalization(task.projectId,task.id);
   if(task.phase==='retrospective'&&task.status==='idle'){
@@ -144,9 +148,33 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
   const json = (value: unknown, status = 200) => Response.json(value,{status,headers:{'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}});
   if (request.method === 'GET') {
    try {
-   if (url.pathname === '/' || url.pathname === '/settings' || url.pathname === '/instructions' || validProjectId(url.pathname.match(/^\/project\/([^/]+)$/)?.[1]) || ['/ui/index.html','/ui/build/app.js','/ui/generated.css','/ui/style.css'].includes(url.pathname)) {
+   if (url.pathname === '/' || url.pathname === '/settings' || url.pathname === '/instructions' || url.pathname === '/data' || validProjectId(url.pathname.match(/^\/project\/([^/]+)$/)?.[1]) || ['/ui/index.html','/ui/build/app.js','/ui/generated.css','/ui/style.css'].includes(url.pathname)) {
     const file = url.pathname === '/ui/build/app.js' ? '../../dist/frontend/app.js' : url.pathname === '/ui/style.css' ? '../../dist/frontend/beni.css' : url.pathname === '/ui/generated.css' ? '../../dist/frontend/generated.css' : '../frontend/index.html';
     return new Response(Bun.file(new URL(file,import.meta.url)),{headers:{'Content-Security-Policy':"default-src 'self'; img-src 'self' data:; style-src 'self'; style-src-elem 'self' 'unsafe-inline'; style-src-attr 'unsafe-inline'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'",'X-Content-Type-Options':'nosniff','Cache-Control':'no-store'}});
+   }
+   if (url.pathname === '/api/data' || url.pathname === '/api/data/detail') {
+    try {
+     if (url.pathname === '/api/data') return json(dataBrowser.list(url.searchParams));
+     if ([...url.searchParams.keys()].some(key => key !== 'id' && key !== 'view') ||
+         url.searchParams.getAll('id').length !== 1 || url.searchParams.getAll('view').length > 1) {
+      throw new DataBrowserError(400);
+     }
+     return json(dataBrowser.detail(url.searchParams.get('id'),url.searchParams.get('view') ?? undefined));
+    } catch (error) {
+     if (error instanceof DataBrowserError) return json({error:error.message},error.status);
+     return json({error:'保存データを読み込めませんでした'},500);
+    }
+   }
+   if (url.pathname === '/api/data/sql') {
+    try {
+     if ([...url.searchParams.keys()].some(key => key !== 'database') || url.searchParams.getAll('database').length > 1) {
+      throw new DataSqlError('invalid');
+     }
+     return json(await dataBrowser.sqlCatalog(url.searchParams.get('database') ?? 'app',request.signal));
+    } catch (error) {
+     const failure = error instanceof DataSqlError ? error : new DataSqlError('unavailable');
+     return json({error:failure.message},failure.status);
+    }
    }
    if (url.pathname === '/api/project-files' || url.pathname === '/api/project-file') {
     const { searchParams } = url;
@@ -225,7 +253,25 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
    if (url.pathname === '/api/claude/status') return json(await chat.claudeStatus());
    const packMatch=url.pathname.match(/^\/api\/chat\/packs(?:\/([^/]+))?$/);
    if(packMatch){const p=url.searchParams.get('projectId');const raw=url.searchParams.get('taskId');const t=raw;if(!chatScope(p,t))return json({error:'会話が見つかりません'},404);const phase=url.searchParams.get('phase');if(!validChatPhase(t,phase)||(p===INSTRUCTIONS_CHAT_ID&&phase!==null))return json({error:'フェーズを確認してください'},400);try{const id=packMatch[1]===undefined?undefined:decodePackId(packMatch[1]);if(id!==undefined&&!validId(id))return json({error:'入力を確認してください'},400);const after=url.searchParams.get('afterPackId');if(after!==null&&!validId(after))return json({error:'入力を確認してください'},400);return json(id?await chat.pack(p as string,t,id,chatPhase(t,phase)):await chat.packs(p as string,t,url.searchParams.get('afterPackId')??undefined,chatPhase(t,phase)))}catch(error){const m=error instanceof Error?error.message:'';return json({error:m==='not found'?'パックが見つかりません':m==='not closed'?'生成中のパックです':'パックを読み込めませんでした'},m==='not found'?404:m==='not closed'?409:500)}}
-   if (url.pathname === '/api/chat') {const p=url.searchParams.get('projectId');const raw=url.searchParams.get('taskId');const t=raw;if(!chatScope(p,t))return json({error:'会話が見つかりません'},404);const phase=url.searchParams.get('phase');if(!validChatPhase(t,phase)||(p===INSTRUCTIONS_CHAT_ID&&phase!==null))return json({error:'フェーズを確認してください'},400);try{const {packs,...conversation}=await chat.get(p as string,t,chatPhase(t,phase));return json(conversation)}catch{return json({error:'履歴を読み込めませんでした'},500)}}
+   if (url.pathname === '/api/chat') {
+    const p=url.searchParams.get('projectId'),t=url.searchParams.get('taskId'),phase=url.searchParams.get('phase');
+    const chatId=url.searchParams.get('chatId'),jobId=url.searchParams.get('workflowJobId');
+    if(!chatScope(p,t))return json({error:'会話が見つかりません'},404);
+    if(!validChatPhase(t,phase)||(p===INSTRUCTIONS_CHAT_ID&&phase!==null))return json({error:'フェーズを確認してください'},400);
+    if((chatId!==null&&(!chatId||chatId.length>512||/[\x00-\x1f]/.test(chatId)))||(jobId!==null&&(chatId===null||t!==null||p===INSTRUCTIONS_CHAT_ID||!jobId||jobId.length>512)))
+     return json({error:'入力を確認してください'},400);
+    try {
+     const value=chatId===null
+      ?await chat.get(p as string,t,chatPhase(t,phase))
+      :chat.getById(p as string,t,chatPhase(t,phase),chatId,jobId??undefined);
+     if(!value)return json({error:'会話が見つかりません'},404);
+     const {packs,...conversation}=value;
+     return json(conversation);
+    }catch(error:any){
+     if(error.code==='ENOENT'||error.message==='Invalid chat owner')return json({error:'会話が見つかりません'},404);
+     return json({error:'履歴を読み込めませんでした'},500);
+    }
+   }
    if (url.pathname === '/api/state') {for(const task of store.tasks().map(projectTask))await recoverTask(task);return json({projects:store.projects(),tasks:store.tasks().map(projectTask)})}
    const eventMatch=url.pathname.match(/^\/api\/tasks\/([^/]+)\/events(?:\/versions\/([^/]+))?$/);
    if(eventMatch){
@@ -255,12 +301,23 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
   if (request.method !== 'POST' || !access(request).sameOrigin || request.headers.get('content-type') !== 'application/json') return json({error:'アクセスできません'},403);
   try {
    const bodyLimit = url.pathname === '/api/tools' ? maxManualToolBodyBytes :
-    url.pathname === '/api/instructions/apply' ? maxInstructionApplyBodyBytes : maxRequestBodyBytes;
+    url.pathname === '/api/instructions/apply' || url.pathname === '/api/data/sql' ? maxEscapedBodyBytes : maxRequestBodyBytes;
    if (Number(request.headers.get('content-length') || 0)>bodyLimit) return json({error:'入力が長すぎます'},413);
    const body = await request.text();
    if (new TextEncoder().encode(body).byteLength > bodyLimit) return json({error:'入力が長すぎます'},413);
    const input = JSON.parse(body) as Record<string,unknown>;
    if (!input || typeof input !== 'object' || Array.isArray(input)) return json({error:'入力を確認してください'},400);
+   if (url.pathname === '/api/data/sql') {
+    try {
+     if (url.search || Object.keys(input).length !== 2 || typeof input.database !== 'string' || typeof input.sql !== 'string') {
+      throw new DataSqlError('invalid');
+     }
+     return json(await dataBrowser.executeSql(input.database,input.sql,request.signal));
+    } catch (error) {
+     const failure = error instanceof DataSqlError ? error : new DataSqlError('unavailable');
+     return json({error:failure.message},failure.status);
+    }
+   }
    if (url.pathname === '/api/tools') {
     try {
      const result=manualTools.accept(input);
@@ -282,9 +339,22 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
     if(typeof input.expected_content!=='string'||Object.keys(input).some(key=>key!=='expected_content'))return json({error:'入力を確認してください'},400);
     try{return json({editorState:await chat.applyInstructionEditor(input.expected_content)})}catch(error){const message=error instanceof Error?error.message:'';return json({error:message==='busy'?'生成中は反映できません':message==='conflict'?'インストラクションが変更されています':'反映できませんでした'},message==='busy'||message==='conflict'?409:500)}
    }
+   const folderChange = url.pathname.match(/^\/api\/projects\/([^/]+)\/folder$/);
+   if (folderChange) {
+    const id = folderChange[1]!;
+    if (!store.project(id)) return json({error:'プロジェクトが見つかりません'},404);
+    if (typeof input.folder!=='string' || !isAbsolute(input.folder) || Object.keys(input).length!==1) return json({error:'作業フォルダーの絶対パスを指定してください'},400);
+    if (chat.projectBusy(id) || workflow.projectBusy(id) || terminals.projectBusy(id)) return json({error:'処理中は作業フォルダーを変更できません'},409);
+    const project = store.changeProjectFolder(id,input.folder);
+    chat.projectFolderChanged(id);
+    workflow.kickJobs();
+    return json(project);
+   }
+   const folderMissing = (id: unknown) => id!==INSTRUCTIONS_CHAT_ID && !store.canRunProject(id as string);
+   const unavailableFolder = () => json({error:'作業フォルダーと保存データを確認してください'},409);
    if(url.pathname==='/api/terminals'||/^\/api\/terminals\/[^/]+\/close$/.test(url.pathname)){
     const project=scope(input.projectId,null);if(!project)return json({error:'プロジェクトが見つかりません'},404);
-    try {if(url.pathname==='/api/terminals'){if(!validId(input.requestId))return json({error:'作成 ID を確認してください'},400);return json(terminals.create(input.projectId as string,project.folder,input.requestId),201)}
+    try {if(url.pathname==='/api/terminals'){if(folderMissing(input.projectId))return unavailableFolder();if(!validId(input.requestId))return json({error:'作成 ID を確認してください'},400);return json(terminals.create(input.projectId as string,project.folder,input.requestId),201)}
      const id=decodePackId(url.pathname.split('/')[3]);if(!validId(id)||!validId(input.controlToken))return json({error:'操作権を確認してください'},400);await terminals.close(input.projectId as string,id,input.controlToken);return json({ok:true});
     }catch(error){return error instanceof TerminalError?json({error:error.message},error.status):json({error:'ターミナルを操作できませんでした'},500)}
    }
@@ -297,7 +367,7 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
     if(!isProvider(input.provider)||typeof input.model!=='string'||!input.model.trim()||input.model.length>256||
      (input.refresh!==undefined&&typeof input.refresh!=='boolean')||Object.keys(input).some(key=>!['projectId','taskId','phase','provider','model','refresh'].includes(key)))return json({error:'モデルを確認してください'},400);
     const scopeCurrent=()=>t===null?!!chatScope(p,t):store.task(t as string)?.phase===input.phase&&!chatBlocked(t as string,input.phase);
-    if(!scopeCurrent())return json({});
+    if(folderMissing(p)||!scopeCurrent())return json({});
     try{
      const contextUsage=await chat.getContextUsage(p as string,t as string|null,chatPhase(t,input.phase),input.provider,input.model,project.folder,{refresh:input.refresh===true,scopeCurrent});
      return json({contextUsage});
@@ -309,7 +379,8 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
     if(typeof input.command!=='string'||(input.args!==undefined&&typeof input.args!=='string')||(typeof input.args==='string'&&input.args.length>16384)||(input.provider!==undefined&&!isProvider(input.provider))||(input.model!==undefined&&input.model!==null&&(typeof input.model!=='string'||input.model.length>256))||Object.keys(input).some(key=>!['projectId','taskId','phase','command','args','provider','model'].includes(key)))return json({error:'コマンドを確認してください'},400);
     if(t!==null&&chatBlocked(t as string,input.phase))return json({error:'現在のタスクには送信できません'},409);
     if(t!==null&&store.task(t as string)!.phase!==input.phase)return json({error:'フェーズが変更されています'},409);
-    try{return json(await chat.command(p as string,t as string|null,input.command,project.folder,t===null?undefined:documentFolder(store,project,projectTask(store.task(t as string))),chatPhase(t,input.phase),{args:input.args as string|undefined,provider:input.provider as Provider|undefined,model:input.model as string|null|undefined}),202)}catch(error){const message=error instanceof Error?error.message:'';return json({error:message==='busy'?'送信中です':message==='no thread'?'この接続先とモデルで操作できる会話がありません':message==='invalid command'?'この接続先ではコマンドを利用できません':message==='unavailable'?'接続状態を確認してください':'コマンドを開始できませんでした'},['busy','no thread'].includes(message)?409:['unavailable','invalid command'].includes(message)?400:500)}
+    if(folderMissing(p))return unavailableFolder();
+    try{return json(await chat.command(p as string,t as string|null,input.command,project.folder,undefined,chatPhase(t,input.phase),{args:input.args as string|undefined,provider:input.provider as Provider|undefined,model:input.model as string|null|undefined}),202)}catch(error){const message=error instanceof Error?error.message:'';return json({error:message==='busy'?'送信中です':message==='no thread'?'この接続先とモデルで操作できる会話がありません':message==='invalid command'?'この接続先ではコマンドを利用できません':message==='unavailable'?'接続状態を確認してください':'コマンドを開始できませんでした'},['busy','no thread'].includes(message)?409:['unavailable','invalid command'].includes(message)?400:500)}
    }
    if (url.pathname === '/api/chat/send' || url.pathname === '/api/chat/interrupt') {
     const p=input.projectId,t=input.taskId??null;const project=chatScope(p,t);if(!project)return json({error:'会話が見つかりません'},404);
@@ -318,7 +389,8 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
     try {if(url.pathname.endsWith('/interrupt')){await chat.interrupt(p as string,t as string|null,chatPhase(t,input.phase));return json({ok:true})}
      if((p===INSTRUCTIONS_CHAT_ID&&!isInstructionKey(input.instructionFocus))||(input.provider!==undefined&&!isProvider(input.provider))||typeof input.content!=='string'||!input.content.trim()||!(input.model===null||(typeof input.model==='string'&&input.model.length<=256)))return json({error:'入力を確認してください'},400);
      if(t!==null&&store.task(t as string)!.phase!==input.phase)return json({error:'フェーズが変更されています'},409);
-     const {packs,...conversation}=await chat.send(p as string,t as string|null,input.content,input.model as string|null,project.folder,t===null?undefined:documentFolder(store,project,projectTask(store.task(t as string))),chatPhase(t,input.phase),false,input.provider as Provider|undefined,input.instructionFocus as InstructionKey|undefined);return json(conversation,202);
+     if(folderMissing(p))return unavailableFolder();
+     const {packs,...conversation}=await chat.send(p as string,t as string|null,input.content,input.model as string|null,project.folder,undefined,chatPhase(t,input.phase),false,input.provider as Provider|undefined,input.instructionFocus as InstructionKey|undefined);return json(conversation,202);
     } catch(e) {const message=e instanceof Error?e.message:'';return json({...(e instanceof ModelUnavailable ? {code:'MODEL_UNAVAILABLE'} : {}),error:e instanceof ModelUnavailable?'選択したモデルを利用できません':message==='chat command arguments'?'クラウド実行やコメント投稿の引数は利用できません':message==='chat command'?'スラッシュコマンドはコマンド API を使ってください':message==='busy'?'送信中です':message==='unavailable'?`${chat.agentName(isProvider(input.provider)?input.provider:undefined)} の接続状態を確認してください`:message==='not running'?'停止できる処理がありません':'保存または接続に失敗しました'},message==='busy'||message==='not running'?409:e instanceof ModelUnavailable||message==='chat command'||message==='chat command arguments'||message==='unavailable'?400:500)}
    }
    if (url.pathname === '/api/folders/list') {
@@ -336,6 +408,7 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
     const project=validTaskId(taskId)?scope(projectId,taskId):null;
     if (!project) return json({error:'タスクが見つかりません'},404);
     const action=phaseMatch[2];
+    if((action==='start'||action==='complete'||action==='phase'&&input.target!=='requirements')&&folderMissing(projectId))return unavailableFolder();
     try {
      const change=()=>{
       const task=store.task(taskId)!;
@@ -358,11 +431,11 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
       },()=>{
        store.rollbackTaskFinalization(projectId,taskId);
        taskEventsChanged(projectId,taskId);
-      },project.folder,store.taskDocumentFolder(projectId,taskId));
+      },project.folder,undefined);
      }else if(action==='reopen'){
       task=chat.withIdleTask(projectId,taskId,()=>store.setTaskCompleted(projectId,taskId,false,expectedPhase));
      }else if(action==='start'){
-      task=await chat.startTask(projectId,taskId,change,()=>{if(store.task(taskId)?.phase==='execution'){store.selectTaskPhase(projectId,taskId,'execution',expectedPhase);taskEventsChanged(projectId,taskId)}},input.model as string|null,project.folder,store.taskDocumentFolder(projectId,taskId),input.provider as Provider|undefined);
+      task=await chat.startTask(projectId,taskId,change,()=>{if(store.task(taskId)?.phase==='execution'){store.selectTaskPhase(projectId,taskId,'execution',expectedPhase);taskEventsChanged(projectId,taskId)}},input.model as string|null,project.folder,undefined,input.provider as Provider|undefined);
      }else if(action==='stop'){
       task=await chat.stopTask(projectId,taskId,change,()=>{if(expectedPhase!=='execution'||store.task(taskId)!.phase!==expectedPhase)throw Error('phase conflict')});
      }else{
@@ -386,7 +459,7 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
     if(!validProjectId(p)||!scope(p,t))return json({error:'タスクが見つかりません'},404);
     try{
      if(stop)await workflow.stopReview(p,t);
-     else workflow.retryReview(p,t);
+     else {if(folderMissing(p))return unavailableFolder();workflow.retryReview(p,t);}
      return json({ok:true},stop?200:202);
     }catch(error){
      const message=error instanceof Error?error.message:'';
@@ -400,6 +473,7 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
     if(!validProjectId(p)||!scope(p,t))return json({error:'タスクが見つかりません'},404);
     const task=store.task(t)!;
     if(task.status!=='completed'||store.instructionJob(p,t)?.status!=='failed')return json({error:'再試行できる指示更新がありません'},409);
+    if(folderMissing(p))return unavailableFolder();
     if (chat.manualToolBusy(p,t) || chat.manualToolBusy(INSTRUCTIONS_CHAT_ID,null)) return json({error:'ツールの処理中は再試行できません'},409);
     store.retryInstructionJob(p,t);
     workflow.kickJobs();
@@ -408,9 +482,18 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
    }
    const deleteMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/delete$/);
    if (deleteMatch) {
-    if (!validTaskId(deleteMatch[1]) || !scope(input.projectId, deleteMatch[1])) return json({error:'タスクが見つかりません'},404);
-    try { chat.deleteTask(input.projectId as string, deleteMatch[1]!, () => store.deleteTask(input.projectId as string, deleteMatch[1]!)); taskEventsChanged(input.projectId as string,deleteMatch[1]!); return json({ok:true}); }
-    catch (error) { return error instanceof Error && error.message === 'busy' ? json({error:'チャットの処理中は削除できません'},409) : json({error:'タスクを削除できませんでした'},500); }
+    const taskId=deleteMatch[1],projectId=input.projectId;
+    if (!validProjectId(projectId) || !validTaskId(taskId) || !scope(projectId,taskId)) return json({error:'タスクが見つかりません'},404);
+    try {
+     if (workflow.instructionJobRunning(projectId,taskId)) throw new InstructionJobBusy();
+     chat.deleteTask(projectId,taskId,()=>store.deleteTask(projectId,taskId));
+     taskEventsChanged(projectId,taskId);
+     return json({ok:true});
+    } catch (error) {
+     if (error instanceof InstructionJobBusy) return json({error:error.message},409);
+     if (error instanceof Error && error.message === 'busy') return json({error:'チャットの処理中は削除できません'},409);
+     return json({error:'タスクを削除できませんでした'},500);
+    }
    }
    const renameMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/rename$/);
    if (renameMatch) {
@@ -422,7 +505,7 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
    }
    if (url.pathname === '/api/tasks') {if(typeof input.name!=='string'||!validProjectId(input.projectId))return json({error:'タスク名とプロジェクトを確認してください'},400);const project=scope(input.projectId,null);if(!project)return json({error:'プロジェクトが見つかりません'},404);return json(projectTask(store.createTask(input.projectId,input.name)),201)}
    return json({error:'見つかりません'},404);
-  } catch(error) {if(error instanceof Error&&error.message.startsWith('Duplicate live project copy'))return json({error:'同じIDのプロジェクトが登録済みです'},409);return json({error:'入力または保存先を確認してください'},400)}
+  } catch(error) {if(error instanceof ProjectFolderError)return json({error:error.message},error.status);return json({error:'入力または保存先を確認してください'},400)}
  };
 }
 export function createServerOptions(store:Store,initialFolder=homedir(),chat=new ChatService(projectResolver(store),createAgents()),publicOrigin?:string, terminals=new TerminalService()) {
@@ -460,13 +543,16 @@ export function createServerOptions(store:Store,initialFolder=homedir(),chat=new
 export function dataPaths(environment: Record<string,string|undefined> = process.env, cwd = process.cwd()) {
  const dataDirectory = environment.BENI_DATA_DIR ? resolve(cwd,environment.BENI_DATA_DIR) : fileURLToPath(new URL('../../data',import.meta.url));
  const database = join(dataDirectory,'beni.sqlite');
- const chatDirectory = join(dataDirectory,'chat');
+ const chatDirectory = join(dataDirectory,'chats');
  return {dataDirectory,database,chatDirectory};
 }
 if (import.meta.main) {
- const {database} = dataPaths();
+ const {database,dataDirectory} = dataPaths();
  await mkdir(dirname(resolve(database)),{recursive:true,mode:0o700});
- const store = new Store(database);
+ const store = new Store(database,{migration:true});
+ assertChatMigrationReady(store.chats,dataDirectory,store.chatMigrationProjects());
+ store.initializeStorage();
+ assertChatMigrationReady(store.chats,dataDirectory,store.chatMigrationProjects());
  const chat = new ChatService(projectResolver(store),createAgents());
  const terminals = new TerminalService();
  const port = Number(process.env.BENI_PORT ?? 3210);

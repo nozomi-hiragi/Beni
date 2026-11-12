@@ -35,7 +35,7 @@ function* lastDocumentItem(name:string):Generator<Call,any,ToolReply>{
  return result;
 }
 function* workflow(text:string):Generator<Call,void,ToolReply>{
- if(developerInstructions.startsWith('完成した knowledge.md')){
+ if(text==='task.completed'){
   const knowledge=yield* lastDocumentItem('knowledge.md');
   const common=yield* invoke('read_document',{name:'common'});
   yield* invoke('edit_document',{name:'common',revision:common.revision,update_id:'instruction',edits:[{

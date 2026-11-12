@@ -6,12 +6,14 @@ export interface TaskCreateProps {
   projectId: string;
   projects: Project[];
   creatingProject: boolean;
+  changingProjectFolder: boolean;
   canCreate: boolean;
   selectedProject?: Project;
   projectSelectRef: (element: HTMLSelectElement) => void;
   onTaskName: (value: string) => void;
   onChooseProject: (value: string) => void;
   onCreateTask: (event: SubmitEvent) => void;
+  onChangeProjectFolder: () => void;
   onOpenProject?: (project: Project) => void;
 }
 
@@ -37,6 +39,7 @@ export default function TaskCreate(props: TaskCreateProps) {
         <For each={props.projects}>{project => <option value={String(project.id)}>{project.name}</option>}</For>
         <option value="new" disabled={props.creatingProject}>＋ 新規プロジェクト作成</option>
       </select>
+      <button class="btn btn-outline" type="button" disabled={!props.selectedProject || props.changingProjectFolder} onClick={props.onChangeProjectFolder}>作業フォルダーを変更</button>
       <Show when={props.onOpenProject}>
         <button class="btn btn-outline" type="button" disabled={!props.selectedProject} onClick={() => {
           if (props.selectedProject) props.onOpenProject?.(props.selectedProject);
@@ -44,5 +47,9 @@ export default function TaskCreate(props: TaskCreateProps) {
       </Show>
       <button class="btn btn-primary" type="submit" disabled={!props.canCreate}>タスク作成</button>
     </form>
+    <Show when={props.selectedProject?.storageError}>{message => <p role="alert" class="alert alert-error mt-3">{message()}</p>}</Show>
+    <Show when={props.selectedProject?.folderAvailable === false}>
+      <p role="status" class="alert alert-warning mt-3">作業フォルダーが見つかりません。「作業フォルダーを変更」から登録先を指定してください。</p>
+    </Show>
   </div>;
 }

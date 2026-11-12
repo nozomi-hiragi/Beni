@@ -1,4 +1,3 @@
-import { existsSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import type { ManualToolDefinition, ManualToolOperation, ManualToolScope, ManualToolsCatalog } from '../shared/manual-tools';
 import { validateManualToolInput } from '../shared/manual-tools';
@@ -64,9 +63,9 @@ export class ManualTools {
 
  private target(scope: ManualToolScope): { label: string; phase: ManualToolsCatalog['phase']; folder?: string; status?: string; stateCursor?: number } {
   if (scope.kind === 'instructions') return { label: 'インストラクション管理', phase: null };
-  const project = this.store.projects().find(project => project.id === scope.projectId);
+  const project = this.store.project(scope.projectId);
   if (!project) throw new ManualToolRequestError(404, 'プロジェクトが見つかりません');
-  if (!existsSync(project.folder)) throw new ManualToolRequestError(409, 'プロジェクトのフォルダを開けません');
+  if (!this.store.canRunProject(scope.projectId)) throw new ManualToolRequestError(409, '作業フォルダーと保存データを確認してください');
   if (scope.taskId === undefined) return { label: project.name, phase: null, folder: project.folder };
   const task = this.store.task(scope.taskId);
   if (!task || task.project_id !== scope.projectId) throw new ManualToolRequestError(404, 'タスクが見つかりません');
@@ -88,7 +87,8 @@ export class ManualTools {
   const finalizingFolder = t === null || phase === 'finalization' ? folder : undefined;
   const disabledReason = this.chat.manualToolScopeBusy(p, t, finalizingFolder) ||
    this.workflow.manualToolBusy(p, t) ? busyReason : undefined;
-  const revision = hash(JSON.stringify([scope, label, phase, folder, status, stateCursor, reviewState, tools]));
+  const folderGeneration = scope.kind === 'project' ? this.store.projectFolderGeneration(p) : undefined;
+  const revision = hash(JSON.stringify([scope, label, phase, folder, folderGeneration, status, stateCursor, reviewState, tools]));
   const catalog: ManualToolsCatalog = {scope, label, phase, revision, tools, ...(disabledReason ? {disabledReason} : {})};
   return {catalog, finalizingFolder};
  }
@@ -146,6 +146,9 @@ export class ManualTools {
    this.live.add(id);
    setTimeout(() => {
     void this.run(operation, () => {
+     if (scope.kind === 'project' && !this.store.canRunProject(p)) {
+      throw new ManualToolInputError('作業フォルダーと保存データを確認してください');
+     }
      if (this.current(scope).catalog.revision !== revision) {
       throw new ManualToolInputError('操作対象の状態が変更されました。一覧を取得し直してください');
      }
