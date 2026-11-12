@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment beni-jsdom
 import { cleanup, fireEvent, render, screen, within } from '@solidjs/testing-library';
 import { createSignal } from 'solid-js';
 import { afterEach, describe, expect, it, vi } from 'vitest';

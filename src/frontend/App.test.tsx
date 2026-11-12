@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment beni-jsdom
 import { FakeWebSocket } from './test/test-events';
 import { cleanup, fireEvent, render, screen, within, waitFor } from '@solidjs/testing-library';
 import { afterEach, beforeEach, expect, it, onTestFinished, vi } from 'vitest';
