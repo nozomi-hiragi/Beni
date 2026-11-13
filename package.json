@@ -9,6 +9,8 @@
     "typecheck": "bun --bun run tsc -p tsconfig.json",
     "build:ui": "bun run typecheck && bun --bun run vite build",
     "build": "bun run build:ui && bun run build:css",
+    "build:exe": "bun scripts/build-exe.ts",
+    "test:exe": "bun scripts/test-exe.ts",
     "test:ui": "bun --bun --conditions=browser run vitest run --config vitest.config.ts"
   },
   "dependencies": {

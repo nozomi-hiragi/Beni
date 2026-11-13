@@ -36,6 +36,25 @@ bun run start
 
 Beni のバックエンドは一つだけ起動します。一つのバックエンドへ複数のブラウザーや端末から接続できます。詳細は [動作条件](docs/specification.md#動作条件) を参照してください。
 
+### 実行ファイルを作る
+
+macOS / Apple Silicon では、サーバー・画面・Bun ランタイムをまとめた実行ファイルを生成できます。
+
+```sh
+bun run build:exe
+```
+
+生成先は `dist/executables/<build-id>/beni` です。ビルドごとに別のディレクトリへ出力します。実行ファイルをリポジトリ外にコピーすれば、ソースや `node_modules`、外部の Bun なしで起動できます。エージェントを利用する場合は、従来どおりログイン済みの公式 CLI が必要です。
+
+実行ファイル版では `BENI_DATA_DIR` を必ず指定します。`<build-id>` はビルド時に表示された値に置き換えてください。
+
+```sh
+./dist/executables/<build-id>/beni --version
+BENI_DATA_DIR="$HOME/Library/Application Support/Beni/data" ./dist/executables/<build-id>/beni
+```
+
+稼働中の実行ファイルから自身のソースを修正し、次の実行ファイルへ切り替える手順は [実行ファイルと自己開発](docs/executable.md) を参照してください。
+
 ### Tailscale 経由で起動する
 
 サーバー側と閲覧する端末を Tailscale に接続します。チャットのハッシュ確認にブラウザーの暗号 API を使うため、Tailscale Serve の HTTPS URL で開きます。
@@ -70,7 +89,7 @@ tailscale serve --https=443 off
 
 ## データの保存先
 
-Beni が管理するデータは、Beni ルートの `data/` にまとめて保存します。`BENI_DATA_DIR` で保存先を変更できます。相対指定は起動時の作業ディレクトリを基準にします。
+ソースから起動する場合、Beni が管理するデータは既定で Beni ルートの `data/` にまとめて保存します。`BENI_DATA_DIR` で保存先を変更できます。実行ファイル版ではこの指定が必須です。相対指定は起動時の作業ディレクトリを基準にします。
 
 - `beni.sqlite`: プロジェクト情報（ID・名前・日時・作業フォルダー）、インストラクションの版、更新ジョブと移行状態。
 - `projects/<projectId>.sqlite` にタスク情報・文書・版・ナレッジ・イベントを保存します。

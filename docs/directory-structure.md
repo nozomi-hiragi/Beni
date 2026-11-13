@@ -11,6 +11,8 @@ Beni/
 ├── src/                              アプリケーションのコード
 │   ├── backend/                      Bun で動くサーバー側の処理
 │   │   ├── server.ts                 サーバー起動、API、フロントエンド配信、保存先設定
+│   │   ├── executable.ts             単体実行ファイルの引数・保存先検証、SQL子プロセスの入口
+│   │   ├── frontend-assets.ts        ソース起動と実行ファイルで共通の画面配信
 │   │   ├── server.test.ts            API・配信・文書管理・変更通知・保存先のテスト
 │   │   ├── instructions.ts           指示テンプレートの初期値と変数の置換
 │   │   ├── chat.ts                   会話の保存・再開・イベント配信・中断
@@ -138,14 +140,19 @@ Beni/
 │           ├── ClaudeChat.test.tsx     Claude チャットのテスト
 │           ├── CodexChat.test.tsx      Codex チャットのテスト
 │           └── RegisteredAgents.test.tsx 登録済み Agent のテスト
+├── scripts/
+│   ├── build-exe.ts                  macOS arm64 の単体実行ファイルを生成
+│   └── test-exe.ts                   生成物の隔離起動・偽エージェント・SQL・PTY・再起動を検証
 ├── dist/                             [生成] ビルド出力
-│   └── frontend/                     フロントエンドの生成物
-│       ├── app.js                    Vite が生成する JavaScript
-│       ├── beni.css                  xterm.js のスタイル
-│       └── generated.css             Tailwind CSS・daisyUI が生成する CSS
+│   ├── frontend/                     フロントエンドの生成物
+│   │   ├── app.js                    Vite が生成する JavaScript
+│   │   ├── beni.css                  xterm.js のスタイル
+│   │   └── generated.css             Tailwind CSS・daisyUI が生成する CSS
+│   └── executables/<build-id>/beni   ビルドごとに保存する単体実行ファイル
 ├── docs/                             仕様書、画面モック、構成の説明
 │   ├── README.md                     ドキュメントの目次
 │   ├── directory-structure.md        この文書
+│   ├── executable.md                 実行ファイルの生成・検証・自己開発・切り替え手順
 │   ├── data/                         データの仕様
 │   │   ├── README.md                 保存責任・正本・データの関係
 │   │   ├── storage.md                データ集約の採用仕様・移行条件

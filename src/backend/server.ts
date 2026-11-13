@@ -20,6 +20,7 @@ import { isAbsolute, dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { mkdir, opendir, realpath } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
+import { frontendResponse } from './frontend-assets';
 
 const maxListedFolders = 500;
 const maxRequestBodyBytes = 65536;
@@ -149,8 +150,7 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
   if (request.method === 'GET') {
    try {
    if (url.pathname === '/' || url.pathname === '/settings' || url.pathname === '/instructions' || url.pathname === '/data' || validProjectId(url.pathname.match(/^\/project\/([^/]+)$/)?.[1]) || ['/ui/index.html','/ui/build/app.js','/ui/generated.css','/ui/style.css'].includes(url.pathname)) {
-    const file = url.pathname === '/ui/build/app.js' ? '../../dist/frontend/app.js' : url.pathname === '/ui/style.css' ? '../../dist/frontend/beni.css' : url.pathname === '/ui/generated.css' ? '../../dist/frontend/generated.css' : '../frontend/index.html';
-    return new Response(Bun.file(new URL(file,import.meta.url)),{headers:{'Content-Security-Policy':"default-src 'self'; img-src 'self' data:; style-src 'self'; style-src-elem 'self' 'unsafe-inline'; style-src-attr 'unsafe-inline'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'",'X-Content-Type-Options':'nosniff','Cache-Control':'no-store'}});
+    return frontendResponse(url.pathname);
    }
    if (url.pathname === '/api/data' || url.pathname === '/api/data/detail') {
     try {
@@ -546,7 +546,7 @@ export function dataPaths(environment: Record<string,string|undefined> = process
  const chatDirectory = join(dataDirectory,'chats');
  return {dataDirectory,database,chatDirectory};
 }
-if (import.meta.main) {
+export async function startServer() {
  const {database,dataDirectory} = dataPaths();
  await mkdir(dirname(resolve(database)),{recursive:true,mode:0o700});
  const store = new Store(database,{migration:true});
@@ -561,3 +561,5 @@ if (import.meta.main) {
  let stopping=false;const shutdown=async()=>{if(stopping)return;stopping=true;await terminals.dispose();await server.stop(true);store.close();process.exit(0)};process.once('SIGTERM',shutdown);process.once('SIGINT',shutdown);
  console.log(`Beni: http://127.0.0.1:${server.port}/`);
 }
+
+if (import.meta.main && !Bun.isStandaloneExecutable) await startServer();
