@@ -313,6 +313,10 @@
   border-top: 1px solid var(--color-base-300);
 }
 
+.chat-bubble .markdown-preview :is(code, pre, th) {
+  background: var(--color-base-300);
+}
+
 .hljs :is(.hljs-keyword, .hljs-selector-tag, .hljs-meta, .hljs-tag, .hljs-name) {
   color: color-mix(in oklab, var(--color-primary) 62%, var(--color-base-content));
 }
