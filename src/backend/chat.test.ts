@@ -1056,7 +1056,11 @@ test('両接続先の埋め込みツールは同一プロジェクトだけを�
    const matches=data.filter(event=>event.id>after&&event.id<=through&&(task===null||event.taskId===task)&&(!types||types.includes(event.type)));
    const events=matches.slice(0,limit),hasMore=matches.length>limit,next=hasMore?events.at(-1)!.id:through;
    return {events,lastEventId:next,nextCursor:next,through,hasMore};
-  },event:(project,id)=>{lookups.push([project,id]);return {id,taskId:other}},change:(_project,id)=>({eventId:id,patch:'recorded patch'}),version:(_project,path,id)=>({path,changeId:id,content:'recorded version'})});
+  },event:(project,id)=>{
+   lookups.push([project,id]);
+   if(id===5)throw Error('simulated event storage failure');
+   return {id,taskId:other};
+  },change:(_project,id)=>({eventId:id,patch:'recorded patch'}),version:(_project,path,id)=>({path,changeId:id,content:'recorded version'})});
   const calls=[
    {tool:'list_events',arguments:{after:0,through:6,limit:1,task_id:other,kind:'tool.finished'}},
    {tool:'get_event',arguments:{event_id:2}},
@@ -1067,6 +1071,7 @@ test('両接続先の埋め込みツールは同一プロジェクトだけを�
    {tool:'list_events',arguments:{}},
    {tool:'list_events',arguments:{limit:101}},
    {tool:'list_events',arguments:{kind:'tool.*'}},
+   {tool:'get_event',arguments:{event_id:5}},
    {tool:'unknown_tool',arguments:{}},
    {tool:'get_event',arguments:{event_id:2,project_id:'another-project'}},
    {tool:'get_event',arguments:{event_id:-1}},
@@ -1084,7 +1089,9 @@ test('両接続先の埋め込みツールは同一プロジェクトだけを�
    expect(results[6].value.events).toEqual([{id:1,type:'document.updated',taskId:t,path:'requirements.md',version:'latest',previousVersion:'previous'}]);
    expect(results[7].value.error).toContain('1〜100');
    expect(results[8].value.error).toContain('tool.finished');
+   expect(results[9].value).toEqual({error:'Embedded tool request rejected or unavailable'});
    expect(lookups).toContainEqual([p,other,0,6,1,['tool.finished']]);
+   expect(lookups).toContainEqual([p,5]);
    expect(lookups.some(value=>value[1]===t&&value[4]===20&&value[5].includes('document.updated'))).toBe(true);
    expect(lookups.every(value=>value[0]===p)).toBe(true);
    delete process.env.FAKE_EMBEDDED_CALLS;
