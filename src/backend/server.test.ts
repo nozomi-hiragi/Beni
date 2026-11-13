@@ -979,17 +979,33 @@ test('通常の反省会チャットでは有効な完了申告のターンが�
  const project=store.createProject('Example',folder),task=store.createTask(project.id,'Task');
  const entered=Promise.withResolvers<void>();
  const staleRequest='古い版で完了を申告してください。',repeatRequest='もう一度、分析の完了を申告してください。';
+ const appendRequest='分析結果を追記して、もう一度完了を申告してください。';
+ const appendedText='\n\n次回は入力の境界値も確認する。';
  const rejections=new Map<string,AgentToolResult>();
- let oldRevision='';
+ let oldRevision='',appendedRevision='';
  const agent=new DummyAgent({supportsEmbeddedTools:true,scenario:async(request,host,accept)=>{
   await accept();
   if(request.access==='read-only')return {status:'completed'};
   const text=request.operation.kind==='send'?request.operation.text:'';
-  const revision=store.managedDocument(project.id,task.id,'retrospective.md')!.revision;
-  const finish=()=>host.callTool({id:'finish',name:'finish_retrospective',
-   input:{revision:text===staleRequest?oldRevision:revision,reason:'追記する発見なし'}});
-  if(text===staleRequest||text===repeatRequest){
-   rejections.set(text,await finish());
+  const retrospective=store.managedDocument(project.id,task.id,'retrospective.md')!;
+  const {name,revision}=retrospective;
+  let revisionToReport=text===staleRequest?oldRevision:revision;
+  const finish=(revisionToReport=revision)=>host.callTool({id:'finish',name:'finish_retrospective',
+   input:{revision:revisionToReport,reason:'追記する発見なし'}});
+  if(text===appendRequest){
+   const source=retrospective.items.at(-1)!;
+   const result=await host.callTool({id:'edit',name:'edit_document',input:{
+    name,revision,update_id:'append-review',edits:[{
+     text:appendedText,reason:'次回の検証項目を記録する',
+     sources:[{kind:'document',id:name+'/'+source.id,revision,text:source.text}]
+    }]
+   }});
+   expect(result.ok).toBe(true);
+   appendedRevision=JSON.parse(result.text).revision;
+   revisionToReport=appendedRevision;
+  }
+  if(text===staleRequest||text===repeatRequest||text===appendRequest){
+   rejections.set(text,await finish(revisionToReport));
   }else{
    expect((await finish()).ok).toBe(true);
    if(text==='申告後に文書を追記してください。'){
@@ -1040,11 +1056,21 @@ test('通常の反省会チャットでは有効な完了申告のターンが�
   expect((await detail()).workflow.review).toEqual({state:'done',error:null});
   expect(store.task(task.id)).toMatchObject({phase:'retrospective',status:'idle'});
 
-  await send(repeatRequest);
-  await waitUntil(async()=>await status()==='completed');
-  expect(rejections.get(repeatRequest)).toEqual({ok:false,text:JSON.stringify({error:'現在は分析の完了を申告できません'})});
-  expect((await detail()).workflow.review).toEqual({state:'done',error:null});
-  expect(agent.requests.map(request=>request.access)).toEqual(['read-only','workspace-write','workspace-write','workspace-write','workspace-write','workspace-write']);
+  const completedDocument=store.managedDocument(project.id,task.id,'retrospective.md')!;
+  for(const content of [repeatRequest,appendRequest]){
+   await send(content);
+   await waitUntil(async()=>await status()==='completed');
+   expect(rejections.get(content)).toEqual({ok:false,text:JSON.stringify({
+    error:'反省会の分析はすでに完了しています。文書の追記・修正後も、分析完了の再申告は不要です。'
+   })});
+   expect((await detail()).workflow.review).toEqual({state:'done',error:null});
+  }
+  expect(appendedRevision).not.toBe(completedDocument.revision);
+  expect(store.managedDocument(project.id,task.id,'retrospective.md')).toMatchObject({
+   revision:appendedRevision,content:completedDocument.content+appendedText
+  });
+  expect(store.task(task.id)).toMatchObject({phase:'retrospective',status:'idle'});
+  expect(agent.requests.map(request=>request.access)).toEqual(['read-only',...Array(6).fill('workspace-write')]);
  }finally{store.close();await rm(folder,{recursive:true,force:true})}
 });
 
