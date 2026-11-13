@@ -467,7 +467,8 @@ export default function ChatPanel(props: { projectId: string; taskId?: string; p
     <Show when={connectionNotice()}>{notice => <p class="px-4 pt-3 text-sm">{notice()}</p>}</Show>
     <Show when={loadError()}><p role="alert" class="px-4 pt-3 text-sm text-error">{loadError()}</p></Show>
     <Show when={syncError()}><p role="alert" class="px-4 pt-3 text-sm text-error">{syncError()} <button class="btn btn-xs" onClick={() => refresh()}>更新</button></p></Show>
-    <div ref={scrollport} class="min-h-0 flex-1 overflow-y-auto p-5" role="log" aria-label="チャット履歴" aria-live="polite">
+    <div class="relative min-h-0 flex-1">
+    <div ref={scrollport} class="h-full overflow-y-auto p-5" role="log" aria-label="チャット履歴" aria-live="polite">
       <div ref={scrollContent} class="space-y-3">
         <Show when={packGroups().size} fallback={<p class="text-sm text-base-content/50">希望や回答を入力してください。</p>}><For each={[...packGroups().keys()]}>{pack => <article class={`chat ${pack.role === 'user' ? 'chat-end' : 'chat-start grid-cols-[auto_minmax(0,1fr)]'}`}>
         <Show when={pack.role === 'assistant'}>
@@ -506,7 +507,8 @@ export default function ChatPanel(props: { projectId: string; taskId?: string; p
         </div>}</Show>
       </div>
     </div>
-    <Show when={busy()}><div role="status" class="mx-4 mb-3 self-start"><div class="aura text-primary motion-reduce:animate-none"><div class="card bg-base-100 px-4 py-2 text-sm text-base-content">{compacting() ? `${commandProgress()}…` : '作業中…'}</div></div></div></Show>
+    <Show when={busy()}><div role="status" class="pointer-events-none absolute bottom-3 left-1/2 -translate-x-1/2 z-10"><div class="aura text-primary motion-reduce:animate-none"><div class="card bg-base-100 px-4 py-2 text-sm text-base-content">{compacting() ? `${commandProgress()}…` : '作業中…'}</div></div></div></Show>
+    </div>
     <Show when={latestOutcome()}><p role="status" class="mx-4 mb-2 text-sm">直近の応答: {latestOutcome()}</p></Show>
     <Show when={error()}><p role="alert" class="mx-4 mb-2 text-sm text-error">{error()}</p></Show>
     <Show when={!props.readOnly}><form class="border-t border-base-300 p-4" onSubmit={event => { event.preventDefault(); void send(); }}>
