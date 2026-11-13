@@ -1168,32 +1168,53 @@ test('instruction editor uses isolated readonly scope, validates updates and per
  const chat=new ChatService(()=>{throw Error('must not resolve project')},()=>fake),handle=createHandler(store,'/tmp',chat);
  const post=(data:unknown)=>handle(new Request('http://127.0.0.1:3210/api/chat/send',{method:'POST',headers:{origin:'http://127.0.0.1:3210','content-type':'application/json'},body:JSON.stringify(data)}));
  try{
-  const previous=store.instructions()[0]!.content;let changes=0;chat.subscribe('instructions',null,event=>{if(event.name==='chat.changed')changes++});
-  process.env.FAKE_CODEX_LOG=log;process.env.FAKE_EMBEDDED_CALLS=JSON.stringify([{tool:'update_instruction',arguments:{key:'common',content:'# Updated {{working_directory}} {{project_directory}} {{working_directory}}',expected_content:previous}},{tool:'update_instruction',arguments:{key:'common',content:'# stale',expected_content:previous}},{tool:'update_instruction',arguments:{key:'common',content:'{{task_id}}',expected_content:'# Updated {{working_directory}} {{project_directory}} {{working_directory}}'}}]);
-  expect((await post({projectId:'instructions',taskId:null,instructionFocus:'common',content:'save',model:'model-a'})).status).toBe(202);
+  const common=store.instructionDocument('common')!,initial=common.items[0]!;
+  const previous=store.writeInstructionDocument('common',common.revision,[...common.items,
+   {text:'\n\n',reason:'',sources:[]},
+   {text:'保持する方針',reason:'既存の方針を維持するため',sources:[{kind:'instruction',id:'common/'+initial.id,revision:common.revision,text:initial.text.slice(0,16),start:0}]},
+  ],'fixture');
+  let changes=0;chat.subscribe('instructions',null,event=>{if(event.name==='chat.changed')changes++});
+  process.env.FAKE_CODEX_LOG=log;process.env.FAKE_CODEX_INSTRUCTION_EDITOR='1';
+  const request='内容を保存',replacement='# Updated {{working_directory}} {{project_directory}} {{working_directory}}';
+  expect((await post({projectId:'instructions',taskId:null,instructionFocus:'common',content:request,model:'model-a'})).status).toBe(202);
   await waitFor(async()=>(await chat.get('instructions',null)).messages[1]?.status==='completed');
-  expect(store.instructions()[0]!.content).toBe('# Updated {{working_directory}} {{project_directory}} {{working_directory}}');expect(changes).toBeGreaterThan(2);
+  const conversation=await chat.get('instructions',null),saved=store.instructionDocument('common')!;
+  const messageSource={kind:'message' as const,id:`instructions/${conversation.id}/${conversation.messages[0]!.id}`,start:2,text:request.slice(2)};
+  expect(saved.content).toBe(replacement+'\n\n保持する方針');expect(changes).toBeGreaterThan(2);
+  expect(saved.items[0]).toEqual({id:initial.id,text:replacement,reason:'採用理由を追記',sources:[messageSource,{
+   kind:'instruction',id:'common/'+initial.id,revision:previous.revision,start:0,text:initial.text.slice(0,30),
+  }]});
+  expect(saved.items.slice(1)).toEqual(previous.items.slice(1));
   const records=(await readFile(log,'utf8')).trim().split('\n').map(line=>JSON.parse(line));const start=records.find(item=>item.method==='thread/start');
-  expect(start.params.sandbox).toBe('read-only');expect(start.params.cwd).toBe(join(root,'instruction-editor'));expect(start.params.dynamicTools.map((item:any)=>item.name)).toEqual(['list_instructions','get_instruction','update_instruction']);
-  expect(start.params.developerInstructions).toContain('get_instruction');expect(start.params.developerInstructions).not.toContain(previous);
+  expect(start.params.sandbox).toBe('read-only');expect(start.params.cwd).toBe(join(root,'instruction-editor'));expect(start.params.dynamicTools.map((item:any)=>item.name)).toEqual(['list_instructions','get_instruction','list_chat_sources','read_source','update_instruction']);
+  expect(start.params.developerInstructions).toContain('get_instruction');expect(start.params.developerInstructions).not.toContain(previous.content);
   const toolResponses=records.filter(item=>item.id?.startsWith?.('embedded:')).map(item=>item.result);
-  expect(toolResponses.map(item=>item.success)).toEqual([true,false,false]);
-  expect(JSON.parse(toolResponses[0].contentItems[0].text)).toEqual({key:'common',content:'# Updated {{working_directory}} {{project_directory}} {{working_directory}}',variables:{working_directory:[{line:1,column:11},{line:1,column:55}],project_directory:[{line:1,column:33}]}});
+  expect(toolResponses.map(item=>item.success)).toEqual([true,true,true,false,false,false,true,false,true,true,true,false,true]);
+  const firstUpdate=JSON.parse(toolResponses[6].contentItems[0].text);
+  expect(firstUpdate).toEqual({key:'common',revision:expect.any(String),variables:{working_directory:[{line:1,column:11},{line:1,column:55}],project_directory:[{line:1,column:33}]}});
+  expect(store.instructionDocument('common',firstUpdate.revision)?.items[0]).toEqual({id:initial.id,text:replacement,reason:'ユーザーの希望を反映',sources:[messageSource]});
+  expect(firstUpdate.revision).not.toBe(saved.revision);
+  expect(JSON.parse(toolResponses[11].contentItems[0].text).error).toContain('最新の版');
   expect(JSON.parse(await readFile(store.chats.path((await chat.get('instructions',null)).id),'utf8')).messages).toHaveLength(2);
   const restarted=new ChatService(()=>{throw Error('must not resolve project')});createHandler(store,'/tmp',restarted);expect((await restarted.get('instructions',null)).messages).toHaveLength(2);
   expect((await post({projectId:'instructions',taskId:null,phase:null,content:'bad',model:null})).status).toBe(400);
   expect((await handle(new Request('http://127.0.0.1:3210/api/terminals?projectId=instructions'))).status).toBe(404);
-  for(const [key,content] of [['missing','# x'],['common',''],['common','x'.repeat(65537)],['requirements','{{execution_chat_path}}']])expect(()=>store.updateInstruction(key,content,previous)).toThrow();
+  for(const [key,content] of [['missing','# x'],['common',''],['common','x'.repeat(65537)],['requirements','{{execution_chat_path}}']])expect(()=>store.updateInstruction(key,content,previous.content)).toThrow();
   const editor=store.instructions().find(item=>item.key==='editor')!;store.updateInstruction('editor','自由な {{custom}}',editor.content);
+  delete process.env.FAKE_CODEX_INSTRUCTION_EDITOR;
   delete process.env.FAKE_CODEX_LOG;
   const claudeLog=join(root,'claude.jsonl');process.env.FAKE_CLAUDE_LOG=claudeLog;
   const claude=new ChatService(()=>{throw Error('must not resolve project')},()=>fake,()=>join(import.meta.dir,'test/fake-claude.ts'));createHandler(store,'/tmp',claude);
-  process.env.FAKE_EMBEDDED_CALLS=JSON.stringify([{tool:'update_instruction',arguments:{key:'editor',content:'# Claude saved {{project_directory}} {{custom}} {{project_directory}}',expected_content:'自由な {{custom}}'}}]);
+  const editorVersion=store.instructionDocument('editor')!,editorItem=editorVersion.items[0]!;
+  process.env.FAKE_EMBEDDED_CALLS=JSON.stringify([{tool:'update_instruction',arguments:{key:'editor',revision:editorVersion.revision,edits:[{
+   id:editorItem.id,text:'# Claude saved {{project_directory}} {{custom}} {{project_directory}}',reason:'編集方針を詳しくする',
+   sources:[{kind:'instruction',id:'editor/'+editorItem.id,revision:editorVersion.revision,text:editorItem.text}],
+  }]}}]);
   await claude.send('instructions',null,'save','sonnet','/tmp',undefined,null,false,'claude','editor');
   await waitFor(async()=>(await claude.get('instructions',null)).messages.at(-1)?.status==='completed');
   expect(store.instructions().find(item=>item.key==='editor')!.content).toBe('# Claude saved {{project_directory}} {{custom}} {{project_directory}}');
   const editorResult=JSON.parse(JSON.parse((await claude.get('instructions',null)).messages.at(-1)!.content)[0].content[0].text);
-  expect(editorResult).toEqual({key:'editor',content:'# Claude saved {{project_directory}} {{custom}} {{project_directory}}',variables:{}});
+  expect(editorResult).toEqual({key:'editor',revision:store.instructionDocument('editor')!.revision,variables:{}});
   const claudeArgs=JSON.parse((await readFile(claudeLog,'utf8')).trim().split('\n')[0]!).args;
   expect(claudeArgs[claudeArgs.indexOf('--tools')+1]).toBe('');expect(claudeArgs[claudeArgs.indexOf('--allowedTools')+1]).toContain('mcp__beni__update_instruction');
   expect(claudeArgs[claudeArgs.indexOf('--append-system-prompt')+1]).toContain(editor.content);
@@ -1204,7 +1225,7 @@ test('instruction editor uses isolated readonly scope, validates updates and per
   await waitFor(async()=>(await claude.get('instructions',null)).messages.at(-1)?.status==='completed');
   const continued=JSON.parse((await readFile(claudeLog,'utf8')).trim().split('\n').at(-1)!);expect(continued.prompt).toContain('現在ユーザーが注目しているインストラクション');expect(continued.prompt).toContain('# Claude saved');
 
- }finally{delete process.env.FAKE_CLAUDE_LOG;delete process.env.FAKE_CODEX_LOG;delete process.env.FAKE_EMBEDDED_CALLS;store.close();await rm(root,{recursive:true,force:true})}
+ }finally{delete process.env.FAKE_CLAUDE_LOG;delete process.env.FAKE_CODEX_LOG;delete process.env.FAKE_EMBEDDED_CALLS;delete process.env.FAKE_CODEX_INSTRUCTION_EDITOR;store.close();await rm(root,{recursive:true,force:true})}
 });
 
 test('instruction focus is validated and delivered only when changed or starting a session',async()=>{
@@ -1231,7 +1252,11 @@ test('instruction focus is validated and delivered only when changed or starting
   expect((await post('editor')).status).toBe(202);await done();expect((await inputs()).at(-1)[1].text).toContain('editor');
   const workflow=store.instructionDocument('task.completed')!;
   const workflowContent='# 変更したタスク完了の方針 {{task_id}}';
-  process.env.FAKE_EMBEDDED_CALLS=JSON.stringify([{tool:'update_instruction',arguments:{key:'task.completed',content:workflowContent,expected_content:workflow.content}}]);
+  const workflowItem=workflow.items[0]!;
+  process.env.FAKE_EMBEDDED_CALLS=JSON.stringify([{tool:'update_instruction',arguments:{key:'task.completed',revision:workflow.revision,edits:[{
+   id:workflowItem.id,text:workflowContent,reason:'タスク完了の方針を明確にする',
+   sources:[{kind:'instruction',id:'task.completed/'+workflowItem.id,revision:workflow.revision,text:workflowItem.text}],
+  }]}}]);
   expect((await post('task.completed')).status).toBe(202);await done();
   expect((await inputs()).at(-1)[1].text).toContain(workflow.content);
   expect((await chat.get('instructions',null)).lastInstructionFocus).toBe('task.completed');
@@ -1305,7 +1330,9 @@ test('instruction read tools return latest raw data and strictly validate argume
   const root=await mkdtemp(join(tmpdir(),'beni-instruction-read-')),store=new Store(join(root,'app.sqlite')),log=join(root,'rpc.jsonl');
   const chat=new ChatService(()=>{throw Error('project scope')},()=>fake,()=>join(import.meta.dir,'test/fake-claude.ts'));createHandler(store,'/tmp',chat);
   try{
-   const editor=store.instructions().find(item=>item.key==='editor')!;await chat.get('instructions',null);store.updateInstruction('editor','# pending raw {{custom}}',editor.content);
+   const original=store.instructionDocument('editor')!;
+   const editor=store.updateInstruction('editor','旧仕様では expected_content に本文を渡す。',original.content);
+   await chat.get('instructions',null);store.updateInstruction('editor','# pending raw {{custom}}',editor.content);
    const calls=[{tool:'list_instructions',arguments:{}},{tool:'get_instruction',arguments:{key:'editor'}},...[
     ['list_instructions',{key:'common'}],['list_instructions',null],['get_instruction',{}],['get_instruction',{key:'missing'}],['get_instruction',{key:'common',extra:true}],['get_instruction',[]],['update_instruction',{key:'common',content:'x'}]
    ].map(([tool,args])=>({tool,arguments:args}))];
@@ -1317,18 +1344,24 @@ test('instruction read tools return latest raw data and strictly validate argume
    expect(results.map((item:any)=>item.success)).toEqual([true,true,false,false,false,false,false,false,false]);
    const list=JSON.parse(results[0].contentItems[0].text);expect(list.instructions).toHaveLength(9);expect(list.instructions.every((item:any)=>Object.keys(item).sort().join(',')==='key,name')).toBe(true);
    expect(list.instructions).toContainEqual({key:'task.completed',name:'タスク完了'});
-   expect(JSON.parse(results[1].contentItems[0].text)).toEqual({key:'editor',content:'# pending raw {{custom}}'});
+   const savedEditor=store.instructionDocument('editor')!;
+   expect(JSON.parse(results[1].contentItems[0].text)).toMatchObject({key:'editor',revision:savedEditor.revision,
+    item:{id:savedEditor.items[0]!.id,text:'# pending raw {{custom}}',source:{kind:'instruction',id:'editor/'+savedEditor.items[0]!.id,revision:savedEditor.revision}},
+    next:null});
    const system=provider==='codex'?records.find(item=>item.method==='thread/start').params.developerInstructions:records[0].args[records[0].args.indexOf('--append-system-prompt')+1];
    expect(system).toContain(editor.content);expect(system).not.toContain('# pending raw');expect(system).not.toContain(store.instructions()[1]!.content);
+   expect(system).toContain('以前のツール仕様が記載されている場合も、以下の仕様に従う');
+   expect(system).toContain('update_instruction の key、revision、edits');
    delete process.env.FAKE_EMBEDDED_CALLS;
    // 古いセッションは履歴を維持してツール登録済みの新規セッションに切り替える。
    const path=store.chats.path((await chat.get('instructions',null)).id);const saved=JSON.parse(await readFile(path,'utf8'));
-   delete saved.providers[provider].models[provider==='codex'?'model-a':'sonnet'].session.instructionToolsVersion;
+   saved.providers[provider].models[provider==='codex'?'model-a':'sonnet'].session.instructionToolsVersion=1;
    await writeFile(path,JSON.stringify(saved));
    await chat.send('instructions',null,'resume',provider==='codex'?'model-a':'sonnet','/tmp',undefined,null,false,provider,'common');await waitFor(async()=>(await chat.get('instructions',null)).messages.at(-1)?.status==='completed');
    const latest=(await readFile(log,'utf8')).trim().split('\n').map(line=>JSON.parse(line));
    if(provider==='codex'){expect(latest.filter(item=>item.method==='thread/start')).toHaveLength(2);expect(latest.filter(item=>item.method==='turn/start').at(-1).params.input.some((item:any)=>item.text.includes('reference conversation history'))).toBe(true)}
-   else expect(latest.at(-1).args[latest.at(-1).args.indexOf('--allowedTools')+1]).toContain('mcp__beni__get_instruction');
+   else expect(latest.at(-1).args[latest.at(-1).args.indexOf('--allowedTools')+1]).toContain('mcp__beni__list_chat_sources');
+   expect((await chat.get('instructions',null)).instructionToolsVersion).toBe(2);
   }finally{delete process.env.FAKE_EMBEDDED_CALLS;delete process.env.FAKE_CODEX_LOG;delete process.env.FAKE_CLAUDE_LOG;store.close();await rm(root,{recursive:true,force:true})}
  }
 });

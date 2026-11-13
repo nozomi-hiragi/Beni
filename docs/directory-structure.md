@@ -18,6 +18,7 @@ Beni/
 │   │   ├── pwa.test.ts               マニフェスト・アイコンの配信と公開Originのテスト
 │   │   ├── server.test.ts            API・配信・文書管理・変更通知・保存先のテスト
 │   │   ├── instructions.ts           指示テンプレートの初期値と変数の置換
+│   │   ├── instruction-editor-tools.ts 編集相談の項目編集・根拠と引用元の検証
 │   │   ├── chat.ts                   会話の保存・再開・イベント配信・中断
 │   │   ├── chat-store.ts             チャットID・参照・JSON保存・操作復旧
 │   │   ├── chat-migration.ts         用途別の旧チャットの移行と検証

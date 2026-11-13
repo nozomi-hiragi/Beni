@@ -26,7 +26,7 @@ const maxListedFolders = 500;
 const maxRequestBodyBytes = 65536;
 // JSON の Unicode エスケープは本文の UTF-8 1 byte あたり最大 6 bytes。キー等の分も確保する。
 const maxEscapedBodyBytes = maxRequestBodyBytes * 6 + 1024;
-// update_instruction は本文と競合確認用の旧本文を同じリクエストで送る。
+// update_instruction は編集本文に加えて原文引用を送る。
 const maxManualToolBodyBytes = maxRequestBodyBytes * 2 * 6 + 4096;
 function requestAccess(publicOrigin?: string) {
  const configured = publicOrigin === undefined ? undefined : new URL(publicOrigin);
@@ -92,7 +92,10 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
  const manualTools=new ManualTools(store,chat,workflow);
  chat.setWorkflowTools(workflow);
  chat.setInstructions(()=>store.instructions());
- chat.setInstructionEditor({directory:store.dataDirectory,update:(key,content,expected)=>store.updateInstruction(key,content,expected)});
+ chat.setInstructionEditor({
+  directory:store.dataDirectory,read:(key,revision)=>store.instructionDocument(key,revision),
+  write:(key,revision,items)=>store.writeInstructionDocument(key,revision,items,'instruction-editor'),
+ });
  chat.setAgentStore(store);
  chat.setExecutionFinished((p,t)=>{
   const task=store.task(t);

@@ -34,6 +34,30 @@ function* lastDocumentItem(name:string):Generator<Call,any,ToolReply>{
  while(result.next!==null)result=yield* invoke('read_document',{name,...result.next});
  return result;
 }
+function* instructionEditor(text:string):Generator<Call,void,ToolReply>{
+ const current=yield* invoke('get_instruction',{key:'common'});
+ const listed=yield* invoke('list_chat_sources');
+ const message=listed.sources.find((item:any)=>item.role==='user'&&item.excerpt===text);
+ const {text:original}=yield* invoke('read_source',{kind:message.kind,id:message.id});
+ const quote={kind:message.kind,id:message.id,text:original.slice(2),start:2};
+ const replacement='# Updated {{working_directory}} {{project_directory}} {{working_directory}}';
+ const id=current.item.id, key='common', revision=current.revision;
+ yield* invoke('update_instruction',{key,revision,edits:[{id,text:replacement}]},false);
+ yield* invoke('update_instruction',{key,revision,edits:[
+  {id,text:replacement,reason:'ユーザーの希望を反映',sources:[quote]},
+  {text:'偽の引用',reason:'偽の引用の検証',sources:[{...quote,text:'存在しない原文'}]},
+ ]},false);
+ yield* invoke('update_instruction',{key,revision,edits:[{id,text:replacement,reason:'ユーザーの希望を反映',sources:[{...quote,start:1}]}]},false);
+ const first=yield* invoke('update_instruction',{key,revision,edits:[{id,text:replacement,reason:'ユーザーの希望を反映',sources:[quote]}]});
+ yield* invoke('update_instruction',{key,revision:first.revision,edits:[{id,text:'{{task_id}}',reason:'変数の検証',sources:[quote]}]},false);
+ const past=yield* invoke('get_instruction',{key,revision});
+ const source=yield* invoke('read_source',past.item.source);
+ const second=yield* invoke('update_instruction',{key,revision:first.revision,edits:[{
+  id,reason:'採用理由を追記',sources:[quote,{...past.item.source,text:source.text.slice(0,30)}],
+ }]});
+ yield* invoke('update_instruction',{key,revision:first.revision,edits:[{id,reason:'古い版からの更新'}]},false);
+ yield* invoke('get_instruction',{key,revision:second.revision});
+}
 function* workflow(text:string):Generator<Call,void,ToolReply>{
  if(text==='task.completed'){
   const knowledge=yield* lastDocumentItem('knowledge.md');
@@ -157,12 +181,13 @@ for await (const line of createInterface({input:process.stdin})) {
   if(text==='disconnect')process.exit(0);
   if(text==='reject model'){send({id:msg.id,error:{code:-32600,data:{code:'model_not_found'},message:'Model unavailable'}});continue}
   if(text==='reject'){send({id:msg.id,error:{code:-32600,message:'rejected'}});continue}
-  if(text==='event tools'||process.env.FAKE_EMBEDDED_CALLS||process.env.FAKE_CODEX_WORKFLOW){
+  if(text==='event tools'||process.env.FAKE_EMBEDDED_CALLS||process.env.FAKE_CODEX_WORKFLOW||process.env.FAKE_CODEX_INSTRUCTION_EDITOR){
    if(!toolFeatures.code_mode_host){send({id:msg.id,error:{code:-32600,message:'code-mode host is disabled'}});continue}
    const range=msg.params.input.find((input:any)=>input.text.startsWith('Beni project event review range:'))?.text.match(/after (\d+), through (\d+)/);
    const calls:Call[]=process.env.FAKE_EMBEDDED_CALLS?JSON.parse(process.env.FAKE_EMBEDDED_CALLS):[{tool:'list_events',arguments:{after:Number(range?.[1]??0),through:Number(range?.[2]??0),limit:1}},{tool:'acknowledge_events',arguments:{through:Number(range?.[2]??0)}}];
    const workflowMode=!!process.env.FAKE_CODEX_WORKFLOW;
-   embedded={script:workflowMode?workflow(text):(function*(){yield* calls})(),results:[],index:0,workflow:workflowMode};
+   const script=process.env.FAKE_CODEX_INSTRUCTION_EDITOR?instructionEditor(text):workflowMode?workflow(text):(function*(){yield* calls})();
+   embedded={script,results:[],index:0,workflow:workflowMode};
    send({method:'turn/started',params:{threadId,turn:{id:turn}}});nextEmbedded();send({id:msg.id,result:{turn:{id:turn}}});continue;
   }
   if(['tools','unfinished tools','duplicate tools','failed tools','large tools'].includes(text)){
