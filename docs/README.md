@@ -25,6 +25,7 @@
   - [設定画面](screens/settings.md)
   - [データ画面](screens/data.md)
 - 機能
+  - [PWA と Tailscale](features/pwa.md)
   - [要求・根拠を追跡できる文書管理](traceable-documents-design.md)
   - [インストラクション管理](features/instructions.md)
   - [イベントに対応するワークフロー](features/workflows.md)

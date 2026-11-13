@@ -1,0 +1,15 @@
+{
+  "name": "Beni",
+  "short_name": "Beni",
+  "id": "/",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "lang": "ja",
+  "theme_color": "#e1e6d9",
+  "background_color": "#e1e6d9",
+  "icons": [
+    {"src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png"},
+    {"src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png"}
+  ]
+}

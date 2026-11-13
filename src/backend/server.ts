@@ -20,7 +20,7 @@ import { isAbsolute, dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { mkdir, opendir, realpath } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { frontendResponse } from './frontend-assets';
+import { frontendResponse, isFrontendAsset } from './frontend-assets';
 
 const maxListedFolders = 500;
 const maxRequestBodyBytes = 65536;
@@ -149,7 +149,7 @@ export function createHandler(store: Store, initialFolder = homedir(), chat = ne
   const json = (value: unknown, status = 200) => Response.json(value,{status,headers:{'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}});
   if (request.method === 'GET') {
    try {
-   if (url.pathname === '/' || url.pathname === '/settings' || url.pathname === '/instructions' || url.pathname === '/data' || validProjectId(url.pathname.match(/^\/project\/([^/]+)$/)?.[1]) || ['/ui/index.html','/ui/build/app.js','/ui/generated.css','/ui/style.css'].includes(url.pathname)) {
+   if (url.pathname === '/' || url.pathname === '/settings' || url.pathname === '/instructions' || url.pathname === '/data' || validProjectId(url.pathname.match(/^\/project\/([^/]+)$/)?.[1]) || isFrontendAsset(url.pathname)) {
     return frontendResponse(url.pathname);
    }
    if (url.pathname === '/api/data' || url.pathname === '/api/data/detail') {
@@ -548,20 +548,50 @@ export function dataPaths(environment: Record<string,string|undefined> = process
  const chatDirectory = join(dataDirectory,'chats');
  return {dataDirectory,database,chatDirectory};
 }
-export async function startServer() {
+export async function startServer(signal?: AbortSignal) {
  const {database,dataDirectory} = dataPaths();
  await mkdir(dirname(resolve(database)),{recursive:true,mode:0o700});
  const store = new Store(database,{migration:true});
- assertChatMigrationReady(store.chats,dataDirectory,store.chatMigrationProjects());
- store.initializeStorage();
- assertChatMigrationReady(store.chats,dataDirectory,store.chatMigrationProjects());
- const chat = new ChatService(projectResolver(store),createAgents());
  const terminals = new TerminalService();
- const port = Number(process.env.BENI_PORT ?? 3210);
- const publicOrigin = process.env.BENI_PUBLIC_ORIGIN;
- const server = Bun.serve({hostname:'127.0.0.1',port,...createServerOptions(store,homedir(),chat,publicOrigin,terminals)});
- let stopping=false;const shutdown=async()=>{if(stopping)return;stopping=true;await terminals.dispose();await server.stop(true);store.close();process.exit(0)};process.once('SIGTERM',shutdown);process.once('SIGINT',shutdown);
- console.log(`Beni: http://127.0.0.1:${server.port}/`);
+ let server: Server<SocketData>;
+ try {
+  assertChatMigrationReady(store.chats,dataDirectory,store.chatMigrationProjects());
+  store.initializeStorage();
+  assertChatMigrationReady(store.chats,dataDirectory,store.chatMigrationProjects());
+  const chat = new ChatService(projectResolver(store),createAgents());
+  const port = Number(process.env.BENI_PORT ?? 3210);
+  const publicOrigin = process.env.BENI_PUBLIC_ORIGIN;
+  signal?.throwIfAborted();
+  server = Bun.serve({hostname:'127.0.0.1',port,...createServerOptions(store,homedir(),chat,publicOrigin,terminals)});
+ } catch (error) {
+  store.close();
+  throw error;
+ }
+ let stopping: Promise<void> | undefined;
+ function stop() {
+  return stopping ??= (async () => {
+   try {
+    await server.stop(true);
+   } finally {
+    try {
+     await terminals.dispose();
+    } finally {
+     store.close();
+     process.off('SIGTERM', shutdown);
+     process.off('SIGINT', shutdown);
+    }
+   }
+  })();
+ }
+ function shutdown() {
+  void stop().then(() => process.exit(0), () => process.exit(1));
+ }
+ if (signal === undefined) {
+  process.once('SIGTERM',shutdown);
+  process.once('SIGINT',shutdown);
+  console.log(`Beni: http://127.0.0.1:${server.port}/`);
+ }
+ return {port: server.port, stop};
 }
 
 if (import.meta.main && !Bun.isStandaloneExecutable) await startServer();

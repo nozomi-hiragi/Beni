@@ -28,7 +28,7 @@ async function buildExecutable() {
   const identity = `Beni ${buildId} (${revision}${status ? '-dirty' : ''})`;
   await command([process.execPath, 'run', 'build']);
   const assets = Object.fromEntries(await Promise.all(frontendAssetPaths.map(async path =>
-    [path, await Bun.file(resolve(root, path)).text()],
+    [path, Buffer.from(await Bun.file(resolve(root, path)).arrayBuffer()).toString('base64')],
   )));
 
   const outputRoot = resolve(root, 'dist/executables');

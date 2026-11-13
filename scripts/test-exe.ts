@@ -60,17 +60,33 @@ async function stop(child: Subprocess) {
 async function checkAssets(origin: string) {
   async function asset(path: string, contentType: RegExp) {
     const response = await fetch(origin + path, {signal: AbortSignal.timeout(deadline)});
-    const body = await response.text();
-    assert.equal(response.status, 200, `${path}: ${body.slice(0, 500)}`);
+    assert.equal(response.status, 200, path);
     assert.match(response.headers.get('content-type') ?? '', contentType, path);
+    return response;
+  }
+  async function textAsset(path: string, contentType: RegExp) {
+    const body = await (await asset(path, contentType)).text();
     assert.ok(body.trim().length, `${path} is empty`);
     return body;
   }
-  const html = await asset('/', /^text\/html\b/i);
+  const html = await textAsset('/', /^text\/html\b/i);
   for (const path of ['/ui/build/app.js', '/ui/style.css', '/ui/generated.css']) {
     assert.ok(html.includes(path), `${path} is missing from the HTML`);
     const contentType = path.endsWith('.css') ? /^text\/css\b/i : /^(?:text|application)\/javascript\b/i;
-    await asset(path, contentType);
+    await textAsset(path, contentType);
+  }
+
+  assert.match(html, /rel="manifest" href="\/manifest\.webmanifest"/);
+  assert.match(html, /rel="apple-touch-icon"[^>]* href="\/icons\/apple-touch-icon\.png"/);
+  const manifest = await (await asset('/manifest.webmanifest', /^application\/manifest\+json\b/i)).json();
+  assert.equal(manifest.start_url, '/');
+  assert.equal(manifest.display, 'standalone');
+  assert.deepEqual(manifest.icons.map((icon: {src: string}) => icon.src), ['/icons/icon-192.png', '/icons/icon-512.png']);
+  for (const name of ['icon-192.png', 'icon-512.png', 'apple-touch-icon.png']) {
+    const path = '/icons/' + name;
+    const png = await (await asset(path, /^image\/png\b/i)).arrayBuffer();
+    const original = await Bun.file(join(import.meta.dir, '../src/frontend/pwa/icons', name)).arrayBuffer();
+    assert.deepEqual(new Uint8Array(png), new Uint8Array(original), path);
   }
 }
 
