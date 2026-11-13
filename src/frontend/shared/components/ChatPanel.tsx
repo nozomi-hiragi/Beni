@@ -16,6 +16,7 @@ import ModelPicker from './ModelPicker';
 import AgentIcon from './icons/AgentIcon';
 import ContextGauge from './ContextGauge';
 import ChatToolCall from './ChatToolCall';
+import MessageDiagnostic, { DiagnosticDetails } from './ChatDiagnostic';
 import { renderMarkdown } from './MarkdownPreview';
 
 interface Draft { text: string; version: number; sending: boolean; commandSending?: boolean; commandName?: ChatCommand['name']; error: string; listeners: Set<() => void>; refresh?: () => void; pending?: {content: string; fromComposer: boolean; sendId?: string}; restored: Set<string> }
@@ -75,7 +76,7 @@ export default function ChatPanel(props: { projectId: string; taskId?: string; p
     let first: Pack | undefined;
     for (const pack of packState.value) {
       if (first?.role === 'assistant' && first.kind === 'tool' && pack.role === 'assistant' && pack.kind === 'tool'
-        && (first.provider ?? 'codex') === (pack.provider ?? 'codex') && first.model === pack.model) {
+        && first.messageId === pack.messageId && (first.provider ?? 'codex') === (pack.provider ?? 'codex') && first.model === pack.model) {
         groups.get(first)!.push(pack);
       } else {
         first = pack;
@@ -84,6 +85,10 @@ export default function ChatPanel(props: { projectId: string; taskId?: string; p
     }
     return groups;
   });
+  const diagnosticMessages = createMemo(() => new Map(conversation()?.messages
+    .filter(message => message.role === 'assistant' && (message.status === 'failed' || message.status === 'unknown'))
+    .map(message => [message.id, message])));
+  const lastPackGroups = createMemo(() => new Map([...packGroups().keys()].map(pack => [pack.messageId, pack])));
   const [syncError, setSyncError] = createSignal('');
   const models = createMemo(availableModels);
   const [text, setText] = createSignal('');
@@ -496,11 +501,17 @@ export default function ChatPanel(props: { projectId: string; taskId?: string; p
               </div>}</For>
             </div>
           </Show>
+          <Show when={lastPackGroups().get(pack.messageId) === pack && diagnosticMessages().get(pack.messageId)}>
+            {message => <MessageDiagnostic message={message()} />}
+          </Show>
         </div>
         <div class="chat-footer text-xs text-base-content/60">{packFooter(pack, packGroups().get(pack))}</div>
         </article>}</For></Show>
         <Show when={visibleCommandId()} keyed>{id => <div class="flex min-w-0 items-start gap-2 rounded-box border border-base-300 px-3 py-2 text-sm">
-          <Show when={conversation()?.command?.output} fallback={<p role="status" class="min-w-0 flex-1">{commandOutcome()}</p>}>
+          <Show when={conversation()?.command?.output} fallback={<div class="min-w-0 flex-1">
+            <p role="status">{commandOutcome()}</p>
+            <Show when={conversation()?.command?.diagnostic}>{diagnostic => <DiagnosticDetails diagnostic={diagnostic()} sendId={id} />}</Show>
+          </div>}>
             <details class="min-w-0 flex-1"><summary class="cursor-pointer truncate">{commandOutcome()}</summary><pre class="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words">{conversation()?.command?.output}</pre></details>
           </Show>
           <button type="button" class="btn btn-ghost btn-xs shrink-0" aria-label="コマンド結果を閉じる" onClick={() => dismissCommand(id)}><span aria-hidden="true">×</span></button>

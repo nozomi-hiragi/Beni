@@ -143,16 +143,21 @@ type CodexStatus = {
 type ClaudeStatus = Omit<CodexStatus, 'auth'> & {
   auth: 'claude' | 'apiKey' | 'other' | 'none' | 'unknown';
 };
+type ChatDiagnostic = {
+  stage: string; reason: string; failureCode?: string;
+  rpcCode?: number; exitCode?: number; signal?: number; spawnError?: string; configChecks?: readonly string[];
+};
 type ChatMessage = {
   id: string; sendId: string; role: 'user' | 'assistant'; content: string;
   provider: string; model: string | null; createdAt: string; updatedAt: string;
   status: 'pending' | 'streaming' | 'completed' | 'failed' | 'interrupted' | 'unknown';
   threadId: string | null; sessionId: string | null; errorCode?: 'MODEL_UNAVAILABLE'; systemGenerated?: true;
+  diagnostic?: ChatDiagnostic;
 };
 type ChatCommand = {
   id: string; name: string;
   status: 'running' | 'completed' | 'failed' | 'interrupted' | 'unknown';
-  error?: string; output?: string;
+  error?: string; output?: string; diagnostic?: ChatDiagnostic;
 };
 type ContextUsage = {usedTokens: number; maxTokens: number};
 type Conversation = {

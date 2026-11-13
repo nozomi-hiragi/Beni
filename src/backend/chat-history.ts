@@ -1,6 +1,7 @@
 import { isProvider, object, validPack, type ChatState, type Pack, type Provider } from '../shared/communication';
 import { isTaskPhase, type TaskPhase } from '../shared/task-phase';
 import type { ChatCommand } from '../shared/chat-commands';
+import { parseChatDiagnostic, type ChatDiagnostic } from '../shared/chat-diagnostic';
 import { contextUsageFromCounts, type ContextUsage } from '../shared/agent';
 import { isInstructionKey, type InstructionKey } from './instructions';
 
@@ -20,6 +21,7 @@ export type Message = {
   sessionId: string | null;
   systemGenerated?: true;
   errorCode?: 'MODEL_UNAVAILABLE';
+  diagnostic?: ChatDiagnostic;
 };
 
 export type Session = Pick<Message, 'threadId' | 'sessionId'> & {
@@ -132,10 +134,13 @@ function messageFields(value: Record<string, unknown>, content: unknown): Omit<M
        status !== 'interrupted' && status !== 'unknown') ||
       (systemGenerated !== undefined && systemGenerated !== true) ||
       (errorCode !== undefined && errorCode !== 'MODEL_UNAVAILABLE')) invalid();
+  const diagnostic = role === 'assistant' && (status === 'failed' || status === 'unknown')
+    ? parseChatDiagnostic(value.diagnostic) : undefined;
   return {
     id, sendId, role, content, createdAt, updatedAt, status,
     ...(systemGenerated === undefined ? {} : { systemGenerated }),
     ...(errorCode === undefined ? {} : { errorCode }),
+    ...(diagnostic === undefined ? {} : { diagnostic }),
   };
 }
 
@@ -146,7 +151,9 @@ function commandFields(value: unknown): ChatCommand | undefined {
   if (!nonempty(id) || typeof name !== 'string' || !/^[A-Za-z][A-Za-z0-9_-]{0,127}$/.test(name) ||
       (status !== 'running' && status !== 'completed' && status !== 'failed' && status !== 'interrupted' && status !== 'unknown') ||
       !optionalString(error) || !optionalString(output) || (output !== undefined && Buffer.byteLength(output) > 65536)) invalid();
-  return { id, name, status, ...(error === undefined ? {} : { error }), ...(output === undefined ? {} : { output }) };
+  const diagnostic = status === 'failed' || status === 'unknown' ? parseChatDiagnostic(value.diagnostic) : undefined;
+  return { id, name, status, ...(error === undefined ? {} : { error }), ...(output === undefined ? {} : { output }),
+    ...(diagnostic === undefined ? {} : { diagnostic }) };
 }
 
 function conversationFields(value: Record<string, unknown>): Omit<ConversationFields, 'packs'> {

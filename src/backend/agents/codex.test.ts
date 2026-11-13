@@ -15,9 +15,9 @@ const request: AgentRequest = {
  operation: { kind: 'send', text: 'hello' },
 };
 
-async function run(overrides: Partial<AgentRequest> = {}) {
+async function run(overrides: Partial<AgentRequest> = {}, client = agent) {
  const events: AgentEvent[] = [];
- const outcome = await agent.run({ ...request, ...overrides }, {
+ const outcome = await client.run({ ...request, ...overrides }, {
   signal: new AbortController().signal,
   emit: async event => { events.push(event); },
   callTool: async () => { throw Error('Unexpected tool call'); },
@@ -62,7 +62,9 @@ test('Codex review refuses an effective configuration that allows network access
  try {
   for (const access of ['read-only', 'workspace-write'] as const) {
    expect(await run({ ...review, access })).toEqual({
-    events: [], outcome: { status: 'failed', code: 'unavailable' },
+    events: [], outcome: { status: 'failed', code: 'unavailable', diagnostic: {
+     stage: 'config-validation', reason: 'unsafe-config', configChecks: ['workspace-network-disabled'],
+    } },
    });
   }
  } finally { delete process.env.FAKE_CODEX_UNSAFE_SANDBOX; }
@@ -115,12 +117,15 @@ test('Codex calls registered tools in the accepted turn even when the request ar
 
 test('Codex distinguishes missing sessions, reauthenticates, and confirms interruption', async () => {
  const target = { mode: 'resume', session } as const;
- expect((await run({ target, resumeToolsChanged: true })).outcome).toEqual({ status: 'failed', code: 'session-incompatible' });
+ expect((await run({ target, resumeToolsChanged: true })).outcome).toEqual({ status: 'failed', code: 'session-incompatible',
+  diagnostic: { stage: 'preparation', reason: 'invalid-request' } });
  try {
   process.env.FAKE_CODEX_RESUME = 'missing';
-  expect((await run({ target })).outcome).toEqual({ status: 'failed', code: 'session-missing' });
+  expect((await run({ target })).outcome).toEqual({ status: 'failed', code: 'session-missing',
+   diagnostic: { stage: 'thread-resume', reason: 'rpc-rejected', rpcCode: -32600 } });
   process.env.FAKE_AUTH = 'apiKey';
-  expect(await run()).toEqual({ events: [], outcome: { status: 'failed', code: 'unavailable' } });
+  expect(await run()).toEqual({ events: [], outcome: { status: 'failed', code: 'unavailable',
+   diagnostic: { stage: 'account', reason: 'authentication' } } });
  } finally {
   delete process.env.FAKE_CODEX_RESUME;
   delete process.env.FAKE_AUTH;
@@ -132,6 +137,65 @@ test('Codex distinguishes missing sessions, reauthenticates, and confirms interr
   callTool: async () => { throw Error('Unexpected tool call'); },
  });
  expect(outcome).toEqual({ status: 'interrupted' });
+});
+
+test('Codex identifies only bounded active-writer errors for the exact resumed thread', async () => {
+ const target = { mode: 'resume', session } as const;
+ try {
+  for (const mode of ['active-writer-prefix', 'active-writer-other-thread', 'active-writer-similar',
+   'active-writer-long', 'active-writer-wrong-code'] as const) {
+   process.env.FAKE_CODEX_RESUME = mode;
+   const result = await run({ target });
+   const activeWriter = mode === 'active-writer-prefix';
+   expect(result.events).toEqual([]);
+   expect(result.outcome).toEqual({ status: 'failed', code: 'rejected', diagnostic: {
+    stage: 'thread-resume', reason: activeWriter ? 'thread-in-use' : 'rpc-rejected',
+    rpcCode: mode === 'active-writer-wrong-code' ? -32000 : -32600,
+   } });
+   expect(JSON.stringify(result.outcome)).not.toContain('thread-1');
+   expect(JSON.stringify(result.outcome)).not.toContain('failed to resume');
+  }
+ } finally { delete process.env.FAKE_CODEX_RESUME; }
+});
+
+test('Codex records bounded setup diagnostics without saving stderr, RPC messages, or config values', async () => {
+ const client = new CodexAgent(() => fake, 500);
+ try {
+  for (const [mode, diagnostic] of [
+   ['initialize-close', { stage: 'initialize', reason: 'connection-closed', exitCode: 27 }],
+   ['config-timeout', { stage: 'config-probe', reason: 'timeout' }],
+   ['config-reject', { stage: 'config-probe', reason: 'rpc-rejected', rpcCode: -32001 }],
+   ['unsafe-config', { stage: 'config-probe', reason: 'unsafe-config', configChecks: ['mcp-server-names'] }],
+  ] as const) {
+   process.env.FAKE_CODEX_DIAGNOSTIC = mode;
+   expect(await run({}, client)).toEqual({ events: [], outcome: { status: 'failed', code: 'unavailable', diagnostic } });
+  }
+ } finally { delete process.env.FAKE_CODEX_DIAGNOSTIC; }
+ const missing = new CodexAgent(() => `${fake}.missing`);
+ expect(await run({}, missing)).toEqual({ events: [], outcome: { status: 'failed', code: 'unavailable',
+  diagnostic: { stage: 'spawn', reason: 'spawn-failed', spawnError: 'ENOENT' } } });
+});
+
+test('Codex distinguishes turn rejection, disconnect and reported execution failure', async () => {
+ for (const [text, outcome, accepted] of [
+  ['reject model', { status: 'failed', code: 'model-unavailable', diagnostic: { stage: 'turn-start', reason: 'rpc-rejected', rpcCode: -32600 } }, false],
+  ['disconnect', { status: 'unknown', diagnostic: { stage: 'turn-start', reason: 'connection-closed', exitCode: 0 } }, false],
+  ['disconnect after acceptance', { status: 'unknown', diagnostic: { stage: 'turn-completion', reason: 'connection-closed', signal: 15 } }, true],
+  ['fail', { status: 'failed', code: 'execution-failed', diagnostic: { stage: 'turn-completion', reason: 'execution-failed', rpcCode: -32000 } }, true],
+ ] as const) {
+  const result = await run({ operation: { kind: 'send', text } });
+  expect(result.outcome).toEqual(outcome);
+  expect(result.events.some(event => event.type === 'accepted')).toBe(accepted);
+ }
+});
+
+test('Codex safely reports a failure publishing acceptance to the host', async () => {
+ const outcome = await agent.run(request, {
+  signal: new AbortController().signal,
+  emit: async () => { throw Error('fake-private-detail'); },
+  callTool: async () => { throw Error('Unexpected tool call'); },
+ });
+ expect(outcome).toEqual({ status: 'unknown', diagnostic: { stage: 'host', reason: 'event-delivery-failed' } });
 });
 
 test('Codex compaction waits for both the matching item and completed turn after acknowledgement', async () => {
@@ -271,7 +335,7 @@ test('Codex abort reports an unknown result when compaction was dispatched witho
    await Bun.sleep(10);
   }
   controller.abort();
-  expect(await pending).toEqual({ status: 'unknown' });
+  expect(await pending).toEqual({ status: 'unknown', diagnostic: { stage: 'turn-completion', reason: 'unconfirmed' } });
   expect(events).toEqual([]);
   expect(await agent.run(compact, host)).toEqual({ status: 'interrupted' });
  } finally {

@@ -4,9 +4,11 @@ import { constants } from 'node:fs';
 import { lstat, open, realpath } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative } from 'node:path';
 import { createInterface } from 'node:readline';
+import { constants as osConstants } from 'node:os';
 import { toolResult, type EmbeddedToolResult } from '../embedded-tools';
 import { codexRateLimits } from '../rate-limits';
 import { contextUsageFromCounts, type ContextUsage } from '../../shared/agent';
+import { parseChatDiagnostic, parseSpawnError, type AgentDiagnostic } from '../../shared/chat-diagnostic';
 import type {
  Agent, AgentCommand, AgentFailureCode, AgentHost, AgentModel, AgentOutcome, AgentRequest,
  AgentSession, AgentStatus, AgentToolEvent, AgentUsage,
@@ -27,33 +29,43 @@ const workspaceSandbox = {
 const now = () => new Date().toISOString();
 const nonempty = (value: unknown): value is string => typeof value === 'string' && value.length > 0;
 const encode = (value: unknown) => typeof value === 'string' ? value : JSON.stringify(value);
-const failed = (code: AgentFailureCode): AgentOutcome => ({ status: 'failed', code });
-const unknown: AgentOutcome = { status: 'unknown' };
+const failed = (code: AgentFailureCode, diagnostic: AgentDiagnostic): AgentOutcome => ({ status: 'failed', code, diagnostic });
+const unknown = (diagnostic: AgentDiagnostic): AgentOutcome => ({ status: 'unknown', diagnostic });
 const interrupted: AgentOutcome = { status: 'interrupted' };
 const threadIdPattern = /^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i;
 const rolloutName = /^rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-/;
 const contextProbeTimeout = 2000;
 const rolloutTailLimit = 1024 * 1024;
 
-class Rejected extends Error {
- constructor(readonly code: AgentFailureCode) { super('Codex request rejected'); }
+type Stage = AgentDiagnostic['stage'];
+type RpcDetails = Omit<AgentDiagnostic, 'stage'>;
+
+class RpcFailure extends Error {
+ constructor(readonly details: RpcDetails, readonly code?: AgentFailureCode) { super('Codex RPC failed'); }
+}
+
+function rpcDiagnostic(stage: Stage, error: unknown): AgentDiagnostic {
+ if (!(error instanceof RpcFailure)) return { stage, reason: 'invalid-response' };
+ return parseChatDiagnostic({ ...error.details, stage: error.details.reason === 'spawn-failed' ? 'spawn' : stage })!;
 }
 
 class CodexRpc {
  private child: ChildProcessWithoutNullStreams;
  private next = 0;
  private closing = false;
+ private closeFailure?: RpcFailure;
  private pending = new Map<number, {
   resumeThreadId?: string;
   resolve: (value: any) => void;
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout>;
  }>();
- readonly closed: Promise<void>;
+ readonly closed: Promise<RpcFailure>;
  onEvent: (method: string, params: any) => void = () => {};
  onToolCall: (params: any) => Promise<EmbeddedToolResult> = async () => toolResult({ error: 'Unsupported tool' }, false);
 
- constructor(executable: string, config?: { servers?: readonly string[]; features?: ScopedFeatures }) {
+ constructor(executable: string, config?: { servers?: readonly string[]; features?: ScopedFeatures },
+  private readonly requestTimeout = 15000) {
   const args = config ? [
    '-c', 'forced_login_method="chatgpt"',
    ...scopedFeatures.flatMap(name => [config.features?.[name] ? '--enable' : '--disable', name]),
@@ -65,20 +77,28 @@ class CodexRpc {
    ...(config.servers ?? []).flatMap(name => ['-c', `mcp_servers.${name}.enabled=false`]),
    'app-server',
   ] : ['app-server'];
-  this.child = spawn(executable, args, { stdio: ['pipe', 'pipe', 'pipe'] });
+  try { this.child = spawn(executable, args, { stdio: ['pipe', 'pipe', 'pipe'] }); }
+  catch (error) { throw new RpcFailure({ reason: 'spawn-failed', spawnError: parseSpawnError((error as NodeJS.ErrnoException)?.code) }); }
   this.child.stderr.resume();
   this.child.stdin.on('error', () => {});
   createInterface({ input: this.child.stdout }).on('line', line => this.receive(line));
-  this.child.on('error', () => {});
+  let spawnFailure: RpcFailure | undefined;
+  this.child.on('error', error => {
+   if (this.child.pid === undefined) {
+    spawnFailure = new RpcFailure({ reason: 'spawn-failed', spawnError: parseSpawnError((error as NodeJS.ErrnoException).code) });
+   }
+  });
   // close follows stdout, so a final notification flushed before exit is still processed.
-  this.closed = new Promise(resolve => this.child.once('close', () => {
+  this.closed = new Promise(resolve => this.child.once('close', (code, signal) => {
    this.closing = true;
+   this.closeFailure = spawnFailure ?? new RpcFailure({ reason: 'connection-closed',
+    exitCode: code ?? undefined, signal: signal ? osConstants.signals[signal as NodeJS.Signals] : undefined });
    for (const request of this.pending.values()) {
     clearTimeout(request.timer);
-    request.reject(Error('Connection closed'));
+    request.reject(this.closeFailure);
    }
    this.pending.clear();
-   resolve();
+   resolve(this.closeFailure);
   }));
  }
 
@@ -111,7 +131,12 @@ class CodexRpc {
    const { resumeThreadId } = request;
    const missing = resumeThreadId !== undefined && (error?.data?.code === 'thread_not_found' ||
     error?.code === -32600 && error?.message === `no rollout found for thread id ${resumeThreadId}`);
-   request.reject(new Rejected(modelRejected(error) ? 'model-unavailable' : missing ? 'session-missing' : 'rejected'));
+   const messageText = error?.message;
+   const threadInUse = resumeThreadId !== undefined && error?.code === -32600 && typeof messageText === 'string' &&
+    messageText.length <= 4096 && messageText.endsWith(`thread ${resumeThreadId} already has an active writer`);
+   const details: RpcDetails = { reason: threadInUse ? 'thread-in-use' : 'rpc-rejected',
+    ...(Number.isInteger(error?.code) ? { rpcCode: error.code } : {}) };
+   request.reject(new RpcFailure(details, threadInUse ? 'rejected' : modelRejected(error) ? 'model-unavailable' : missing ? 'session-missing' : 'rejected'));
    return;
   }
   if (typeof method === 'string') this.onEvent(method, params);
@@ -121,20 +146,17 @@ class CodexRpc {
   if (!this.closing) this.child.stdin.write(JSON.stringify(message) + '\n');
  }
 
- request(method: string, params: any, timeout = 15000): Promise<any> {
-  if (this.closing) return Promise.reject(Error('Connection closed'));
+ request(method: string, params: any, timeout = this.requestTimeout): Promise<any> {
+  if (this.closing) return Promise.reject(this.closeFailure ?? new RpcFailure({ reason: 'connection-closed' }));
   return new Promise((resolve, reject) => {
    const id = ++this.next;
    const timer = setTimeout(() => {
     this.pending.delete(id);
-    reject(Error('Request timed out'));
+    reject(new RpcFailure({ reason: 'timeout' }));
    }, timeout);
    this.pending.set(id, { resolve, reject, timer, resumeThreadId: method === 'thread/resume' ? params.threadId : undefined });
    this.child.stdin.write(JSON.stringify({ id, method, params }) + '\n', error => {
-    if (!error) return;
-    clearTimeout(timer);
-    this.pending.delete(id);
-    reject(Error('Connection closed'));
+    if (error) void this.closed.then(reject);
    });
   });
  }
@@ -256,49 +278,71 @@ async function readRolloutUsage(home: unknown, path: unknown, id: string, modelI
  }
 }
 
-async function withRestrictedRpc<T>(
+async function withRestrictedRpc(
  executable: string,
  request: AgentRequest,
  signal: AbortSignal,
- run: (rpc: CodexRpc, accountKey?: string) => Promise<T>,
-): Promise<T> {
+ requestTimeout: number,
+ run: (rpc: CodexRpc, accountKey?: string) => Promise<AgentOutcome>,
+): Promise<AgentOutcome> {
  const { cwd } = request;
  const shellEnabled = request.access === 'workspace-write' && request.builtInTools === 'phase-default';
  const features = {
   shell_tool: shellEnabled,
   code_mode_host: shellEnabled || request.tools.length > 0,
  };
- let rpc = new CodexRpc(executable, {});
- const stopSetup = () => { void rpc.close(); };
+ let stage: Stage = 'spawn';
+ let rpc: CodexRpc | undefined;
+ const stopSetup = () => { void rpc?.close(); };
  signal.addEventListener('abort', stopSetup, { once: true });
  try {
   signal.throwIfAborted();
+  rpc = new CodexRpc(executable, {}, requestTimeout);
+  stage = 'initialize';
   await rpc.init();
+  stage = 'config-probe';
   const { config: probe } = await rpc.request('config/read', { cwd });
   const servers = Object.keys(probe.mcp_servers ?? {});
-  if (!servers.every(name => /^[A-Za-z0-9_-]+$/.test(name))) throw Error('Unsafe configuration');
+  if (!servers.every(name => /^[A-Za-z0-9_-]+$/.test(name))) {
+   return failed('unavailable', { stage, reason: 'unsafe-config', configChecks: ['mcp-server-names'] });
+  }
   await rpc.close();
   signal.throwIfAborted();
-  rpc = new CodexRpc(executable, { servers, features });
+  stage = 'spawn';
+  rpc = new CodexRpc(executable, { servers, features }, requestTimeout);
+  stage = 'initialize';
   await rpc.init();
+  stage = 'config-read';
   const { config } = await rpc.request('config/read', { cwd });
-  const workspace = config.sandbox_workspace_write;
-  if ((config.model_provider != null && config.model_provider !== 'openai') ||
-   Object.values(config.mcp_servers ?? {}).some((server: any) => server?.enabled !== false) ||
-   disabledFeatures.some(name => config.features?.[name] !== false) ||
-   scopedFeatures.some(name => config.features?.[name] !== features[name]) ||
-   config.web_search !== 'disabled' || config.sandbox_mode !== 'read-only' ||
-   workspace?.network_access !== false || workspace.exclude_slash_tmp !== true ||
-   workspace.exclude_tmpdir_env_var !== true ||
-   !Array.isArray(workspace.writable_roots) || workspace.writable_roots.length !== 0) throw Error('Unsafe configuration');
+  stage = 'config-validation';
+  const workspace = config?.sandbox_workspace_write;
+  const checks: Record<Exclude<NonNullable<AgentDiagnostic['configChecks']>[number], 'mcp-server-names'>, boolean> = {
+   'model-provider': config?.model_provider == null || config.model_provider === 'openai',
+   'mcp-servers-disabled': Object.values(config?.mcp_servers ?? {}).every((server: any) => server?.enabled === false),
+   'features-disabled': disabledFeatures.every(name => config?.features?.[name] === false),
+   'scoped-features': scopedFeatures.every(name => config?.features?.[name] === features[name]),
+   'web-search-disabled': config?.web_search === 'disabled',
+   'read-only-sandbox': config?.sandbox_mode === 'read-only',
+   'workspace-network-disabled': workspace?.network_access === false,
+   'workspace-slash-tmp-excluded': workspace?.exclude_slash_tmp === true,
+   'workspace-tmpdir-excluded': workspace?.exclude_tmpdir_env_var === true,
+   'workspace-writable-roots-empty': Array.isArray(workspace?.writable_roots) && workspace.writable_roots.length === 0,
+  };
+  const failedChecks = (Object.keys(checks) as (keyof typeof checks)[]).filter(check => !checks[check]);
+  if (failedChecks.length) return failed('unavailable', { stage, reason: 'unsafe-config', configChecks: failedChecks });
+  stage = 'account';
   const { auth, accountKey } = await readAccount(rpc);
-  if (auth !== 'subscription') throw Error('Unavailable authentication');
+  if (auth !== 'subscription') return failed('unavailable', { stage, reason: 'authentication' });
   signal.throwIfAborted();
   signal.removeEventListener('abort', stopSetup);
+  stage = 'agent';
   return await run(rpc, accountKey);
+ } catch (error) {
+  if (signal.aborted) return interrupted;
+  return stage === 'agent' ? unknown({ stage, reason: 'execution-failed' }) : failed('unavailable', rpcDiagnostic(stage, error));
  } finally {
   signal.removeEventListener('abort', stopSetup);
-  await rpc.close();
+  await rpc?.close();
  }
 }
 
@@ -320,12 +364,14 @@ function toolEvent(item: any, started: boolean): AgentToolEvent {
 }
 
 function completedTurn(turn: any, compact: boolean, compacted: boolean): AgentOutcome {
- if (turn.status === 'completed') return !compact || compacted ? { status: 'completed' } : unknown;
+ const stage = 'turn-completion';
+ if (turn.status === 'completed') return !compact || compacted ? { status: 'completed' } : unknown({ stage, reason: 'unconfirmed' });
  if (turn.status === 'interrupted') return interrupted;
- if (turn.status !== 'failed') return unknown;
- if (compact && turn.error?.code === 'COMPACTION_UNAVAILABLE') return failed('compaction-unavailable');
- if (compact && turn.error?.code === 'COMPACTION_NOT_NEEDED') return failed('nothing-to-compact');
- return failed(modelRejected(turn.error) ? 'model-unavailable' : 'execution-failed');
+ if (turn.status !== 'failed') return unknown({ stage, reason: 'invalid-response' });
+ const diagnostic = parseChatDiagnostic({ stage, reason: 'execution-failed', rpcCode: turn.error?.code })!;
+ if (compact && turn.error?.code === 'COMPACTION_UNAVAILABLE') return failed('compaction-unavailable', diagnostic);
+ if (compact && turn.error?.code === 'COMPACTION_NOT_NEEDED') return failed('nothing-to-compact', diagnostic);
+ return failed(modelRejected(turn.error) ? 'model-unavailable' : 'execution-failed', diagnostic);
 }
 
 async function runTurn(rpc: CodexRpc, request: AgentRequest, host: AgentHost, accountKey?: string): Promise<AgentOutcome> {
@@ -336,6 +382,7 @@ async function runTurn(rpc: CodexRpc, request: AgentRequest, host: AgentHost, ac
  const review = name === 'review';
  let dispatched = false;
  let acknowledged = false;
+ const threadStage = target.mode === 'resume' ? 'thread-resume' : 'thread-start';
  let threadId: string | undefined;
  let turnId: string | undefined;
  let session: AgentSession | null = null;
@@ -360,7 +407,8 @@ async function runTurn(rpc: CodexRpc, request: AgentRequest, host: AgentHost, ac
   result.resolve(value);
  };
  const enqueue = (job: () => Promise<void>) => {
-  queue = queue.then(async () => { if (!outcome) await job(); }).catch(() => finish(unknown));
+  queue = queue.then(async () => { if (!outcome) await job(); })
+   .catch(() => finish(unknown({ stage: 'host', reason: 'event-delivery-failed' })));
   return queue;
  };
  const interrupt = () => {
@@ -370,11 +418,11 @@ async function runTurn(rpc: CodexRpc, request: AgentRequest, host: AgentHost, ac
    void rpc.close();
   } else if (turnId && threadId) {
    interruptSent = true;
-   interruptTimer = setTimeout(() => finish(unknown), 15000);
+   interruptTimer = setTimeout(() => finish(unknown({ stage: 'turn-completion', reason: 'timeout' })), 15000);
    // Completion is authoritative even if the interrupt request itself fails.
    void rpc.request('turn/interrupt', { threadId, turnId }).catch(() => {});
   } else if (acknowledged && compact) {
-   finish(unknown);
+   finish(unknown({ stage: 'turn-completion', reason: 'unconfirmed' }));
   }
  };
  const accept = () => {
@@ -491,9 +539,10 @@ async function runTurn(rpc: CodexRpc, request: AgentRequest, host: AgentHost, ac
   });
   return reply;
  };
- void rpc.closed.then(async () => {
-  if (acknowledged && turnId) await events;
-  finish(dispatched ? unknown : failed('unavailable'));
+ void rpc.closed.then(async error => {
+  if (!acknowledged) return; // The pending request reports the closure at its own stage.
+  if (turnId) await events;
+  finish(unknown(rpcDiagnostic('turn-completion', error)));
  });
  host.signal.addEventListener('abort', interrupt, { once: true });
 
@@ -510,8 +559,12 @@ async function runTurn(rpc: CodexRpc, request: AgentRequest, host: AgentHost, ac
     ...(tools.length ? { dynamicTools: tools.map(tool => ({ ...tool, type: 'function' })) } : {}),
    });
   threadId = opened?.thread?.id;
-  if (!nonempty(threadId) || target.mode === 'resume' && threadId !== target.session.id) return failed('unavailable');
-  if (target.mode === 'ephemeral' && opened.thread.ephemeral !== true) return failed('unsupported');
+  if (!nonempty(threadId) || target.mode === 'resume' && threadId !== target.session.id) {
+   return failed('unavailable', { stage: threadStage, reason: 'invalid-response' });
+  }
+  if (target.mode === 'ephemeral' && opened.thread.ephemeral !== true) {
+   return failed('unsupported', { stage: threadStage, reason: 'invalid-response' });
+  }
   if (target.mode !== 'ephemeral') {
    const legacySessionId = opened.thread.sessionId ?? (target.mode === 'resume' ? target.session.legacySessionId : undefined);
    session = { agentId: 'codex', id: threadId, ...(nonempty(legacySessionId) ? { legacySessionId } : {}) };
@@ -520,14 +573,16 @@ async function runTurn(rpc: CodexRpc, request: AgentRequest, host: AgentHost, ac
   dispatched = true;
   let response;
   if (compact) {
-   completionTimer = setTimeout(() => finish(unknown), 60000);
+   completionTimer = setTimeout(() => finish(unknown({ stage: 'turn-completion', reason: 'timeout' })), 60000);
    response = await rpc.request('thread/compact/start', { threadId });
   } else if (review) {
    response = await rpc.request('review/start', {
     threadId, delivery: 'inline',
     target: args ? { type: 'custom', instructions: args } : { type: 'uncommittedChanges' },
    });
-   if (response?.reviewThreadId !== undefined && response.reviewThreadId !== threadId) return unknown;
+   if (response?.reviewThreadId !== undefined && response.reviewThreadId !== threadId) {
+    return unknown({ stage: 'turn-start', reason: 'invalid-response' });
+   }
   } else {
    const recap = '会話のここまでの目的、決定事項、未解決事項、次の作業を簡潔に日本語で要約してください。';
    const text = operation.kind === 'send' ? operation.text : recap + (args ? '\n' + args : '');
@@ -540,7 +595,9 @@ async function runTurn(rpc: CodexRpc, request: AgentRequest, host: AgentHost, ac
    });
   }
   const responseTurn = response?.turn?.id;
-  if ((!compact || responseTurn !== undefined) && (!nonempty(responseTurn) || turnId && turnId !== responseTurn)) return unknown;
+  if ((!compact || responseTurn !== undefined) && (!nonempty(responseTurn) || turnId && turnId !== responseTurn)) {
+   return unknown({ stage: 'turn-start', reason: 'invalid-response' });
+  }
   turnId ??= responseTurn;
   acknowledged = true;
   if (!outcome && turnId) accept();
@@ -549,8 +606,9 @@ async function runTurn(rpc: CodexRpc, request: AgentRequest, host: AgentHost, ac
  } catch (error) {
   if (outcome) return outcome;
   if (!dispatched && host.signal.aborted) return interrupted;
-  if (error instanceof Rejected) return failed(error.code);
-  return dispatched ? unknown : failed('unavailable');
+  const diagnostic = rpcDiagnostic(dispatched ? 'turn-start' : threadStage, error);
+  if (error instanceof RpcFailure && error.code) return failed(error.code, diagnostic);
+  return dispatched ? unknown(diagnostic) : failed('unavailable', diagnostic);
  } finally {
   host.signal.removeEventListener('abort', interrupt);
   clearTimeout(completionTimer);
@@ -572,7 +630,8 @@ export class CodexAgent implements Agent {
   { name: 'recap', description: '会話を要約', kind: 'generation', requiresSession: false },
  ];
 
- constructor(private readonly executable: () => string | null = () => Bun.which('codex')) {}
+ constructor(private readonly executable: () => string | null = () => Bun.which('codex'),
+  private readonly requestTimeout = 15000) {}
 
  async getStatus(): Promise<AgentStatus> {
   const executable = this.executable();
@@ -652,21 +711,23 @@ export class CodexAgent implements Agent {
 
  async run(request: AgentRequest, host: AgentHost): Promise<AgentOutcome> {
   if (host.signal.aborted) return interrupted;
-  if (!this.accessModes.includes(request.access)) return failed('unsupported');
+  const invalidRequest = { stage: 'preparation', reason: 'invalid-request' } as const;
+  if (!this.accessModes.includes(request.access)) return failed('unsupported', invalidRequest);
   const { target, operation } = request;
   const compact = operation.kind === 'command' && operation.name === 'compact';
   if (operation.kind === 'command') {
-   if (!this.commands.some(command => command.name === operation.name)) return failed('unsupported');
-   if (compact && (operation.args.trim() || target.mode !== 'resume')) return failed('rejected');
+   if (!this.commands.some(command => command.name === operation.name)) return failed('unsupported', invalidRequest);
+   if (compact && (operation.args.trim() || target.mode !== 'resume')) return failed('rejected', invalidRequest);
   }
   if (target.mode === 'resume' && (target.session.agentId !== this.id || !nonempty(target.session.id) ||
-   !compact && request.resumeToolsChanged)) return failed('session-incompatible');
-  const executable = this.executable();
-  if (!executable) return failed('unavailable');
+   !compact && request.resumeToolsChanged)) return failed('session-incompatible', invalidRequest);
+  let executable: string | null;
   try {
-   return await withRestrictedRpc(executable, request, host.signal, (rpc, accountKey) => runTurn(rpc, request, host, accountKey));
+   executable = this.executable();
   } catch {
-   return host.signal.aborted ? interrupted : failed('unavailable');
+   return failed('unavailable', { stage: 'spawn', reason: 'spawn-failed' });
   }
+  if (!executable) return failed('unavailable', { stage: 'spawn', reason: 'unavailable' });
+  return withRestrictedRpc(executable, request, host.signal, this.requestTimeout, (rpc, accountKey) => runTurn(rpc, request, host, accountKey));
  }
 }

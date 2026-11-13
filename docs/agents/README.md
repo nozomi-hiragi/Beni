@@ -85,11 +85,8 @@ type AgentUsage = {
 type AgentOutcome =
   | { status: 'completed'; output?: string }
   | { status: 'interrupted' }
-  | { status: 'failed'; code:
-      'unavailable' | 'model-unavailable' | 'session-missing'
-      | 'session-incompatible' | 'unsupported' | 'rejected' | 'execution-failed'
-      | 'compaction-unavailable' | 'nothing-to-compact' }
-  | { status: 'unknown' };
+  | { status: 'failed'; code: AgentFailureCode; diagnostic?: AgentDiagnostic }
+  | { status: 'unknown'; diagnostic?: AgentDiagnostic };
 
 type AgentEvent =
   | { type: 'accepted'; session: AgentSession | null }
@@ -134,6 +131,8 @@ interface Agent {
 5. 確定した拒否や実行エラーは `failed`、送信した可能性があるまま応答を失った場合は `unknown` とする。Beni は `unknown` を自動再送しない。終了後の通知とツール呼び出しは破棄し、Beni が最終保存してから次の実行を許可する。
 
 Beni は同じ会話への送信と保守操作を直列化する。Agent は別会話やバックグラウンドジョブの同時実行を `sendId` ごとに分離する。Beni が停止を求めた場合や、保存エラーで `emit` が失敗した場合も、Agent は担当する実行の接続とプロセスを閉じる。実行先が応答しない場合は既存の待機上限を適用し、受理や完了を確認できなければ `unknown` を返す。
+
+`AgentDiagnostic` を返す場合は、`src/shared/chat-diagnostic.ts` に定義した固定値と検証済みの数値を使う。Beni は診断を会話の結果と一緒に保存する。 [会話の保存仕様](../data/beni/chat.md)
 
 ## 履歴と再開
 

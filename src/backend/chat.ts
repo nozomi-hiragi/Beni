@@ -14,6 +14,7 @@ import { validProjectId, validTaskId } from '../shared/ids';
 import { INSTRUCTIONS_CHAT_ID, packHash, packHeader, isProvider, type Provider, type Pack, type TopicEvent } from '../shared/communication';
 
 import { parseChatCommand } from '../shared/chat-commands';
+import { parseChatDiagnostic, type ChatDiagnostic } from '../shared/chat-diagnostic';
 import { isAgentId, type AgentConnectionStatus, type AgentInfo, type ContextUsage, type RateLimitUsage } from '../shared/agent';
 import { type Agent, type AgentEvent, type AgentHost, type AgentOutcome, type AgentRequest, type AgentStatus, type AgentToolEvent, type AgentUsage } from './agents/agent';
 import { createAgents } from './agents';
@@ -53,6 +54,14 @@ type WorkflowRun = {provider:WorkflowToolsProvider;context:WorkflowToolContext;t
 type WorkflowJob = {id:string;finished:(status:State)=>void};
 const digest = (value:string) => createHash('sha256').update(value).digest('hex');
 const now = () => new Date().toISOString();
+const hostFailure: ChatDiagnostic = { stage: 'host', reason: 'event-delivery-failed' };
+const recoveredDiagnostic: ChatDiagnostic = { stage: 'recovery', reason: 'recovered' };
+function outcomeDiagnostic(outcome: AgentOutcome): ChatDiagnostic | undefined {
+ if(outcome.status!=='failed'&&outcome.status!=='unknown')return;
+ const failureCode=outcome.status==='failed'?outcome.code:undefined;
+ return parseChatDiagnostic({...outcome.diagnostic,failureCode})??
+  parseChatDiagnostic({stage:'agent',reason:failureCode?'execution-failed':'unconfirmed',failureCode});
+}
 
 const excerptLimit = 16 * 1024;
 const toolPackLimit = 1024 * 1024;
@@ -350,7 +359,43 @@ export class ChatService {
   return conversationExcerpt(this.chatStorage(p).read(this.chatScope(p,t,phase))?.messages??[],heading);
  }
 
- async get(p:string,t:string|null,phase:TaskPhase|null=t===null?null:'requirements'){const k=conversationKey(p,t,phase);return this.locked(k,async()=>{const c=await this.load(p,t,phase);if(!this.active.has(k)){let changed=false;if(c.command?.status==='running'){c.command.status='unknown';c.command.error='コマンドの結果を確認できませんでした';changed=true;}const events:TopicEvent[]=[];for(const m of c.messages)if(m.status==='pending'||m.status==='streaming'){m.status='unknown';m.updatedAt=now();changed=true}for(const pack of c.packs)if(pack.state==='streaming'){this.closePack(pack,pack.role==='user'?'completed':'unknown',events);changed=true}if(changed){await this.save(c);if(t!==null&&phase==='execution'&&this.canRunProject(p))this.finishExecution(p,t);for(const event of events)this.emit(c,event);this.emit(c,{name:'chat.changed',data:{}})}}return c})}
+ private recoverUnfinished(c:Conversation,events:TopicEvent[]){
+  let changed=false;
+  if(c.command?.status==='running'){
+   c.command={...c.command,status:'unknown',error:'コマンドの結果を確認できませんでした',diagnostic:recoveredDiagnostic};
+   changed=true;
+  }
+  const closedAt=now();
+  for(const message of c.messages){
+   if(message.status!=='pending'&&message.status!=='streaming')continue;
+   message.status='unknown';
+   message.updatedAt=closedAt;
+   if(message.role==='assistant'){
+    message.diagnostic=recoveredDiagnostic;
+    if(!c.packs.some(pack=>pack.messageId===message.id))this.newPack(c,message,'text',closedAt);
+   }
+   changed=true;
+  }
+  for(const pack of c.packs){
+   if(pack.state!=='streaming')continue;
+   this.closePack(pack,pack.role==='user'?'completed':'unknown',events,closedAt);
+   changed=true;
+  }
+  return changed;
+ }
+ async get(p:string,t:string|null,phase:TaskPhase|null=t===null?null:'requirements'){
+  const k=conversationKey(p,t,phase);
+  return this.locked(k,async()=>{
+   const c=await this.load(p,t,phase),events:TopicEvent[]=[];
+   if(!this.active.has(k)&&this.recoverUnfinished(c,events)){
+    await this.save(c);
+    if(t!==null&&phase==='execution'&&this.canRunProject(p))this.finishExecution(p,t);
+    for(const event of events)this.emit(c,event);
+    this.emit(c,{name:'chat.changed',data:{}});
+   }
+   return c;
+  });
+ }
 
  async getContextUsage(p:string,t:string|null,phase:TaskPhase|null,provider:Provider,model:string,cwd:string,options:{refresh?:boolean;scopeCurrent?:()=>boolean}={}){
   const k=conversationKey(p,t,phase),taskKey=key(p,t);
@@ -708,7 +753,8 @@ export class ChatService {
      outcome.status==='unknown'?`${label}の結果を確認できませんでした`:
      outcome.status==='failed'?(commandName==='compact'?'会話の圧縮に失敗しました':`${label}に失敗しました`):undefined;
     const output=outcome.status==='completed'&&outcome.output!==undefined?shorten(outcome.output,65536,value=>Buffer.byteLength(value)):undefined;
-    current.command={...current.command,status:outcome.status,...(error?{error}:{}),...(output!==undefined?{output}:{})};
+    const diagnostic=outcomeDiagnostic(outcome);
+    current.command={...current.command,status:outcome.status,...(error?{error}:{}),...(output!==undefined?{output}:{}),...(diagnostic?{diagnostic}:{})};
     await this.save(current);
     this.emit(current,{name:'chat.changed',data:{}});
    });
@@ -810,10 +856,8 @@ export class ChatService {
     const focusHash=focusContent===undefined?undefined:digest(focusContent);
     const focusNotice=p===INSTRUCTIONS_CHAT_ID?`現在ユーザーが注目しているインストラクション: ${instructionFocus}\n対象の本文（未展開の編集対象）:\n${focusContent}`:undefined;
     c.sessionProvider=provider;
-    if(c.command?.status==='running'){c.command.status='unknown';c.command.error='コマンドの結果を確認できませんでした'}
-    if(c.messages.some(m=>m.status==='pending'||m.status==='streaming')){for(const m of c.messages)if(m.status==='pending'||m.status==='streaming')m.status='unknown'}
     const recovery:TopicEvent[]=[];
-    for(const pack of c.packs)if(pack.state==='streaming')this.closePack(pack,pack.role==='user'?'completed':'unknown',recovery);
+    this.recoverUnfinished(c,recovery);
     c.selectedModel={id:available.id,name:available.name,provider};
     const sendId=randomUUID(),time=now();
     c.messages.push({id:randomUUID(),sendId,role:'user',content,...(reserved||job||systemGenerated?{systemGenerated:true as const}:{}),provider,model,createdAt:time,updatedAt:time,status:'pending',threadId:c.threadId,sessionId:c.sessionId},{id:randomUUID(),sendId,role:'assistant',content:'',provider,model,createdAt:time,updatedAt:time,status:'pending',threadId:c.threadId,sessionId:c.sessionId});
@@ -903,7 +947,7 @@ export class ChatService {
     this.taskEvents.capture(c.projectId,c.taskId,c.phase);
    }
   };
-  const finish=async(status:State,errorCode?:'MODEL_UNAVAILABLE',rollbackStart=false,closedAt=now())=>{
+  const finish=async(status:State,diagnostic?:ChatDiagnostic,rollbackStart=false,closedAt=now())=>{
    if(finished)return;
    finished=true;
    try{
@@ -911,7 +955,7 @@ export class ChatService {
     try{
      for(const [id,operation] of operations)if(!operation.complete)recordOperation({type:'tool',itemId:id,name:operation.toolName,state:status==='interrupted'?'interrupted':'unknown'},operation.packId);
      if(!job&&c.projectId!==INSTRUCTIONS_CHAT_ID)this.taskEvents?.capture(c.projectId,c.taskId,c.phase);
-    }catch{historyFailed=true;status='failed'}
+    }catch{historyFailed=true;status='failed';diagnostic??=hostFailure}
     await update((messages,current,events)=>{
      if(status==='completed'&&sentPhaseContext)current.phaseReferenceHash=phaseContext?.hash;
      const assistant=messages.find(message=>message.role==='assistant');
@@ -921,7 +965,10 @@ export class ChatService {
       assistant.content+='\n'+pack.content;
      }
      for(const message of messages){message.status=status;message.updatedAt=now()}
-     if(assistant&&errorCode)assistant.errorCode=errorCode;
+     if(assistant&&diagnostic){
+      assistant.diagnostic=diagnostic;
+      if(diagnostic.failureCode==='model-unavailable')assistant.errorCode='MODEL_UNAVAILABLE';
+     }
      if(assistant&&!current.packs.some(pack=>pack.sendId===sendId&&pack.role==='assistant'))this.newPack(current,assistant,'text',closedAt);
      for(const pack of current.packs)if(pack.sendId===sendId)this.closePack(pack,status,events,closedAt);
     },true);
@@ -1082,14 +1129,16 @@ export class ChatService {
     dispatched=false;
     outcome=await attempt();
    }
-   const code=outcome.status==='failed'?outcome.code:undefined;
    const status=eventFailed?'failed':outcome.status==='completed'&&!accepted?'unknown':outcome.status;
+   const diagnostic=eventFailed?{...outcomeDiagnostic(outcome),...hostFailure}:
+    outcomeDiagnostic(status==='unknown'&&outcome.status==='completed'?{status:'unknown'}:outcome);
    this.invalidateOutcome(provider,status==='unknown'?{status:'unknown'}:outcome);
-   await finish(status,code==='model-unavailable'?'MODEL_UNAVAILABLE':undefined,
-    !accepted&&(!dispatched||outcome.status==='failed'));
+   await finish(status,diagnostic,!accepted&&(!dispatched||outcome.status==='failed'));
   }catch{
    if(dispatched&&!active.controller.signal.aborted)this.invalidateAgent(provider);
-   await finish(eventFailed||!dispatched?'failed':'unknown',undefined,!dispatched).catch(()=>{});
+   const diagnostic=eventFailed?hostFailure:dispatched?{stage:'agent',reason:'unconfirmed'} as const:
+    {stage:'preparation',reason:'execution-failed'} as const;
+   await finish(eventFailed||!dispatched?'failed':'unknown',diagnostic,!dispatched).catch(()=>{});
   }
  }
  async interrupt(p:string,t:string|null,phase:TaskPhase|null=t===null?null:'requirements'){
