@@ -11,6 +11,7 @@ import PhaseIndicator from './PhaseIndicator';
 import { phaseDocuments } from '../../shared/phase-display';
 import TabBar from '../../shared/components/TabBar';
 import TreeView, { type TreeNode } from './TreeView';
+import TaskCreateDialog from './TaskCreateDialog';
 import ProjectFileContent, { projectFileName, projectFilePath, projectFileTree } from './ProjectFiles';
 import TerminalPanel from './TerminalPanel';
 import ResizeHandle, { MAX_RATIO } from '../../shared/components/ResizeHandle';
@@ -107,6 +108,10 @@ export default function Workspace(props: WorkspaceProps) {
   const [tasks, setTasks] = createSignal<Task[]>([]);
   const [treeError, setTreeError] = createSignal('');
   const [taskTreeOpen, setTaskTreeOpen] = createSignal(false);
+  const [creatingTask, setCreatingTask] = createSignal(false);
+  const [newTaskName, setNewTaskName] = createSignal('');
+  const [taskCreateError, setTaskCreateError] = createSignal('');
+  let taskCreateDialog: HTMLDialogElement | undefined;
   const [documentTreeOpen, setDocumentTreeOpen] = createSignal(false);
   const [loading, setLoading] = createSignal(true);
   const [loadError, setLoadError] = createSignal('');
@@ -145,6 +150,7 @@ export default function Workspace(props: WorkspaceProps) {
   function dismissTrees(event: MouseEvent) {
     const target = event.target;
     if (!(target instanceof Node)) return;
+    if (taskCreateDialog?.open && taskCreateDialog.contains(target)) return;
     if (taskTreeOpen() && !taskTreeToggle?.contains(target) && !document.getElementById('task-tree')?.contains(target)) setTaskTreeOpen(false);
     if (documentTreeOpen() && !documentTreeToggle?.contains(target) && !document.getElementById('document-tree')?.contains(target)) setDocumentTreeOpen(false);
   }
@@ -209,7 +215,7 @@ export default function Workspace(props: WorkspaceProps) {
       const state = await api<AppState>('/api/state');
       if (alive) {
         batch(() => {
-          setTasks(state.tasks.filter(task => !deletedTasks.has(task.id)));
+          setTasks(previous => [...state.tasks.filter(task => !deletedTasks.has(task.id) && !previous.some(item => item.id === task.id)), ...previous]);
           const initial = state.tasks.find(task => task.id === props.taskId);
           if (projectId() === undefined && initial) setProjectId(initial.projectId);
           setTreeError('');
@@ -321,6 +327,33 @@ export default function Workspace(props: WorkspaceProps) {
     }
   }
 
+  function showTaskCreateDialog() {
+    if (!projectId() || creatingTask()) return;
+    setNewTaskName('');
+    setTaskCreateError('');
+    taskCreateDialog?.showModal();
+  }
+  async function createTask(event: SubmitEvent) {
+    event.preventDefault();
+    const project = projectId();
+    const name = newTaskName().trim();
+    if (!project || !name || creatingTask()) return;
+    setCreatingTask(true);
+    setTaskCreateError('');
+    try {
+      const task = await api<Task>('/api/tasks', { projectId: project, name });
+      if (!alive || projectId() !== project) return;
+      setTasks(previous => [...previous.filter(item => item.id !== task.id), task]);
+      openTask(task.id);
+      taskCreateDialog?.close();
+      setTaskTreeOpen(false);
+    } catch (error) {
+      if (alive && projectId() === project) setTaskCreateError(error instanceof Error ? error.message : 'タスクを作成できませんでした');
+    } finally {
+      if (alive) setCreatingTask(false);
+    }
+  }
+
   async function renameTask(id: string, name: string) {
     const project = projectId();
     if (!project) throw Error('プロジェクトが見つかりません');
@@ -402,11 +435,12 @@ export default function Workspace(props: WorkspaceProps) {
     <button ref={setRef} type="button" class="btn btn-ghost btn-square btn-sm m-1" aria-label={label} aria-expanded={expanded} aria-controls={controls} onClick={onClick}><span aria-hidden="true">☰</span></button>;
 
   return <section ref={workspace} class="workspace mx-auto grid h-auto min-h-[34rem] min-w-0 gap-4 px-2 py-2" style={{ "--left-ratio": `${leftRatio()}fr`, "--right-ratio": `${100 - leftRatio()}fr` }}>
+    <TaskCreateDialog dialogRef={element => { taskCreateDialog = element; }} creating={creatingTask()} error={taskCreateError()} name={newTaskName()} onCreate={createTask} onName={setNewTaskName} />
     <div ref={leftPanels} class="workspace-left grid min-h-0 min-w-0 gap-4" classList={{ "workspace-left-terminal": projectId() !== undefined }} style={{ "--chat-ratio": `${chatRatio()}fr`, "--terminal-ratio": `${100 - chatRatio()}fr` }}>
       <section class="card card-border border-base-300 bg-base-100 shadow-sm min-h-[20rem] min-w-0 overflow-hidden lg:min-h-0" aria-label="タスクチャット">
         <TabBar onDelete={deleteTask} onRename={renameTask} label="チャット" tabs={[{ id: 'general', label: 'General', closable: false }, ...openTasks().map(id => ({ id: String(id), label: taskName(id), renameable: true, deletable: true }))]} activeId={activeChatTab()} onSelect={selectChatTab} contextActions={actionsForChatTab} onClose={id => { if (id !== 'general') closeTask(id); }} left={toggle('タスクツリーを開閉', taskTreeOpen(), 'task-tree', () => setTaskTreeOpen(value => !value), element => { taskTreeToggle = element; })} />
         <div class="relative flex min-h-0 flex-1 flex-col overflow-auto">
-          <Show when={taskTreeOpen()}><TreeView id="task-tree" label="タスク" nodes={[{ id: 'general', label: 'General' }, ...taskOptions().map(task => ({ id: String(task.id), label: taskLabel(task) })), ...(props.taskId !== undefined && !deletedTasks.has(props.taskId) && !taskOptions().some(task => task.id === props.taskId) ? [{ id: String(props.taskId), label: taskName(props.taskId) }] : [])]} onSelect={id => { selectChatTab(id); setTaskTreeOpen(false); }} /></Show>
+          <Show when={taskTreeOpen()}><TreeView id="task-tree" label="タスク" actions={<Show when={projectId()}><button type="button" class="btn btn-ghost btn-xs shrink-0" onClick={showTaskCreateDialog}>＋ タスクを追加</button></Show>} nodes={[{ id: 'general', label: 'General' }, ...taskOptions().map(task => ({ id: String(task.id), label: taskLabel(task) })), ...(props.taskId !== undefined && !deletedTasks.has(props.taskId) && !taskOptions().some(task => task.id === props.taskId) ? [{ id: String(props.taskId), label: taskName(props.taskId) }] : [])]} onSelect={id => { selectChatTab(id); setTaskTreeOpen(false); }} /></Show>
           <Show when={taskTreeOpen() && treeError()}><p role="alert" class="relative z-20 m-2 text-sm text-error">{treeError()}</p></Show>
           <Show when={activeTask() === undefined && projectId() !== undefined}><ChatPanel projectId={projectId()!} onTabStatusChange={registerChatTabStatus} /></Show>
           <Show when={activeTask() !== undefined}>

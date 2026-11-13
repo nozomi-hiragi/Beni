@@ -50,6 +50,7 @@ test('project, task, chat and initial document flow', async () => {
  try {
   const p=await post('/api/projects',{name:'Example',folder});expect(p.status).toBe(201);const project=await p.json();
   const t=await post('/api/tasks',{projectId:project.id,name:'Sample'});expect(t.status).toBe(201);const task=await t.json();
+  expect(task.phase).toBe('requirements');expect(task.status).toBe('idle');
   expect(validProjectId(project.id)).toBe(true);expect(validTaskId(task.id)).toBe(true);
   expect((await post(`/api/tasks/${task.id}/messages`,{content:'  原文\n'})).status).toBe(404);
   await expect(stat(join(store.legacyProjectDirectory(project.id),'tasks',task.id))).rejects.toThrow();

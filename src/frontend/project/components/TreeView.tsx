@@ -1,4 +1,4 @@
-import { createSignal, For, onCleanup, onMount, Show } from 'solid-js';
+import { createSignal, For, onCleanup, onMount, Show, type JSX } from 'solid-js';
 import TreeIcon from '../../shared/components/icons/TreeIcon';
 
 type TreeContents = { nodes: TreeNode[]; truncated?: boolean };
@@ -15,6 +15,7 @@ export type TreeNode = { id: string; label: string } | TreeFolder;
 export interface TreeViewProps {
   id: string;
   label: string;
+  actions?: JSX.Element;
   nodes: TreeNode[];
   activeId?: string;
   onSelect: (id: string) => void;
@@ -69,7 +70,7 @@ function TreeItems(props: TreeSelection & { nodes: TreeNode[] }) {
 // The parent positions this inside the pane body, below its fixed tab bar.
 export default function TreeView(props: TreeViewProps) {
   return <aside id={props.id} aria-label={props.label} class="absolute inset-y-0 left-0 z-10 w-56 max-w-full overflow-auto border-r border-base-300 bg-base-100 p-3 shadow-sm">
-    <strong class="mb-2 block text-sm">{props.label}</strong>
+    <div class="mb-2 flex items-center justify-between gap-1"><strong class="text-sm">{props.label}</strong>{props.actions}</div>
     <ul class="menu menu-xs w-full rounded-box bg-base-200">
       <TreeItems nodes={props.nodes} activeId={props.activeId} onSelect={props.onSelect} />
     </ul>

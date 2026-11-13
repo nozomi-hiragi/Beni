@@ -93,8 +93,10 @@ Beni/
 │       │       └── FolderPicker.tsx  バックエンドが動く環境のフォルダー選択
 │       ├── project/
 │       │   ├── ProjectPage.tsx       プロジェクトとタスクを確認し、作業画面を表示
+│       │   ├── ProjectPage.test.tsx  プロジェクト内のタスク追加と作成後の表示のテスト
 │       │   └── components/
 │       │       ├── Workspace.tsx     チャット・タスク・文書の表示とタブ管理
+│       │       ├── TaskCreateDialog.tsx  現在のプロジェクトにタスクを追加するダイアログ
 │       │       ├── TerminalPanel.tsx ターミナルタブ・描画・操作権・再接続
 │       │       ├── PhaseIndicator.tsx フェーズ表示と実装開始・停止・タスク完了・再開
 │       │       ├── ProjectFiles.tsx  作業フォルダーのツリーとファイルのプレビュー
@@ -195,6 +197,7 @@ Beni/
 │   │   ├── instructions.md           インストラクション管理と編集相談
 │   │   ├── llm-chat.md               LLM チャット連携
 │   │   ├── terminal.md               ターミナルの機能仕様
+│   │   ├── task-creation.md          プロジェクト画面からのタスク追加
 │   │   └── task-search.md            タスク検索
 │   └── mockups/                      過去の画面・部品の検討用 HTML と CSS
 │       └── components/               部品ごとのモック
