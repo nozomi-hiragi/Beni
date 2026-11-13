@@ -42,7 +42,10 @@ macOS / Apple Silicon では、サーバー・画面・Bun ランタイムをま
 
 ```sh
 bun run build:exe
+bun run app
 ```
+
+`bun run app` は最新のビルド済み実行ファイルを起動します。次回からはこのコマンドだけで起動できます。コードの変更を反映するときは再ビルドし、起動中の Beni を Ctrl+C で停止してから、もう一度 `bun run app` を実行します。
 
 生成先は `dist/executables/<build-id>/beni` です。ビルドごとに別のディレクトリへ出力します。実行ファイルをリポジトリ外にコピーすれば、ソースや `node_modules`、外部の Bun なしで起動できます。エージェントを利用する場合は、従来どおりログイン済みの公式 CLI が必要です。
 

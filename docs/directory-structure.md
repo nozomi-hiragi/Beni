@@ -142,6 +142,7 @@ Beni/
 │           └── RegisteredAgents.test.tsx 登録済み Agent のテスト
 ├── scripts/
 │   ├── build-exe.ts                  macOS arm64 の単体実行ファイルを生成
+│   ├── start-exe.ts                  最新のビルド済み実行ファイルを起動
 │   └── test-exe.ts                   生成物の隔離起動・偽エージェント・SQL・PTY・再起動を検証
 ├── dist/                             [生成] ビルド出力
 │   ├── frontend/                     フロントエンドの生成物
