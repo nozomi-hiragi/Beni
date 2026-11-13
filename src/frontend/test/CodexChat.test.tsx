@@ -3,6 +3,7 @@ import { createSignal } from 'solid-js';
 import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-library';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import ChatPanel from '../shared/components/ChatPanel';
+import MessageDiagnostic from '../shared/components/ChatDiagnostic';
 import SettingsPage from '../settings/SettingsPage';
 import UsageIndicators from '../shared/components/UsageIndicators';
 import { chatModelPicker, FakeWebSocket, packHeader, packResponse, testPack, stubLegacyAgentFetch } from './test-events';
@@ -11,6 +12,19 @@ const json = (data: unknown) => ({ ok: true, json: async () => data }) as Respon
 beforeEach(() => { resetModelCache(); localStorage.clear(); FakeWebSocket.instances = []; vi.stubGlobal('WebSocket', FakeWebSocket); });
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+
+it('shows actionable guidance for a thread already in use without a redundant stage prefix', () => {
+  render(() => <MessageDiagnostic message={{ id: 'm', sendId: 's', role: 'assistant', content: '', provider: 'codex',
+    model: 'test', createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:01Z', status: 'failed',
+    diagnostic: { stage: 'thread-resume', reason: 'thread-in-use', failureCode: 'rejected', rpcCode: -32600 } }} />);
+  expect(screen.getByText('この会話は別のアプリまたはプロセスで使用中です。そちらで会話を閉じ、少し待ってから再送してください。')).toBeTruthy();
+  expect(screen.queryByText(/保存済みの会話の再開で問題が発生しました/)).toBeNull();
+  const details = screen.getByText('診断の詳細').closest('details')!;
+  fireEvent.click(details.querySelector('summary')!);
+  expect(details.textContent).toContain('理由 thread-in-use');
+  expect(details.textContent).toContain('失敗コード rejected');
+  expect(details.textContent).toContain('RPC コード -32600');
+});
 
 it('refreshes installation and login state without starting login', async () => {
   let calls = 0;
@@ -86,6 +100,47 @@ it('reads the updated usage balance after a chat completes', async () => {
   FakeWebSocket.instances[0].event('chat', { name: 'chat.changed', data: {} });
   await waitFor(() => expect(gauge.getAttribute('aria-valuenow')).toBe('75'));
   expect(fetchChat.mock.calls.filter(([url]) => url === '/api/claude/status')).toHaveLength(1);
+});
+
+it('shows one failure diagnostic after chat.changed and explains older failures without metadata', async () => {
+  const updatedAt = '2026-01-01T00:01:02Z';
+  const legacy = testPack('', { packId: 'old', messageId: 'old', sendId: 'old-send', status: 'failed' });
+  const partial = testPack('途中までの回答', { packId: 'partial', sequence: 2 });
+  const tools = ['first-tool', 'second-tool'].map((name, index) => testPack('', {
+    packId: name, sequence: index + 3, kind: 'tool', tool: { name, input: '{}', output: 'ok' },
+  }));
+  const packs = [legacy, partial, ...tools];
+  let failed = false;
+  const assistant = { id: partial.messageId, sendId: partial.sendId, role: 'assistant', content: partial.content,
+    model: 'test', provider: 'codex', createdAt: partial.createdAt, updatedAt };
+  stubLegacyAgentFetch((url: string) => {
+    if (url === '/api/codex/status') return json({ installed: false, auth: 'none', models: [] });
+    if (url.startsWith('/api/chat?')) return json({ id: 'diagnostic-chat', messages: [
+      { ...assistant, id: legacy.messageId, sendId: legacy.sendId, content: '', status: 'failed' },
+      failed ? { ...assistant, status: 'unknown', diagnostic: { stage: 'turn-completion', reason: 'connection-closed', exitCode: 27 } }
+        : { ...assistant, status: 'streaming' },
+    ] });
+    if (url.startsWith('/api/chat/packs?')) {
+      const after = new URL(url, 'http://localhost').searchParams.get('afterPackId');
+      return json({ packs: packs.slice(packs.findIndex(pack => pack.packId === after) + 1).map(({ packId, state }) => ({ packId, state })) });
+    }
+    return json({ pack: packs.find(pack => url.includes(`/packs/${pack.packId}?`)) });
+  });
+  render(() => <ChatPanel projectId="019a0000-0000-7000-8000-0000000000a6" />);
+  expect(await screen.findByText('この応答の診断情報は記録されていません。')).toBeTruthy();
+  expect(await screen.findByText('途中までの回答')).toBeTruthy();
+  const lastTool = await screen.findByText('second-tool');
+  expect(screen.queryByText('診断の詳細')).toBeNull();
+  failed = true;
+  FakeWebSocket.instances[0].change();
+  const details = (await screen.findByText('診断の詳細')).closest('details')!;
+  expect(screen.getAllByText('診断の詳細')).toHaveLength(1);
+  expect(details.closest('article')).toBe(lastTool.closest('article'));
+  expect(details.closest('article')?.textContent).toContain('結果不明。応答の完了確認で問題が発生しました。');
+  expect(details.textContent).toContain('プロセス終了コード 27');
+  expect(details.textContent).toContain(`送信 ID ${partial.sendId}`);
+  expect(details.textContent).toContain(updatedAt);
+  expect(screen.getByText('途中までの回答')).toBeTruthy();
 });
 
 it('shows previous task history from the saved pack API', async () => {

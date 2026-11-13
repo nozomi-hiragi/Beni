@@ -295,6 +295,7 @@ test.each(['initial read','direct send'])('recovers unfinished messages and pack
     ? await restarted.send(projectId,null,'hello',null,root)
     : await restarted.get(projectId,null);
    expect(recovered.messages.slice(0,2).map(message=>message.status)).toEqual(['unknown','unknown']);
+   expect(recovered.messages[1]?.diagnostic).toEqual({stage:'recovery',reason:'recovered'});
    expect(recovered.packs[1]).toMatchObject({role:'assistant',status:'unknown',state:'closed'});
    if(entryPoint==='direct send'){
     await waitFor(async()=>(await restarted.get(projectId,null)).messages[3]?.status==='completed');
@@ -1400,6 +1401,10 @@ test('圧縮の先行イベント・別スレッドの通知・失敗・切断�
   for(const [action,status] of [['early','completed'],['unrelated','completed'],['reject','failed'],['fail','failed'],['disconnect','unknown'],['disconnect-before-ack','unknown'],['missing-boundary','unknown'],['boundary-failure','failed'],['boundary-interrupt','interrupted'],['boundary-disconnect','unknown']] as const){
    process.env.FAKE_CODEX_COMPACT_ACTION=action;await chat.command(p,null,'compact',root);if(action==='early'||action==='unrelated'){await Bun.sleep(30);expect((await chat.get(p,null)).command?.status).toBe('running')}
    await waitFor(async()=>(await chat.get(p,null)).command?.status===status);
+   if(action==='reject'){
+    const restarted=new ChatService(()=>root,()=>fake);
+    expect((await restarted.get(p,null)).command?.diagnostic).toEqual({stage:'turn-start',reason:'rpc-rejected',failureCode:'rejected',rpcCode:-32600});
+   }
   }
   process.env.FAKE_CODEX_COMPACT_ACTION='wait';await compactAndWait();await chat.interrupt(p,null);await waitFor(async()=>(await chat.get(p,null)).command?.status==='interrupted');
   await compactAndWait();const restarted=new ChatService(()=>root,()=>fake);expect((await restarted.get(p,null)).command?.status).toBe('unknown');await chat.interrupt(p,null);await waitFor(async()=>(await chat.get(p,null)).command?.status==='interrupted');
@@ -1421,6 +1426,92 @@ test('コマンドAPIはscope・フェーズ・引数・タスク制約を検証
  }finally{delete process.env.FAKE_CODEX_COMPACT_ACTION;store.close();await rm(root,{recursive:true,force:true})}
 });
 
+test('失敗診断は再読込と会話 API に残り、CLI のエラー原文とモデルへの引き継ぎから除外する',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'beni-chat-diagnostic-')),store=new Store(join(root,'beni.sqlite'));
+ const {createHandler}=await import('./server');
+ const {id:p}=store.createProject('Example',root);
+ const createChat=()=>new ChatService(()=>root,()=>fake);
+ const chat=createChat();
+ createHandler(store,root,chat);
+ const log=join(root,'rpc.jsonl');
+ process.env.FAKE_CODEX_LOG=log;
+ try{
+  await chat.send(p,null,'hello',null,root);
+  await waitFor(async()=>(await chat.get(p,null)).messages.at(-1)?.status==='completed');
+  process.env.FAKE_CODEX_RESUME='reject';
+  await chat.send(p,null,'resume',null,root);
+  await waitFor(async()=>(await chat.get(p,null)).messages.at(-1)?.status==='failed');
+  const restarted=createChat(),handler=createHandler(store,root,restarted);
+  const history=await restarted.get(p,null);
+  const failed=history.messages.at(-1)!;
+  const diagnostic={stage:'thread-resume',reason:'rpc-rejected',failureCode:'rejected',rpcCode:-32600};
+  expect(failed).toMatchObject({role:'assistant',provider:'codex',model:'model-a',status:'failed',content:'',diagnostic});
+  expect(history.messages.at(-2)?.diagnostic).toBeUndefined();
+  const stored=await readFile(store.chats.path(history.id),'utf8');
+  expect(JSON.parse(stored).messages.at(-1)).toMatchObject({sendId:failed.sendId,updatedAt:failed.updatedAt,diagnostic});
+  expect(stored).not.toContain('fake-private-detail');
+  const response=await handler(new Request(`http://127.0.0.1:3210/api/chat?projectId=${p}`));
+  expect(response.status).toBe(200);
+  const body=await response.text();
+  expect(JSON.parse(body).messages.at(-1)).toEqual(failed);
+  expect(body).not.toContain('fake-private-detail');
+
+  process.env.FAKE_CODEX_RESUME='missing';
+  await restarted.send(p,null,'next',null,root);
+  await waitFor(async()=>(await restarted.get(p,null)).messages.at(-1)?.status==='completed');
+  const records=(await readFile(log,'utf8')).trim().split('\n').map(line=>JSON.parse(line));
+  const input=JSON.stringify(records.filter(row=>row.method==='turn/start').at(-1).params.input);
+  expect(input).toContain('reference conversation history');
+  expect(input).not.toContain('rpc-rejected');
+ }finally{
+  delete process.env.FAKE_CODEX_RESUME;
+  delete process.env.FAKE_CODEX_LOG;
+  store.close();
+  await rm(root,{recursive:true,force:true});
+ }
+});
+
+test('Codex 会話が使用中でも自動で新しいセッションへ切り替えない',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'beni-active-writer-')),p='019a0000-0000-7000-8000-000000000001',log=join(root,'rpc.jsonl'),chat=new ChatService(()=>root,()=>fake);
+ process.env.FAKE_CODEX_LOG=log;
+ try{
+  await chat.send(p,null,'hello',null,root);await waitFor(async()=>(await chat.get(p,null)).messages.at(-1)?.status==='completed');
+  const original=await chat.get(p,null),threadId=original.threadId;
+  process.env.FAKE_CODEX_RESUME='active-writer-prefix';
+  await chat.send(p,null,'resume',null,root);await waitFor(async()=>(await chat.get(p,null)).messages.at(-1)?.status==='failed');
+  expect(await chat.get(p,null)).toMatchObject({threadId,messages:[{}, {}, {}, {status:'failed',diagnostic:{
+   stage:'thread-resume',reason:'thread-in-use',failureCode:'rejected',rpcCode:-32600,
+  }}]});
+  delete process.env.FAKE_CODEX_RESUME;
+  await chat.send(p,null,'retry',null,root);await waitFor(async()=>(await chat.get(p,null)).messages.at(-1)?.status==='completed');
+  const records=(await readFile(log,'utf8')).trim().split('\n').map(line=>JSON.parse(line));
+  expect(records.filter(row=>row.method==='thread/start')).toHaveLength(1);
+  expect(records.filter(row=>row.method==='thread/resume').map(row=>row.params.threadId)).toEqual([threadId,threadId]);
+ }finally{delete process.env.FAKE_CODEX_RESUME;delete process.env.FAKE_CODEX_LOG;await rm(root,{recursive:true,force:true})}
+});
+
+
+test('診断の保存は固定値と範囲内の数値だけを受け入れる',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'beni-diagnostic-fields-')),p='019a0000-0000-7000-8000-000000000001';
+ const agent=new DummyAgent({scenario:async()=>({status:'failed',code:'unavailable',diagnostic:{
+  stage:'config-validation',reason:'unsafe-config',configChecks:['workspace-network-disabled'],
+  rpcCode:2**40,exitCode:-1,signal:65,message:'fake-private-diagnostic',
+ }})});
+ const chat=new ChatService(()=>root,[agent]);
+ try{
+  await chat.send(p,null,'hello',null,root);
+  await waitFor(async()=>(await chat.get(p,null)).messages.at(-1)?.status==='failed');
+  const history=await chat.get(p,null),path=standaloneChatPath(root,history.id);
+  const stored=JSON.parse(await readFile(path,'utf8'));
+  expect(stored.messages.at(-1).diagnostic).toEqual({stage:'config-validation',reason:'unsafe-config',
+   failureCode:'unavailable',configChecks:['workspace-network-disabled']});
+  stored.messages.at(-1).diagnostic={stage:'fake-private-diagnostic',reason:'unsafe-config'};
+  await writeFile(path,JSON.stringify(stored));
+  const reloaded=await new ChatService(()=>root,[agent]).get(p,null);
+  expect(reloaded.messages.at(-1)?.status).toBe('failed');
+  expect(reloaded.messages.at(-1)?.diagnostic).toBeUndefined();
+ }finally{await rm(root,{recursive:true,force:true})}
+});
 
 test('Claude の圧縮も保存済み接続先を使い、手動境界と成功結果を確認して履歴を維持する',async()=>{
  const root=await mkdtemp(join(tmpdir(),'beni-claude-compact-')),p='019a0000-0000-7000-8000-000000000001',log=join(root,'claude.jsonl'),chat=new ChatService(()=>root,()=>null,()=>fakeClaude);process.env.FAKE_CLAUDE_LOG=log;

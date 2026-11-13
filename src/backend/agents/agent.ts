@@ -1,5 +1,7 @@
 import type { AgentAuth, AgentAvailability, AgentCommand, AgentId, AgentModel, ContextUsage, RateLimitUsage } from '../../shared/agent';
+import type { AgentDiagnostic, AgentFailureCode } from '../../shared/chat-diagnostic';
 export type { AgentCommand, AgentId, AgentModel, ContextUsage, RateLimitUsage } from '../../shared/agent';
+export type { AgentFailureCode } from '../../shared/chat-diagnostic';
 
 export type AgentSession = { agentId: AgentId; id: string; legacySessionId?: string };
 export type AgentTarget =
@@ -43,14 +45,11 @@ export type AgentUsage = {
   usage: RateLimitUsage;
 };
 
-export type AgentFailureCode = 'unavailable' | 'model-unavailable' | 'session-missing'
-  | 'session-incompatible' | 'unsupported' | 'rejected' | 'execution-failed'
-  | 'compaction-unavailable' | 'nothing-to-compact';
 export type AgentOutcome =
   | { status: 'completed'; output?: string }
   | { status: 'interrupted' }
-  | { status: 'failed'; code: AgentFailureCode }
-  | { status: 'unknown' };
+  | { status: 'failed'; code: AgentFailureCode; diagnostic?: AgentDiagnostic }
+  | { status: 'unknown'; diagnostic?: AgentDiagnostic };
 
 export type AgentToolEvent = {
   type: 'tool';

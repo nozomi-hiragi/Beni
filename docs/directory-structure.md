@@ -72,6 +72,7 @@ Beni/
 │   │   ├── task-phase.ts             共通のフェーズ識別子と検証
 │   │   ├── agent.ts                  Agent ID・登録情報・接続状態の共通型
 │   │   ├── chat-commands.ts          コマンドの共通型・Beni の共通操作・候補内の別名解決・入力解析
+│   │   ├── chat-diagnostic.ts        会話の失敗診断の型と許可値の検証
 │   │   ├── manual-tools.ts           手動ツールの API 型と引数スキーマ検証
 │   │   ├── communication.ts          パック・WS メッセージの型、受信検証、ハッシュ
 │   │   └── project-files.ts          プロジェクトファイル一覧・プレビューの型
@@ -130,6 +131,7 @@ Beni/
 │       │       ├── Navbar.tsx         共通ヘッダーと画面の移動
 │       │       ├── UsageIndicators.tsx  接続先ごとの利用枠ゲージ
 │       │       ├── ChatPanel.tsx      会話、モデル選択、送信・中断、履歴表示
+│       │       ├── ChatDiagnostic.tsx 会話の失敗理由と診断の詳細表示
 │       │       ├── ChatComposer.tsx   テキスト入力と送信フォーム
 │       │       ├── ContextGauge.tsx   コンテキスト使用率と圧縮メニュー
 │       │       ├── ModelPicker.tsx    チャット用モデルの選択と接続先アイコン
