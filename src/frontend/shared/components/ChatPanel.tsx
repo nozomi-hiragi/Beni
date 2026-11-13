@@ -15,6 +15,7 @@ import { popupHeight } from './chat-popup';
 import ModelPicker from './ModelPicker';
 import AgentIcon from './icons/AgentIcon';
 import ContextGauge from './ContextGauge';
+import { renderMarkdown } from './MarkdownPreview';
 
 interface Draft { text: string; version: number; sending: boolean; commandSending?: boolean; commandName?: ChatCommand['name']; error: string; listeners: Set<() => void>; refresh?: () => void; pending?: {content: string; fromComposer: boolean; sendId?: string}; restored: Set<string> }
 const drafts = new Map<string, Draft>();
@@ -447,7 +448,7 @@ export default function ChatPanel(props: { projectId: string; taskId?: string; p
     <Show when={syncError()}><p role="alert" class="px-4 pt-3 text-sm text-error">{syncError()} <button class="btn btn-xs" onClick={() => refresh()}>更新</button></p></Show>
     <div ref={scrollport} class="min-h-0 flex-1 overflow-y-auto p-5" role="log" aria-label="チャット履歴" aria-live="polite">
       <div ref={scrollContent} class="space-y-3">
-        <Show when={packState.value.length} fallback={<p class="text-sm text-base-content/50">希望や回答を入力してください。</p>}><For each={packState.value}>{pack => <article class={`chat ${pack.role === 'user' ? 'chat-end' : 'chat-start'}`}>
+        <Show when={packState.value.length} fallback={<p class="text-sm text-base-content/50">希望や回答を入力してください。</p>}><For each={packState.value}>{pack => <article class={`chat ${pack.role === 'user' ? 'chat-end' : 'chat-start grid-cols-[auto_minmax(0,1fr)]'}`}>
         <Show when={pack.role === 'assistant'}>
           <div class="chat-image avatar">
             <div class="grid size-8 place-items-center rounded-full bg-base-200">
@@ -460,7 +461,22 @@ export default function ChatPanel(props: { projectId: string; taskId?: string; p
             {pack.model ? modelLabel(pack.model, pack.provider) : providerName(pack.provider)}
             <Show when={chatDate(pack.createdAt)}>{date => <>{' '}<time dateTime={pack.createdAt}>{date()}</time></>}</Show>
           </span>
-        </div><div class={`chat-bubble min-w-0 ${pack.role === 'user' ? 'chat-bubble-primary' : 'bg-base-200 text-base-content'}`}><Show when={pack.kind === 'tool'} fallback={<p class="whitespace-pre-wrap break-words text-sm leading-relaxed">{pack.content}</p>}><details><summary>{pack.tool?.name ?? 'ツール'}</summary><pre class="whitespace-pre-wrap break-words text-xs">{pack.tool?.input}</pre><pre class="whitespace-pre-wrap break-words text-xs">{pack.tool?.output}</pre></details></Show></div><div class="chat-footer text-xs text-base-content/60">{packFooter(pack)}</div></article>}</For></Show>
+        </div>
+        <div class={`chat-bubble min-w-0 ${pack.role === 'user' ? 'chat-bubble-primary' : 'bg-base-200 text-base-content'}`}>
+          <Show when={pack.kind === 'tool'} fallback={
+            <Show when={pack.role === 'assistant'} fallback={<p class="whitespace-pre-wrap break-words text-sm leading-relaxed">{pack.content}</p>}>
+              <div class="markdown-preview text-sm leading-relaxed" innerHTML={renderMarkdown(pack.content, []).html} />
+            </Show>
+          }>
+            <details>
+              <summary>{pack.tool?.name ?? 'ツール'}</summary>
+              <pre class="whitespace-pre-wrap break-words text-xs">{pack.tool?.input}</pre>
+              <pre class="whitespace-pre-wrap break-words text-xs">{pack.tool?.output}</pre>
+            </details>
+          </Show>
+        </div>
+        <div class="chat-footer text-xs text-base-content/60">{packFooter(pack)}</div>
+        </article>}</For></Show>
         <Show when={visibleCommandId()} keyed>{id => <div class="flex min-w-0 items-start gap-2 rounded-box border border-base-300 px-3 py-2 text-sm">
           <Show when={conversation()?.command?.output} fallback={<p role="status" class="min-w-0 flex-1">{commandOutcome()}</p>}>
             <details class="min-w-0 flex-1"><summary class="cursor-pointer truncate">{commandOutcome()}</summary><pre class="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words">{conversation()?.command?.output}</pre></details>
