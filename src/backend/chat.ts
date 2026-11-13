@@ -2,7 +2,7 @@ import type { Store } from './store';
 import { composeInstructions, defaultInstructions, instructionEditorToolGuidance, isInstructionKey, type InstructionKey, type Instruction, type taskCompletedInstructionKey } from './instructions';
 import { projectKnowledge } from './documents';
 import { join, dirname, relative, isAbsolute } from 'node:path';
-import { defaultEventKinds, EventToolArgumentsError, eventTools, eventToolArguments, boundedEmbeddedToolResult, ManualToolInputError, type EmbeddedTool } from './embedded-tools';
+import { defaultEventKinds, eventTools, eventToolArguments, boundedEmbeddedToolResult, ManualToolInputError, type EmbeddedTool } from './embedded-tools';
 import { readFileSync, realpathSync } from 'node:fs';
 import { Database } from 'bun:sqlite';
 import { isTaskPhase, type TaskPhase } from '../shared/task-phase';
@@ -908,10 +908,7 @@ export class ChatService {
   const runTool:AgentHost['callTool']=async ({name,input})=>{
    try{
     if(finished||active.controller.signal.aborted||!toolAllowed.has(name))throw Error('Invalid tool scope');
-    if(c.projectId===INSTRUCTIONS_CHAT_ID){
-     try{return toolResult(this.callInstructionTool(name,input,c.id))}
-     catch(error){if(error instanceof ManualToolInputError)return toolResult({error:error.message},false);throw error}
-    }
+    if(c.projectId===INSTRUCTIONS_CHAT_ID)return toolResult(this.callInstructionTool(name,input,c.id));
     if(workflow?.tools.some(tool=>tool.name===name)){
      const result=await workflow.provider.call(workflow.context,name,input);
      return {ok:true,text:boundedEmbeddedToolResult(result).contentItems[0]!.text};
@@ -925,7 +922,7 @@ export class ChatService {
     }
     const result=this.callEventTool(c.projectId,c.taskId,history,name,input);
     return {ok:true,text:boundedEmbeddedToolResult(result).contentItems[0]!.text};
-   }catch(error){return toolResult({error:error instanceof EventToolArgumentsError?error.message:'Embedded tool request rejected or unavailable'},false)}
+   }catch(error){return toolResult({error:error instanceof ManualToolInputError?error.message:'Embedded tool request rejected or unavailable'},false)}
   };
   const targetPaths=(paths:readonly string[]=[])=>[...new Set(paths
    .map(path=>isAbsolute(path)?relative(cwd,path):path)
