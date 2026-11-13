@@ -11,7 +11,7 @@ Beni/
 ├── src/                              アプリケーションのコード
 │   ├── backend/                      Bun で動くサーバー側の処理
 │   │   ├── server.ts                 サーバー起動、API、フロントエンド配信、保存先設定
-│   │   ├── executable.ts             単体実行ファイルの引数・保存先検証、SQL子プロセスの入口
+│   │   ├── executable.ts             単体実行ファイルの引数処理、SQL子プロセスの入口
 │   │   ├── frontend-assets.ts        ソース起動と実行ファイルで共通の画面配信
 │   │   ├── server.test.ts            API・配信・文書管理・変更通知・保存先のテスト
 │   │   ├── instructions.ts           指示テンプレートの初期値と変数の置換

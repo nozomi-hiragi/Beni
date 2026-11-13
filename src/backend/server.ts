@@ -541,7 +541,9 @@ export function createServerOptions(store:Store,initialFolder=homedir(),chat=new
  return {maxRequestBodySize:maxManualToolBodyBytes,websocket,fetch(request:Request,server:Server<SocketData>){const url=new URL(request.url);if(url.pathname!=='/api/ws')return handle(request);if(request.method!=='GET'||!access(request).allowed||!access(request).sameOrigin||request.headers.get('sec-fetch-site')==='cross-site')return new Response('Forbidden',{status:403});if(!server.upgrade(request,{data:{ready:false,used:new Set(),subscriptions:new Map()}}))return new Response('WebSocket upgrade required',{status:400});return undefined}};
 }
 export function dataPaths(environment: Record<string,string|undefined> = process.env, cwd = process.cwd()) {
- const dataDirectory = environment.BENI_DATA_DIR ? resolve(cwd,environment.BENI_DATA_DIR) : fileURLToPath(new URL('../../data',import.meta.url));
+ const dataDirectory = environment.BENI_DATA_DIR ? resolve(cwd,environment.BENI_DATA_DIR)
+  : Bun.isStandaloneExecutable ? join(homedir(),'Library','Application Support','Beni','data')
+  : fileURLToPath(new URL('../../data',import.meta.url));
  const database = join(dataDirectory,'beni.sqlite');
  const chatDirectory = join(dataDirectory,'chats');
  return {dataDirectory,database,chatDirectory};

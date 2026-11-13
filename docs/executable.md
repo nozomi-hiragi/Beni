@@ -26,17 +26,19 @@ bun run build:exe
 
 ## 保存先と起動
 
-実行ファイル版は `BENI_DATA_DIR` を必須とします。指定がなければエラーで終了します。相対パスは起動時の作業ディレクトリを基準にするため、運用では絶対パスを指定します。
+実行ファイルのあるフォルダーで、次のコマンドだけで起動できます。
 
 ```sh
-BENI_DATA_DIR="$HOME/Library/Application Support/Beni/data" /path/to/beni
+./beni
 ```
+
+データは自動で `~/Library/Application Support/Beni/data` に保存します。実行ファイルを移動したり、別のディレクトリから起動したりしても保存先は変わりません。保存先を変える場合だけ `BENI_DATA_DIR` を指定します。相対指定は起動時の作業ディレクトリを基準にするため、運用では絶対パスを指定します。
 
 通常は `http://127.0.0.1:3210/` を開きます。`BENI_PORT` と `BENI_PUBLIC_ORIGIN` はソース起動と同じです。Tailscale 経由の公開は [README](../README.md#tailscale-経由で起動する) の手順に従い、起動コマンドだけを実行ファイルへ置き換えます。
 
 実行ファイル版は起動ディレクトリの `.env` や `bunfig.toml` を自動では読み込みません。環境変数は外部ターミナルや起動用スクリプトで設定してください。
 
-既存データを使うときは、既存の Beni を停止してからデータ領域全体をバックアップし、リポジトリ外の固定ディレクトリへ移します。`BENI_DATA_DIR` の変更だけではデータを移動しません。v0.2.0 より前の非互換データを利用する手順ではありません。
+リポジトリ内の既存データを使うときは、既存の Beni を停止してからデータ領域全体をバックアップし、上記の既定保存先へ移します。移動先に既存データがある場合は混ぜず、別の保存先を `BENI_DATA_DIR` で指定します。起動時の自動移行は行わず、`BENI_DATA_DIR` の変更だけでもデータは移動しません。v0.2.0 より前の非互換データを利用する手順ではありません。
 
 ## 生成物の検証
 
@@ -57,7 +59,7 @@ bun run test:exe ./dist/executables/<build-id>/beni
 3. 修正後に `bun run test`、`bun run build:exe`、生成物を指定した `bun run test:exe` を実行します。これらは Beni 内のターミナルからも実行できます。稼働版 A はソースや `dist/frontend/` の変更を読み込みません。
 4. 候補 B を別のリリースディレクトリへコピーします。A を残し、どちらの `--version` も確認します。
 5. エージェント、ワークフロー、ターミナル内の作業が終了したことを確認します。外部ターミナルで A を停止し、プロセスの終了を確認してから運用データ全体をバックアップします。
-6. A と同じ `BENI_DATA_DIR`・ポート・公開 Origin を指定して B を起動し、ブラウザーを再読み込みします。保存されたプロジェクト、タスク、会話を確認して次の修正に進みます。
+6. B を起動し、ブラウザーを再読み込みします。既定の保存先は A と共通です。保存先・ポート・公開 Origin を変更していた場合は A と同じ設定で起動します。保存されたプロジェクト、タスク、会話を確認して次の修正に進みます。
 
 配置例は次のとおりです。`BENI_CANDIDATE` の `<build-id>` を実際の値に置き換え、リポジトリ内で実行します。
 
@@ -76,10 +78,10 @@ BENI_RUNTIME_DATA="$HOME/Library/Application Support/Beni/data"
 BENI_BACKUP_DIR="$HOME/Library/Application Support/Beni/backups/$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$BENI_BACKUP_DIR"
 cp -R "$BENI_RUNTIME_DATA" "$BENI_BACKUP_DIR/data"
-BENI_DATA_DIR="$BENI_RUNTIME_DATA" "$BENI_RELEASE_DIR/beni"
+"$BENI_RELEASE_DIR/beni"
 ```
 
-この例は既に運用データがある場合です。バックアップの成功を確認してから起動してください。カスタムポートや Tailscale を利用している場合は、従来の `BENI_PORT` と `BENI_PUBLIC_ORIGIN` も毎回指定します。
+この例は既定の保存先に運用データがある場合です。バックアップの成功を確認してから起動してください。保存先・ポート・Tailscale の設定を変えている場合は、従来の `BENI_DATA_DIR`・`BENI_PORT`・`BENI_PUBLIC_ORIGIN` も指定します。
 
 Beni 内のターミナルはバックエンド停止時に終了するため、そこで停止から新版起動までを実行しません。生成中の回答やターミナルのプロセスを新版へ移す機能もありません。自動更新・自動再起動は行わず、切り替え時には一時的に接続が切れます。
 

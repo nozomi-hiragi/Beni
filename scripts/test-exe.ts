@@ -114,8 +114,9 @@ const artifact = resolve(input);
 const bun = await realpath(process.execPath);
 const temp = await realpath(await mkdtemp(join(tmpdir(), 'beni-exe-smoke-')));
 const cwd = join(temp, 'cwd');
+const restartCwd = join(temp, 'restart-cwd');
 const home = join(temp, 'home');
-const data = join(temp, 'data');
+const data = join(home, 'Library', 'Application Support', 'Beni', 'data');
 const projectFolder = join(temp, 'project');
 const path = join(temp, 'path');
 const fixtures = join(temp, 'fixtures');
@@ -130,7 +131,7 @@ let server: Subprocess | undefined;
 let terminalPid: number | undefined;
 let sqlPid: number | undefined;
 try {
-  const dirs = [cwd, home, projectFolder, path, fixtures, join(temp, 'first'), join(temp, 'second')];
+  const dirs = [cwd, restartCwd, home, projectFolder, path, fixtures, join(temp, 'first'), join(temp, 'second')];
   await Promise.all(dirs.map(dir => mkdir(dir)));
   for (const binary of [first, second]) {
     await copyFile(artifact, binary);
@@ -169,14 +170,10 @@ try {
     assert.match(result.stdout, /beni/i, flag);
     await checkNoData();
   }
-  const missing = await invoke([]);
-  assert.notEqual(missing.code, 0);
-  assert.match(missing.stderr + missing.stdout, /BENI_DATA_DIR/);
-  await checkNoData();
-
   let origin: string;
-  async function start(binary: string) {
-    const child = Bun.spawn([binary], {cwd, env: {...env, BENI_DATA_DIR: data}, stdin: 'ignore', stdout: 'pipe', stderr: 'pipe'});
+  async function start(binary: string, workingDirectory: string, dataOverride?: string) {
+    const childEnv = dataOverride === undefined ? env : {...env, BENI_DATA_DIR: dataOverride};
+    const child = Bun.spawn([binary], {cwd: workingDirectory, env: childEnv, stdin: 'ignore', stdout: 'pipe', stderr: 'pipe'});
     server = child;
     const output = {stdout: '', stderr: ''};
     const collect = async (stream: ReadableStream<Uint8Array>, key: keyof typeof output) => {
@@ -202,7 +199,8 @@ try {
     return JSON.parse(payload) as T;
   }
 
-  await start(first);
+  await start(first, cwd);
+  assert.ok((await readdir(data)).includes('beni.sqlite'));
   await checkAssets(origin!);
   const project = await json<NamedRecord>('/api/projects', 201, {name: 'Smoke project', folder: projectFolder});
   const task = await json<NamedRecord>('/api/tasks', 201, {name: 'Smoke task', projectId: project.id});
@@ -255,13 +253,24 @@ try {
   terminalPid = undefined;
 
   await rm(first);
-  await start(second);
+  await start(second, restartCwd);
+  assert.deepEqual(await readdir(cwd), []);
+  assert.deepEqual(await readdir(restartCwd), []);
   const persisted = await json<{projects: NamedRecord[]; tasks: NamedRecord[]}>('/api/state');
   assert.ok(persisted.projects.some(record => record.id === project.id && record.name === project.name));
   assert.ok(persisted.tasks.some(record => record.id === task.id && record.name === task.name));
   const restored = await json<Conversation>(chatEndpoint);
   assert.equal(restored.id, conversation.id);
   assert.deepEqual(restored.messages, conversation.messages);
+  await stop(server!);
+  server = undefined;
+
+  const override = 'override-data';
+  await start(second, restartCwd, override);
+  const isolated = await json<{projects: NamedRecord[]; tasks: NamedRecord[]}>('/api/state');
+  assert.deepEqual(isolated.projects, []);
+  assert.deepEqual(isolated.tasks, []);
+  assert.ok((await readdir(join(restartCwd, override))).includes('beni.sqlite'));
   await stop(server!);
   server = undefined;
   console.log('Executable smoke test passed');
