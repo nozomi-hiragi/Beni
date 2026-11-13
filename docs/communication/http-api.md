@@ -6,7 +6,7 @@ HTTP による取得・操作と、チャットのパック同期の契約を定
 
 ## 共通規則
 
-- 接続先は `http://127.0.0.1:3210`。ポートは `BENI_PORT` で変更可能。Tailscale Serve の HTTPS 公開 URL は `BENI_PUBLIC_ORIGIN` に指定する（パスや末尾 `/` なし）。
+- 接続先は `http://127.0.0.1:3210`。ポートは `BENI_PORT` で変更可能。Tailscale Serve の HTTPS 公開 URL は `BENI_PUBLIC_ORIGIN` に指定する（パスや末尾 `/` なし）。実行ファイルの `--tailscale` は自分のノードの URL を検出し、同じ公開 Origin の検査へ設定する。詳細は [PWA と Tailscale](../features/pwa.md) を参照。
 - URL のホスト名が `127.0.0.1` の場合、または URL の host（ポートを含む）が指定した公開 origin の host と一致する場合に受け付ける。それ以外は 403。WebSocket にも同じホスト制限がある。通常の GET に共通の Origin 検査はない。
 - POST は `Origin` がローカル要求 URL の origin、または公開 host に対しては設定した HTTPS origin と一致し、`Content-Type` が厳密に `application/json` であること。転送ヘッダーは判定に使わない。違反は 403。
 - POST の本文は JSON オブジェクト。配列・null・不正 JSON は 400。本文上限は 65,536 バイトで、`/api/instructions/apply` に限り `65536 * 6 + 1024` バイト。超過は 413。

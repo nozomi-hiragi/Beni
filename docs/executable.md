@@ -42,7 +42,7 @@ bun run app
 
 データは自動で `~/Library/Application Support/Beni/data` に保存します。実行ファイルを移動したり、別のディレクトリから起動したりしても保存先は変わりません。保存先を変える場合だけ `BENI_DATA_DIR` を指定します。相対指定は起動時の作業ディレクトリを基準にするため、運用では絶対パスを指定します。
 
-通常は `http://127.0.0.1:3210/` を開きます。`BENI_PORT` と `BENI_PUBLIC_ORIGIN` はソース起動と同じです。Tailscale 経由の公開は [README](../README.md#tailscale-経由で起動する) の手順に従い、起動コマンドだけを実行ファイルへ置き換えます。
+通常は `http://127.0.0.1:3210/` を開きます。Tailscale の HTTPS URL で使う場合は `bun run app --tailscale`、コピーした実行ファイルでは `./beni --tailscale` で起動します。URL の検出と Serve の転送を自動で設定します。条件と設定の解除は [PWA と Tailscale](features/pwa.md) を参照してください。`BENI_PORT` と手動指定の `BENI_PUBLIC_ORIGIN` も引き続き利用できます。
 
 実行ファイル版は起動ディレクトリの `.env` や `bunfig.toml` を自動では読み込みません。環境変数は外部ターミナルや起動用スクリプトで設定してください。
 
@@ -89,7 +89,7 @@ cp -R "$BENI_RUNTIME_DATA" "$BENI_BACKUP_DIR/data"
 "$BENI_RELEASE_DIR/beni"
 ```
 
-この例は既定の保存先に運用データがある場合です。バックアップの成功を確認してから起動してください。保存先・ポート・Tailscale の設定を変えている場合は、従来の `BENI_DATA_DIR`・`BENI_PORT`・`BENI_PUBLIC_ORIGIN` も指定します。
+この例は既定の保存先に運用データがある場合です。バックアップの成功を確認してから起動してください。Tailscale モードを使っていた場合は新版にも `--tailscale` を付けます。保存先・ポート・公開 URL を手動で変えている場合は、従来の `BENI_DATA_DIR`・`BENI_PORT`・`BENI_PUBLIC_ORIGIN` も指定します。
 
 Beni 内のターミナルはバックエンド停止時に終了するため、そこで停止から新版起動までを実行しません。生成中の回答やターミナルのプロセスを新版へ移す機能もありません。自動更新・自動再起動は行わず、切り替え時には一時的に接続が切れます。
 

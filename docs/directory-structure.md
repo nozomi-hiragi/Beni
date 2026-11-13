@@ -12,7 +12,10 @@ Beni/
 │   ├── backend/                      Bun で動くサーバー側の処理
 │   │   ├── server.ts                 サーバー起動、API、フロントエンド配信、保存先設定
 │   │   ├── executable.ts             単体実行ファイルの引数処理、SQL子プロセスの入口
+│   │   ├── tailscale.ts              自分のHTTPS URLの検出、Serveの競合検査・転送設定
+│   │   ├── tailscale.test.ts         偽CLIによるTailscale起動・既存設定保護のテスト
 │   │   ├── frontend-assets.ts        ソース起動と実行ファイルで共通の画面配信
+│   │   ├── pwa.test.ts               マニフェスト・アイコンの配信と公開Originのテスト
 │   │   ├── server.test.ts            API・配信・文書管理・変更通知・保存先のテスト
 │   │   ├── instructions.ts           指示テンプレートの初期値と変数の置換
 │   │   ├── chat.ts                   会話の保存・再開・イベント配信・中断
@@ -73,6 +76,7 @@ Beni/
 │   │   └── project-files.ts          プロジェクトファイル一覧・プレビューの型
 │   └── frontend/                     ブラウザーで動く SolidJS の画面
 │       ├── index.html                アプリの表示先と JavaScript・CSS の読み込み
+│       ├── pwa/                      インストール用マニフェストとオリジナルのBアイコン
 │       ├── main.tsx                  SolidJS アプリを HTML に取り付ける入口
 │       ├── App.tsx                   URL に応じた画面の切り替えと共通ヘッダー
 │       ├── App.test.tsx              画面遷移とルーティングのテスト
@@ -186,6 +190,7 @@ Beni/
 │   │   ├── task-events.md            フェーズ間の変更履歴と文書の版
 │   │   └── terminal.md               ターミナルとシェル
 │   ├── features/                     機能ごとの仕様
+│   │   ├── pwa.md                    アプリのインストールとTailscale経由の起動
 │   │   ├── instructions.md           インストラクション管理と編集相談
 │   │   ├── llm-chat.md               LLM チャット連携
 │   │   ├── terminal.md               ターミナルの機能仕様

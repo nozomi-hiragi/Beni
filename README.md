@@ -61,35 +61,19 @@ bun run app
 
 ### Tailscale 経由で起動する
 
-サーバー側と閲覧する端末を Tailscale に接続します。チャットのハッシュ確認にブラウザーの暗号 API を使うため、Tailscale Serve の HTTPS URL で開きます。
-
-まずサーバー側で、HTTPS の443番から Beni の3210番への転送を有効にします。
+サーバー側と閲覧する端末を Tailscale に接続し、実行ファイルをビルドしてから次を実行します。
 
 ```sh
-tailscale serve --bg --https=443 http://127.0.0.1:3210
+bun run app --tailscale
 ```
 
-表示された HTTPS URL を `BENI_PUBLIC_ORIGIN` に指定し、Beni のディレクトリで起動します。以下のホスト名は架空のサンプルなので、実際に表示されたものへ置き換えてください。末尾の `/` やパスは付けません。すでに Beni を起動している場合は、停止してからこのコマンドで起動し直します。
+表示された HTTPS URL を開きます。Tailscale の URL と転送先は自動で設定します。すでに Beni が起動中なら、先に Ctrl+C で停止してください。Tailscale の CLI が必要です。初めて Serve を使う場合は、Tailscale 側で HTTPS / Serve の有効化が必要になることがあります。
 
-```sh
-BENI_PUBLIC_ORIGIN=https://example-node.example-tailnet.ts.net bun run start
-```
+既存の別サービスの転送は上書きしません。Serve の転送設定は Beni 終了後も残ります。設定の確認・解除やソース起動での使い方は [PWA と Tailscale](docs/features/pwa.md) を参照してください。
 
-閲覧する端末で `https://example-node.example-tailnet.ts.net` を開きます。HTTPS の標準ポート443を使うため、URLにポート番号は不要です。IPアドレスへのHTTP接続ではなく、このHTTPS URLを使ってください。
+### アプリとしてインストールする
 
-`BENI_PUBLIC_ORIGIN` は起動したプロセスだけに適用される環境変数です。設定ファイルには保存されないため、次回も同じ指定で起動します。Beni 自体は `127.0.0.1:3210` で待ち受け、指定した公開ホストと Origin を許可します。`BENI_PORT` を変える場合は、Serve の転送先ポートも合わせます。
-
-Serve の設定は `--bg` によりバックグラウンドで維持されます。確認と解除は次のコマンドで行います。解除しても Beni 自体は停止しません。
-
-```sh
-# 転送設定を確認
-tailscale serve status
-
-# HTTPS の転送を解除
-tailscale serve --https=443 off
-```
-
-この手順は Tailscale 内向けの公開です。Beni 自体には認証機能がないため、接続できる端末は Tailscale のアクセス制御で管理します。
+ブラウザーで Beni を開き、ブラウザーのインストールメニューから追加します。iPhone / iPad は「共有」→「ホーム画面に追加」です。ほかの端末から使う場合は Tailscale の HTTPS URL でインストールしてください。インストール後も、サーバー側の Beni と Tailscale は起動しておきます。
 
 ## データの保存先
 
