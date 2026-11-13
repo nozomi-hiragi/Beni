@@ -31,6 +31,7 @@
   - [イベントに対応するワークフロー](features/workflows.md)
   - [LLM チャット連携](features/llm-chat.md)
   - [Navbar のツール](features/manual-tools.md)
+  - [プロジェクト画面からのタスク追加](features/task-creation.md)
   - [タスク検索（未実装）](features/task-search.md)
   - [プロジェクト内ターミナル](features/terminal.md)
 
