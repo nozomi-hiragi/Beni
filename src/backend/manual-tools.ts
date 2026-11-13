@@ -4,10 +4,10 @@ import { validateManualToolInput } from '../shared/manual-tools';
 import { INSTRUCTIONS_CHAT_ID } from '../shared/communication';
 import { validProjectId, validTaskId } from '../shared/ids';
 import { isTaskPhase } from '../shared/task-phase';
-import { instructionTools, shorten, type ChatService } from './chat';
+import { shorten, type ChatService } from './chat';
+import { instructionTools } from './instruction-editor-tools';
 import type { DocumentWorkflow } from './document-workflow';
 import { eventToolArguments, eventTools, ManualToolInputError, type EmbeddedTool } from './embedded-tools';
-import { isInstructionKey } from './instructions';
 import type { Store } from './store';
 
 const maxOutputBytes = 1024 * 1024;
@@ -128,9 +128,6 @@ export class ManualTools {
    try { eventToolArguments(name, input); }
    catch (error) { throw new ManualToolRequestError(400, error instanceof ManualToolInputError ? error.message : 'イベントの入力を確認してください'); }
   }
-  if (tool.category === 'instructions' && name !== 'list_instructions' && !isInstructionKey(input.key)) {
-   throw new ManualToolRequestError(400, 'インストラクションのキーを確認してください');
-  }
   if (catalog.disabledReason) throw new ManualToolRequestError(409, catalog.disabledReason);
 
   const p = projectIdFor(scope), t = taskIdFor(scope);
@@ -174,14 +171,7 @@ export class ManualTools {
 
  private prepare(tool: ManualToolDefinition, catalog: ManualToolsCatalog, id: string, input: Record<string, unknown>) {
   const p = projectIdFor(catalog.scope), t = taskIdFor(catalog.scope);
-  if (tool.category === 'instructions') return () => {
-   const result = this.chat.callInstructionTool(tool.name, input);
-   if (result.ok) return result.value;
-   if (result.value.error === 'インストラクションが変更されています。最新の本文を確認してください') {
-    throw new ManualToolInputError(result.value.error);
-   }
-   throw new ManualToolInputError('インストラクションを保存できませんでした。本文と変数を確認してください');
-  };
+  if (tool.category === 'instructions') return () => this.chat.callInstructionTool(tool.name, input);
   if (tool.category === 'events') {
    this.store.captureTaskHistory(p, t);
    const through = this.store.projectEventCursor(p);

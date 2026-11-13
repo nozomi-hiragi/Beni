@@ -296,10 +296,12 @@ it('switches reference tabs independently with correctly categorized variables a
  expect(within(panel()).getByText('なし')).toBeTruthy();
  expect(within(panel()).queryByRole('list')).toBeNull();
  const tools=within(panel()).getByLabelText('編集相談チャット専用ツール');
- expect(tools.querySelectorAll('dt')).toHaveLength(3);
+ expect(tools.querySelectorAll('dt')).toHaveLength(5);
  expect(tools.textContent).toContain('list_instructions一覧の取得（キー・表示名）');
- expect(tools.textContent).toContain('get_instruction本文の取得（指定したキー）');
- expect(tools.textContent).toContain('update_instruction指示の更新・保存（編集相談チャット専用）');
+ expect(tools.textContent).toContain('get_instruction指定した指示の版と項目の取得');
+ expect(tools.textContent).toContain('list_chat_sources編集相談チャットの引用元一覧の取得');
+ expect(tools.textContent).toContain('read_source発言や指示項目の原文の取得');
+ expect(tools.textContent).toContain('update_instruction指示の項目と根拠の更新・保存');
  expect(panel().textContent).not.toContain('list_events');
  fireEvent.click(prompts.getByRole('tab',{name:'編集用'}));
  expect(references.getByRole('tab',{name:'編集用'}).getAttribute('aria-selected')).toBe('true');

@@ -4,6 +4,7 @@ import type { DocumentProvenance, DocumentProvenanceDetail } from '../types';
 import { MarkdownArticle, renderMarkdown, type MarkdownPreviewProps } from './MarkdownPreview';
 import { phaseDocuments, phaseLabels } from '../phase-display';
 import { instructionLabels } from '../instruction-display';
+import { INSTRUCTIONS_CHAT_ID } from '../../../shared/communication';
 
 function sourceLabel(source: DocumentProvenanceDetail['sources'][number]) {
   const name = source.id.split('/')[0]!;
@@ -18,6 +19,7 @@ function sourceLabel(source: DocumentProvenanceDetail['sources'][number]) {
     case 'instruction': return Object.hasOwn(instructionLabels, name) ? instructionLabels[name] : '種類不明のプロンプト';
     case 'message':
     case 'result': {
+      if (source.kind === 'message' && name === INSTRUCTIONS_CHAT_ID) return '編集相談チャット';
       const label = source.kind === 'message' ? 'チャット' : '実行結果';
       return Object.hasOwn(phaseLabels, name) ? `${phaseLabels[name as keyof typeof phaseLabels]}の${label}` : label;
     }
@@ -26,6 +28,7 @@ function sourceLabel(source: DocumentProvenanceDetail['sources'][number]) {
 
 function sourceContext(source: DocumentProvenanceDetail['sources'][number]) {
   if (source.kind === 'instruction') return 'インストラクション';
+  if (source.kind === 'message' && source.id.startsWith(INSTRUCTIONS_CHAT_ID + '/')) return undefined;
   const project = source.projectName ? `プロジェクト「${source.projectName}」` : undefined;
   const task = source.taskName ? `タスク「${source.taskName}」` : undefined;
   if (project && task) return `${project} / ${task}`;

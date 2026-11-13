@@ -225,6 +225,7 @@ describe('Markdown preview provenance', () => {
     const content = '根拠付き';
     const load = vi.fn(async () => ({ reason: '根拠', sources: [
       { kind: 'message' as const, id: 'requirements/chat/message', text: '発言原文' },
+      { kind: 'message' as const, id: 'instructions/chat/message', text: '編集相談の発言原文' },
     ] }));
     render(() => <PromptTableMarkdownPreview content={content}
       provenance={{ revision: 'v1', items: [{ id: 'item', start: 0, end: content.length }] }}
@@ -233,6 +234,8 @@ describe('Markdown preview provenance', () => {
     const trigger = screen.getByText(content);
     fireEvent.mouseOver(trigger, { clientX: 60, clientY: 60 });
     expect(await screen.findByText('要件定義のチャット')).toBeTruthy();
+    expect(screen.getByText('編集相談チャット')).toBeTruthy();
+    expect(screen.getByText('編集相談の発言原文')).toBeTruthy();
     expect(screen.getByText('所属不明')).toBeTruthy();
     expect(screen.queryByText('requirements/chat/message')).toBeNull();
     const popup = screen.getByRole('region', { name: '出典と根拠' });

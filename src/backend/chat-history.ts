@@ -25,7 +25,7 @@ export type Message = {
 export type Session = Pick<Message, 'threadId' | 'sessionId'> & {
   workflowToolsHash?: string;
   phaseReferenceHash?: string;
-  instructionToolsVersion?: 1;
+  instructionToolsVersion?: 1 | 2;
   eventToolsVersion?: 1;
   lastEventId: number;
   contextMessageCount?: number;
@@ -181,7 +181,7 @@ function sessionFields(value: Record<string, unknown>, messageCount: number, leg
   if (!count(lastEventId) || (contextMessageCount !== undefined && (!count(contextMessageCount) || contextMessageCount > messageCount)) ||
       (value.contextUsage !== undefined && (!contextUsage || ids.threadId === null)) ||
       !optionalString(workflowToolsHash) || !optionalString(phaseReferenceHash) ||
-      (instructionToolsVersion !== undefined && instructionToolsVersion !== 1) ||
+      (instructionToolsVersion !== undefined && instructionToolsVersion !== 1 && instructionToolsVersion !== 2) ||
       (eventToolsVersion !== undefined && eventToolsVersion !== 1) ||
       !optionalString(lastInstructionFocusThreadId) ||
       (lastInstructionFocus !== undefined && !isInstructionKey(lastInstructionFocus)) ||

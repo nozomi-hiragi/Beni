@@ -269,20 +269,31 @@ test('インストラクションの直接更新を会話なしで実行し、�
  try {
   const catalog = await client.catalog(instructions);
   const previous = store.instructionDocument('editor')!;
+  const item = previous.items[0]!;
+  const source = {kind:'instruction',id:'editor/'+item.id,revision:previous.revision,text:item.text.slice(0,24)};
+  expect(catalog.tools.map(tool => tool.name)).toEqual(['list_instructions','get_instruction','list_chat_sources','read_source','update_instruction']);
+  const read = client.request(catalog, 'read_source', {kind:source.kind,id:source.id,revision:source.revision});
+  expect((await client.accept(read)).status).toBe(202);
+  expect(JSON.parse((await client.settled(instructions, read.operationId)).output!)).toEqual({text:item.text,next:null});
+  const legacy = client.request(catalog, 'update_instruction', {key:'editor',expected_content:previous.content,content:'旧形式'});
+  expect((await client.accept(legacy)).status).toBe(400);
   const request = client.request(catalog, 'update_instruction', {
-   key:'editor', expected_content:previous.content, content:'新しい編集方針'
+   key:'editor', revision:previous.revision, edits:[{id:item.id,reason:'既存の編集方針を維持するため',sources:[source]}]
   });
   expect((await client.accept(request)).status).toBe(202);
   const operation = await client.settled(instructions, request.operationId);
   expect(operation.status).toBe('completed');
   const revision = store.instructionDocument('editor')!.revision;
   expect(revision).not.toBe(previous.revision);
+  expect(store.instructionDocument('editor')).toMatchObject({content:previous.content,items:[{
+   id:item.id,text:item.text,reason:'既存の編集方針を維持するため',sources:[{...source,start:0}],
+  }]});
   expect(store.chats.list({projectId:'instructions',taskId:null,phase:null})).toHaveLength(0);
   expect(agent.requests).toHaveLength(0);
-  const conflict = client.request(catalog, 'update_instruction', {...request.input, content:'古い入力での上書き'});
+  const conflict = client.request(catalog, 'update_instruction', request.input);
   expect((await client.accept(conflict)).status).toBe(202);
   expect(await client.settled(instructions, conflict.operationId)).toMatchObject({
-   status:'failed', error:'インストラクションが変更されています。最新の本文を確認してください'
+   status:'failed', error:'文書の版が更新されています。最新の版を取得してください。'
   });
   store.close();
   const sql = new Database(database);
@@ -301,7 +312,7 @@ test('インストラクションの直接更新を会話なしで実行し、�
   const expired = await restarted.accept(request);
   expect(expired.status).toBe(200);
   expect((await expired.json()).operation).toMatchObject({status:'unknown',input:{},error:expect.stringContaining('保存期限')});
-  expect((await restarted.accept({...request, input:{...request.input, content:'異なる入力'}})).status).toBe(409);
+  expect((await restarted.accept({...request, input:{...request.input, edits:[{id:item.id,reason:'異なる入力'}]}})).status).toBe(409);
   expect(currentStore.instructionDocument('editor')!.revision).toBe(revision);
   expect(agent.requests).toHaveLength(0);
  } finally {
@@ -310,10 +321,11 @@ test('インストラクションの直接更新を会話なしで実行し、�
  }
 });
 
-test('HTTP サーバーが JSON エスケープされた上限サイズの新旧本文を受け付ける', async () => {
+test('HTTP サーバーが JSON エスケープされた上限サイズの本文と引用を受け付ける', async () => {
  const { store, root, chat, close } = await fixture();
  const before = '\u0001'.repeat(65536), after = '\u0002'.repeat(65536);
  store.updateInstruction('editor', before, store.instructionDocument('editor')!.content);
+ const previous = store.instructionDocument('editor')!, item = previous.items[0]!;
  const server = Bun.serve({hostname:'127.0.0.1',port:0,...createServerOptions(store,root,chat)});
  const address = 'http://127.0.0.1:' + server.port;
  try {
@@ -321,11 +333,61 @@ test('HTTP サーバーが JSON エスケープされた上限サイズの新旧
    method:request.method, headers:headers(address), body:request.body
   })));
   const catalog = await client.catalog(instructions);
-  const request = client.request(catalog, 'update_instruction', {key:'editor',expected_content:before,content:after});
+  const request = client.request(catalog, 'update_instruction', {key:'editor',revision:previous.revision,edits:[{
+   id:item.id,text:after,reason:'編集方針を更新する',sources:[{kind:'instruction',id:'editor/'+item.id,revision:previous.revision,text:before}],
+  }]});
   expect((await client.accept(request)).status).toBe(202);
   expect((await client.settled(instructions, request.operationId)).status).toBe('completed');
   expect(store.instructionDocument('editor')!.content).toBe(after);
+  const saved = store.instructionDocument('editor')!;
+  const read = client.request(catalog, 'get_instruction', {key:'editor'});
+  expect((await client.accept(read)).status).toBe(202);
+  expect(JSON.parse((await client.settled(instructions, read.operationId)).output!)).toMatchObject({
+   revision:saved.revision,item:{text:after.slice(0,4096),sources:[{text:before.slice(0,256),textTruncated:true,textLength:before.length}]},
+   next:{item:0,offset:4096},
+  });
  } finally { server.stop(true); await close(); }
+});
+
+test('編集相談の引用を所有範囲で検証し、保存済みの編集相談発言は会話を消去した後も取得できる', async () => {
+ const {client, store, chat, project, task, folder, close} = await fixture(new DummyAgent({id:'codex',supportsEmbeddedTools:true}));
+ try {
+  const taskChat = await chat.send(project.id, task.id, 'タスクの発言', 'dummy-model', folder, undefined, 'requirements');
+  const editorChat = await chat.send('instructions', null, '編集相談の発言', 'dummy-model', folder, undefined, null, false, 'codex', 'editor');
+  for (let i = 0; i < 100 && chat.manualToolScopeBusy('instructions', null); i++) await Bun.sleep(10);
+  const taskMessage = taskChat.messages[0]!, editorMessage = editorChat.messages[0]!;
+  const foreign = `instructions/${taskChat.id}/${taskMessage.id}`;
+  const own = `instructions/${editorChat.id}/${editorMessage.id}`;
+  await chat.command('instructions', null, 'clear', folder);
+  const catalog = await client.catalog(instructions);
+  const run = async (name: string, input: Record<string, unknown>) => {
+   const request = client.request(catalog,name,input);
+   expect((await client.accept(request)).status).toBe(202);
+   return client.settled(instructions,request.operationId);
+  };
+  const before = store.instructionDocument('editor')!, item = before.items[0]!;
+  const read = await run('read_source',{kind:'message',id:own});
+  expect(JSON.parse(read.output!)).toEqual({text:editorMessage.content,next:null});
+  expect(await run('read_source',{kind:'message',id:foreign})).toMatchObject({status:'failed',error:'参照元が見つかりません'});
+  expect(await run('update_instruction',{key:'editor',revision:before.revision,edits:[
+   {text:'有効な引用',reason:'編集相談を引用',sources:[{kind:'message',id:own,text:editorMessage.content}]},
+   {id:item.id,text:'範囲外の引用',reason:'タスクを引用',sources:[{kind:'message',id:foreign,text:taskMessage.content}]},
+  ]})).toMatchObject({status:'failed',error:'参照元が見つかりません'});
+  expect(store.instructionDocument('editor')).toEqual(before);
+  expect(await run('update_instruction',{key:'editor',revision:before.revision,edits:[
+   {text:'\n\n',index:0},
+   {text:'新しい方針',reason:'編集相談の希望を反映',sources:[{kind:'message',id:own,text:editorMessage.content}],index:1},
+   {id:item.id,index:0},
+  ]})).toMatchObject({status:'completed'});
+  const moved = store.instructionDocument('editor')!;
+  expect(moved.items[0]).toEqual(item);
+  expect(moved.items[1]).toMatchObject({text:'\n\n',reason:'',sources:[]});
+  expect(moved.items[2]).toMatchObject({text:'新しい方針',reason:'編集相談の希望を反映'});
+  expect(await run('update_instruction',{key:'editor',revision:moved.revision,edits:[
+   {id:moved.items[1]!.id,remove:true},{id:moved.items[2]!.id,remove:true},
+  ]})).toMatchObject({status:'completed'});
+  expect(store.instructionDocument('editor')!.items).toEqual(before.items);
+ } finally { await close(); }
 });
 
 test('反省会の完了は停止後の有効な最新版・理由があるときだけ確定する', async () => {
