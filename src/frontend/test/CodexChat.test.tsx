@@ -5,7 +5,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import ChatPanel from '../shared/components/ChatPanel';
 import SettingsPage from '../settings/SettingsPage';
 import UsageIndicators from '../shared/components/UsageIndicators';
-import { chatModelPicker, FakeWebSocket, packResponse, testPack, stubLegacyAgentFetch } from './test-events';
+import { chatModelPicker, FakeWebSocket, packHeader, packResponse, testPack, stubLegacyAgentFetch } from './test-events';
 
 const json = (data: unknown) => ({ ok: true, json: async () => data }) as Response;
 beforeEach(() => { resetModelCache(); localStorage.clear(); FakeWebSocket.instances = []; vi.stubGlobal('WebSocket', FakeWebSocket); });
@@ -258,6 +258,67 @@ it.each(['completed', 'interrupted', 'failed'] as const)('keeps Aura visible dur
   expect(screen.queryByRole('button',{name:'中断'})).toBeNull();
   expect(screen.getByText('read_file').closest('article')).toBe(article);
   expect(details.open).toBe(true);
+});
+
+it('groups adjacent tool calls, keeps each expansion, and starts a new group after text', async () => {
+  const first = testPack('', {
+    packId: 'first-tool', kind: 'tool', closedAt: '2026-01-01T00:00:01Z',
+    tool: { name: 'read_first_file', input: 'first.md', output: 'First notes' },
+  });
+  const second = testPack('', {
+    packId: 'second-tool', sequence: 2, kind: 'tool', createdAt: '2026-01-01T00:00:03Z', closedAt: '2026-01-01T00:00:05Z',
+    tool: { name: 'read_second_file', input: 'second.md', output: 'Second notes' },
+  });
+  const text = testPack('The files are ready', { packId: 'text-between-tools', sequence: 3 });
+  const third = testPack('', {
+    packId: 'third-tool', sequence: 4, kind: 'tool', status: 'failed',
+    tool: { name: 'read_third_file', input: 'third.md', output: 'File missing' },
+  });
+  const fourth = testPack('', {
+    packId: 'fourth-tool', sequence: 5, kind: 'tool',
+    tool: { name: 'read_fourth_file', input: 'fourth.md', output: 'Fourth notes' },
+  });
+  const packs = [first];
+  stubLegacyAgentFetch(vi.fn((url: string) => {
+    if (url === '/api/codex/status') return json({ installed: false, models: [], auth: 'none' });
+    if (url.startsWith('/api/chat?')) return json({ id: 'tool-groups', messages: [] });
+    if (url.startsWith('/api/chat/packs?')) {
+      const after = new URL(url, 'http://localhost').searchParams.get('afterPackId');
+      return json({ packs: packs.slice(packs.findIndex(pack => pack.packId === after) + 1).map(({packId, state}) => ({packId, state})) });
+    }
+    return json({ pack: packs.find(pack => url.includes(`/packs/${pack.packId}?`)) });
+  }));
+  render(() => <ChatPanel projectId="019a0000-0000-7000-8000-0000000000a5" />);
+  const firstTool = await screen.findByText('read_first_file');
+  const article = firstTool.closest('article');
+  const bubble = firstTool.closest('.chat-bubble');
+  const firstDetails = firstTool.closest('details')!;
+  expect(firstDetails.open).toBe(false);
+  firstDetails.open = true;
+  const socket = FakeWebSocket.instances[0];
+  await waitFor(() => expect(socket.subscriptions.size).toBe(1));
+  packs.push(second);
+  socket.event('chat', { name: 'chat.pack.closed', data: { packId: second.packId, header: packHeader(second) } });
+  const secondTool = await screen.findByText('read_second_file');
+  expect(secondTool.closest('article')).toBe(article);
+  expect(secondTool.closest('.chat-bubble')).toBe(bubble);
+  expect(secondTool.closest('details')?.open).toBe(false);
+  expect(screen.getByText('read_first_file').closest('details')).toBe(firstDetails);
+  expect(firstDetails.open).toBe(true);
+  expect(article?.querySelector('.chat-footer')?.textContent).toBe('5秒');
+
+  packs.push(text, third, fourth);
+  socket.change();
+  const textArticle = (await screen.findByText('The files are ready')).closest('article');
+  const thirdArticle = (await screen.findByText('read_third_file')).closest('article');
+  const fourthArticle = (await screen.findByText('read_fourth_file')).closest('article');
+  expect(textArticle).not.toBe(article);
+  expect(thirdArticle).not.toBe(textArticle);
+  expect(thirdArticle).not.toBe(article);
+  expect(fourthArticle).toBe(thirdArticle);
+  expect(thirdArticle?.querySelector('.chat-footer')?.textContent).toBe('失敗');
+  expect(screen.getByText('read_first_file').closest('details')).toBe(firstDetails);
+  expect(firstDetails.open).toBe(true);
 });
 
 it('isolates phase history, drafts, requests and subscriptions and ignores a late previous-phase load', async () => {

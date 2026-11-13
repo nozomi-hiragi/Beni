@@ -15,6 +15,7 @@ import { popupHeight } from './chat-popup';
 import ModelPicker from './ModelPicker';
 import AgentIcon from './icons/AgentIcon';
 import ContextGauge from './ContextGauge';
+import ChatToolCall from './ChatToolCall';
 import { renderMarkdown } from './MarkdownPreview';
 
 interface Draft { text: string; version: number; sending: boolean; commandSending?: boolean; commandName?: ChatCommand['name']; error: string; listeners: Set<() => void>; refresh?: () => void; pending?: {content: string; fromComposer: boolean; sendId?: string}; restored: Set<string> }
@@ -44,9 +45,14 @@ function chatDate(value: string) {
   return value && Number.isFinite(date.getTime()) ? chatDateFormatter.format(date) : undefined;
 }
 
-function packFooter(pack: Pack) {
-  if (pack.role !== 'assistant' || pack.status !== 'completed' || !pack.closedAt) return stateLabel[pack.status];
-  const milliseconds = Date.parse(pack.closedAt) - Date.parse(pack.createdAt);
+function packFooter(pack: Pack, group?: readonly Pack[]) {
+  const errors = group?.filter(item => item.status === 'failed' || item.status === 'interrupted' || item.status === 'unknown');
+  if (errors?.length) return [...new Set(errors.map(item => stateLabel[item.status]))].join(' · ');
+  const incomplete = group?.findLast(item => item.status !== 'completed');
+  if (incomplete) return stateLabel[incomplete.status];
+  const closedAt = (group?.at(-1) ?? pack).closedAt;
+  if (pack.role !== 'assistant' || pack.status !== 'completed' || !closedAt) return stateLabel[pack.status];
+  const milliseconds = Date.parse(closedAt) - Date.parse(pack.createdAt);
   if (!Number.isFinite(milliseconds) || milliseconds < 0) return stateLabel[pack.status];
   const tenths = Math.round(milliseconds / 100);
   if (tenths < 600) return `${tenths / 10}秒`;
@@ -63,6 +69,21 @@ export default function ChatPanel(props: { projectId: string; taskId?: string; p
   const conversation = () => conversationState.scope === key() ? conversationState.value : undefined;
   const setConversation = (value: Conversation) => setConversationState('value', reconcile(value, {key:'id'}));
   const [packState, setPackState] = createStore<{value: Pack[]}>({value: []});
+  const packGroups = createMemo(() => {
+    // Store entries retain their identity by packId through reconcile.
+    const groups = new Map<Pack, Pack[]>();
+    let first: Pack | undefined;
+    for (const pack of packState.value) {
+      if (first?.role === 'assistant' && first.kind === 'tool' && pack.role === 'assistant' && pack.kind === 'tool'
+        && (first.provider ?? 'codex') === (pack.provider ?? 'codex') && first.model === pack.model) {
+        groups.get(first)!.push(pack);
+      } else {
+        first = pack;
+        groups.set(pack, [pack]);
+      }
+    }
+    return groups;
+  });
   const [syncError, setSyncError] = createSignal('');
   const models = createMemo(availableModels);
   const [text, setText] = createSignal('');
@@ -448,7 +469,7 @@ export default function ChatPanel(props: { projectId: string; taskId?: string; p
     <Show when={syncError()}><p role="alert" class="px-4 pt-3 text-sm text-error">{syncError()} <button class="btn btn-xs" onClick={() => refresh()}>更新</button></p></Show>
     <div ref={scrollport} class="min-h-0 flex-1 overflow-y-auto p-5" role="log" aria-label="チャット履歴" aria-live="polite">
       <div ref={scrollContent} class="space-y-3">
-        <Show when={packState.value.length} fallback={<p class="text-sm text-base-content/50">希望や回答を入力してください。</p>}><For each={packState.value}>{pack => <article class={`chat ${pack.role === 'user' ? 'chat-end' : 'chat-start grid-cols-[auto_minmax(0,1fr)]'}`}>
+        <Show when={packGroups().size} fallback={<p class="text-sm text-base-content/50">希望や回答を入力してください。</p>}><For each={[...packGroups().keys()]}>{pack => <article class={`chat ${pack.role === 'user' ? 'chat-end' : 'chat-start grid-cols-[auto_minmax(0,1fr)]'}`}>
         <Show when={pack.role === 'assistant'}>
           <div class="chat-image avatar">
             <div class="grid size-8 place-items-center rounded-full bg-base-200">
@@ -462,20 +483,20 @@ export default function ChatPanel(props: { projectId: string; taskId?: string; p
             <Show when={chatDate(pack.createdAt)}>{date => <>{' '}<time dateTime={pack.createdAt}>{date()}</time></>}</Show>
           </span>
         </div>
-        <div class={`chat-bubble min-w-0 ${pack.role === 'user' ? 'chat-bubble-primary' : 'bg-base-200 text-base-content'}`}>
+        <div class={`chat-bubble min-w-0 ${pack.role === 'user' ? 'chat-bubble-primary' : 'bg-base-200 text-base-content'}`} classList={{'w-full max-w-xl': pack.kind === 'tool'}}>
           <Show when={pack.kind === 'tool'} fallback={
             <Show when={pack.role === 'assistant'} fallback={<p class="whitespace-pre-wrap break-words text-sm leading-relaxed">{pack.content}</p>}>
               <div class="markdown-preview text-sm leading-relaxed" innerHTML={renderMarkdown(pack.content, []).html} />
             </Show>
           }>
-            <details>
-              <summary>{pack.tool?.name ?? 'ツール'}</summary>
-              <pre class="whitespace-pre-wrap break-words text-xs">{pack.tool?.input}</pre>
-              <pre class="whitespace-pre-wrap break-words text-xs">{pack.tool?.output}</pre>
-            </details>
+            <div class="divide-y divide-base-300">
+              <For each={packGroups().get(pack)}>{item => <div class="not-first:pt-2 not-last:pb-2">
+                <ChatToolCall tool={item.tool} />
+              </div>}</For>
+            </div>
           </Show>
         </div>
-        <div class="chat-footer text-xs text-base-content/60">{packFooter(pack)}</div>
+        <div class="chat-footer text-xs text-base-content/60">{packFooter(pack, packGroups().get(pack))}</div>
         </article>}</For></Show>
         <Show when={visibleCommandId()} keyed>{id => <div class="flex min-w-0 items-start gap-2 rounded-box border border-base-300 px-3 py-2 text-sm">
           <Show when={conversation()?.command?.output} fallback={<p role="status" class="min-w-0 flex-1">{commandOutcome()}</p>}>
