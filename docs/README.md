@@ -5,6 +5,7 @@
 ## 開発
 
 - [ディレクトリ構成](directory-structure.md)
+- [実行ファイルと自己開発](executable.md)
 - [通信仕様・API](communication/README.md)
 - [データ設計](data/README.md)
 - [保存データの集約](data/storage.md)
