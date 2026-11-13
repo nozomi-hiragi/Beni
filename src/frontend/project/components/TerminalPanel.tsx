@@ -178,7 +178,8 @@ function TerminalView(props: { projectId: string; session: TerminalSession; acti
     });
   }
   onMount(() => {
-    terminal = new Terminal({ cols: props.session.cols, rows: props.session.rows, scrollback: 200, disableStdin: true, fontSize: 12, theme: { background: '#15181e', foreground: '#e5e7eb' } });
+    const { backgroundColor, color } = getComputedStyle(host);
+    terminal = new Terminal({ cols: props.session.cols, rows: props.session.rows, scrollback: 200, disableStdin: true, fontSize: 12, theme: { background: backgroundColor, foreground: color } });
     fit = new FitAddon(); terminal.loadAddon(fit); terminal.open(host);
     const input = terminal.onData(data => {
       if (!enabled()) return;
@@ -192,13 +193,13 @@ function TerminalView(props: { projectId: string; session: TerminalSession; acti
   });
   createEffect(() => { if (terminal) terminal.options.disableStdin = !enabled(); });
   createEffect(() => { if (props.active) queueMicrotask(resize); });
-  return <div class="flex min-h-0 flex-1 flex-col bg-[#15181e] text-gray-200" classList={{ hidden: !props.active }} aria-hidden={!props.active}>
+  return <div class="flex min-h-0 flex-1 flex-col bg-base-200 text-base-content" classList={{ hidden: !props.active }} aria-hidden={!props.active}>
     <div class="flex shrink-0 items-center gap-2 px-3 py-1 text-xs" role="status">
       <span>{connected() ? synced() ? '接続中' : '同期中…' : '再接続中…'} · {statusLabel(status())}{status() === 'exited' && exitCode() !== null ? ` (${exitCode()})` : ''} · {owner() ? '操作権あり' : '閲覧専用'}</span>
       <Show when={connected() && !owner()}><button type="button" class="btn btn-xs" onClick={() => communication.terminal(scope(), { type: 'terminal.takeover', generation })}>乗っ取る</button></Show>
-      <Show when={inputError()}><span class="text-red-300">{inputError()}</span></Show>
-      <Show when={error()}><span class="text-red-300">{error()}</span><button type="button" class="btn btn-xs" onClick={connect}>再接続</button></Show>
+      <Show when={inputError()}><span class="text-error">{inputError()}</span></Show>
+      <Show when={error()}><span class="text-error">{error()}</span><button type="button" class="btn btn-xs" onClick={connect}>再接続</button></Show>
     </div>
-    <div ref={host} class="min-h-0 flex-1 overflow-hidden px-2 pb-2" aria-label="ターミナル画面" />
+    <div ref={host} class="min-h-0 flex-1 overflow-hidden bg-base-200 px-2 pb-2 text-base-content" aria-label="ターミナル画面" />
   </div>;
 }

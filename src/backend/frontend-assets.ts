@@ -8,6 +8,7 @@ const assets = new Map([
   ['/ui/style.css', {path: 'dist/frontend/beni.css', type: 'text/css;charset=utf-8'}],
   ['/ui/generated.css', {path: 'dist/frontend/generated.css', type: 'text/css;charset=utf-8'}],
   ['/manifest.webmanifest', {path: 'src/frontend/pwa/manifest.webmanifest', type: 'application/manifest+json'}],
+  ['/icons/icon.svg', {path: 'src/frontend/pwa/icons/icon.svg', type: 'image/svg+xml'}],
   ['/icons/icon-192.png', {path: 'src/frontend/pwa/icons/icon-192.png', type: 'image/png'}],
   ['/icons/icon-512.png', {path: 'src/frontend/pwa/icons/icon-512.png', type: 'image/png'}],
   ['/icons/apple-touch-icon.png', {path: 'src/frontend/pwa/icons/apple-touch-icon.png', type: 'image/png'}],

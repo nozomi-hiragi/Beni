@@ -77,11 +77,14 @@ async function checkAssets(origin: string) {
   }
 
   assert.match(html, /rel="manifest" href="\/manifest\.webmanifest"/);
+  assert.match(html, /rel="icon"[^>]* href="\/icons\/icon\.svg"/);
   assert.match(html, /rel="apple-touch-icon"[^>]* href="\/icons\/apple-touch-icon\.png"/);
   const manifest = await (await asset('/manifest.webmanifest', /^application\/manifest\+json\b/i)).json();
   assert.equal(manifest.start_url, '/');
   assert.equal(manifest.display, 'standalone');
   assert.deepEqual(manifest.icons.map((icon: {src: string}) => icon.src), ['/icons/icon-192.png', '/icons/icon-512.png']);
+  const svg = await textAsset('/icons/icon.svg', /^image\/svg\+xml\b/i);
+  assert.equal(svg, await Bun.file(join(import.meta.dir, '../src/frontend/pwa/icons/icon.svg')).text());
   for (const name of ['icon-192.png', 'icon-512.png', 'apple-touch-icon.png']) {
     const path = '/icons/' + name;
     const png = await (await asset(path, /^image\/png\b/i)).arrayBuffer();

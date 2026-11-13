@@ -1,8 +1,9 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
-  <rect width="512" height="512" fill="#253821"/>
-  <path fill="#e1e6d9" fill-rule="evenodd" d="
-    M159 122h97c59 0 91 27 91 72 0 27-13 46-35 57
-    32 9 50 32 50 63 0 47-36 76-99 76H159V122Zm55 48v61h39
-    c25 0 39-11 39-31 0-19-14-30-39-30h-39Zm0 106v66h46
-    c29 0 45-12 45-33 0-22-16-33-45-33h-46Z"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Beni conversation icon</title>
+  <desc id="desc">Two overlapping conversation bubbles, with a pale lavender bubble behind a mint bubble on a deep chocolate purple background.</desc>
+  <rect width="512" height="512" rx="112" fill="#221e26"/>
+  <path d="M246 104H376C398.091 104 416 121.909 416 144V258C416 280.091 398.091 298 376 298H353L378 329L322 298H246C223.909 298 206 280.091 206 258V144C206 121.909 223.909 104 246 104Z" fill="#b8a1e3"/>
+  <path d="M136 190H306C328.091 190 346 207.909 346 230V338C346 360.091 328.091 378 306 378H188L139 408L153 378H136C113.909 378 96 360.091 96 338V230C96 207.909 113.909 190 136 190Z" fill="#83d8bd"/>
+  <path d="M166 267H280" stroke="#221e26" stroke-width="16" stroke-linecap="round"/>
+  <path d="M166 311H246" stroke="#221e26" stroke-width="16" stroke-linecap="round"/>
 </svg>

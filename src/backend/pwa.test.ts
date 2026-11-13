@@ -23,10 +23,12 @@ for (const origin of [loopbackOrigin, publicOrigin]) {
       }
 
       const html = await (await asset('/', 'text/html;charset=utf-8')).text();
+      expect(html).toContain('data-theme="beni"');
       expect(html).toContain('rel="manifest" href="/manifest.webmanifest"');
       expect(html).toContain('rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png"');
+      expect(html).toContain('rel="icon" type="image/svg+xml" sizes="any" href="/icons/icon.svg"');
       expect(html).toContain('rel="apple-touch-icon" sizes="180x180" href="/icons/apple-touch-icon.png"');
-      expect(html).toContain('name="theme-color" content="#e1e6d9"');
+      expect(html).toContain('name="theme-color" content="#221e26"');
 
       const manifest = await (await asset('/manifest.webmanifest', 'application/manifest+json')).json();
       expect(manifest).toMatchObject({
@@ -37,13 +39,16 @@ for (const origin of [loopbackOrigin, publicOrigin]) {
         scope: '/',
         display: 'standalone',
         lang: 'ja',
-        theme_color: '#e1e6d9',
-        background_color: '#e1e6d9',
+        theme_color: '#221e26',
+        background_color: '#221e26',
         icons: [
           {src: '/icons/icon-192.png', sizes: '192x192', type: 'image/png'},
           {src: '/icons/icon-512.png', sizes: '512x512', type: 'image/png'},
         ],
       });
+
+      const svg = await (await asset('/icons/icon.svg', 'image/svg+xml')).text();
+      expect(svg).toMatch(/^<svg\b/);
 
       const pngs = [
         ['/icons/icon-192.png', 192],
