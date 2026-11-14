@@ -16,8 +16,7 @@
 
 次の環境を用意します。
 
-- PTY と drain 通知に対応した [Bun](https://bun.sh/) 1.4.3 以上。
-- ビルド・UI テスト用の Node.js。22.22.2 以上の22系、24.15.0 以上の24系、または26以上。
+- Beni のビルド・起動・テストには、PTY と drain 通知に対応した [Bun](https://bun.sh/) 1.4.4 以上を使います。
 - エージェントを使う場合は、公式 Codex CLI または Claude Code CLI をインストールし、自身のサブスクリプションのアカウントでログインします。対応条件は [LLM チャット連携](docs/features/llm-chat.md) を参照してください。
 
 リポジトリを取得し、そのディレクトリで起動します。
@@ -37,41 +36,48 @@ bun run start
 
 Beni のバックエンドは一つだけ起動します。一つのバックエンドへ複数のブラウザーや端末から接続できます。詳細は [動作条件](docs/specification.md#動作条件) を参照してください。
 
+### 実行ファイルを作る
+
+macOS / Apple Silicon では、サーバー・画面・Bun ランタイムをまとめた実行ファイルを生成できます。
+
+```sh
+bun run build:exe
+bun run app
+```
+
+`bun run app` は最新のビルド済み実行ファイルを起動します。次回からはこのコマンドだけで起動できます。コードの変更を反映するときは再ビルドし、起動中の Beni を Ctrl+C で停止してから、もう一度 `bun run app` を実行します。
+
+生成先は `dist/executables/<build-id>/beni` です。ビルドごとに別のディレクトリへ出力します。実行ファイルをリポジトリ外にコピーすれば、ソースや `node_modules`、外部の Bun なしで起動できます。エージェントを利用する場合は、従来どおりログイン済みの公式 CLI が必要です。
+
+実行ファイルのあるフォルダーで、次のコマンドだけで起動できます。
+
+```sh
+./beni
+```
+
+データは自動で `~/Library/Application Support/Beni/data` に保存します。保存先を変える場合だけ `BENI_DATA_DIR` を指定します。既存のリポジトリ内の `data/` は自動では移動しません。
+
+稼働中の実行ファイルから自身のソースを修正し、次の実行ファイルへ切り替える手順は [実行ファイルと自己開発](docs/executable.md) を参照してください。
+
 ### Tailscale 経由で起動する
 
-サーバー側と閲覧する端末を Tailscale に接続します。チャットのハッシュ確認にブラウザーの暗号 API を使うため、Tailscale Serve の HTTPS URL で開きます。
-
-まずサーバー側で、HTTPS の443番から Beni の3210番への転送を有効にします。
+サーバー側と閲覧する端末を Tailscale に接続し、実行ファイルをビルドしてから次を実行します。
 
 ```sh
-tailscale serve --bg --https=443 http://127.0.0.1:3210
+bun run app --tailscale
 ```
 
-表示された HTTPS URL を `BENI_PUBLIC_ORIGIN` に指定し、Beni のディレクトリで起動します。以下のホスト名は架空のサンプルなので、実際に表示されたものへ置き換えてください。末尾の `/` やパスは付けません。すでに Beni を起動している場合は、停止してからこのコマンドで起動し直します。
+表示された HTTPS URL を開きます。Tailscale の URL と転送先は自動で設定します。すでに Beni が起動中なら、先に Ctrl+C で停止してください。Tailscale の CLI が必要です。初めて Serve を使う場合は、Tailscale 側で HTTPS / Serve の有効化が必要になることがあります。
 
-```sh
-BENI_PUBLIC_ORIGIN=https://example-node.example-tailnet.ts.net bun run start
-```
+既存の別サービスの転送は上書きしません。Serve の転送設定は Beni 終了後も残ります。設定の確認・解除やソース起動での使い方は [PWA と Tailscale](docs/features/pwa.md) を参照してください。
 
-閲覧する端末で `https://example-node.example-tailnet.ts.net` を開きます。HTTPS の標準ポート443を使うため、URLにポート番号は不要です。IPアドレスへのHTTP接続ではなく、このHTTPS URLを使ってください。
+### アプリとしてインストールする
 
-`BENI_PUBLIC_ORIGIN` は起動したプロセスだけに適用される環境変数です。設定ファイルには保存されないため、次回も同じ指定で起動します。Beni 自体は `127.0.0.1:3210` で待ち受け、指定した公開ホストと Origin を許可します。`BENI_PORT` を変える場合は、Serve の転送先ポートも合わせます。
-
-Serve の設定は `--bg` によりバックグラウンドで維持されます。確認と解除は次のコマンドで行います。解除しても Beni 自体は停止しません。
-
-```sh
-# 転送設定を確認
-tailscale serve status
-
-# HTTPS の転送を解除
-tailscale serve --https=443 off
-```
-
-この手順は Tailscale 内向けの公開です。Beni 自体には認証機能がないため、接続できる端末は Tailscale のアクセス制御で管理します。
+ブラウザーで Beni を開き、ブラウザーのインストールメニューから追加します。iPhone / iPad は「共有」→「ホーム画面に追加」です。ほかの端末から使う場合は Tailscale の HTTPS URL でインストールしてください。インストール後も、サーバー側の Beni と Tailscale は起動しておきます。
 
 ## データの保存先
 
-Beni が管理するデータは、Beni ルートの `data/` にまとめて保存します。`BENI_DATA_DIR` で保存先を変更できます。相対指定は起動時の作業ディレクトリを基準にします。
+既定の保存先は、ソース起動では Beni ルートの `data/`、実行ファイル版では `~/Library/Application Support/Beni/data` です。`BENI_DATA_DIR` で保存先を変更できます。相対指定は起動時の作業ディレクトリを基準にします。
 
 - `beni.sqlite`: プロジェクト情報（ID・名前・日時・作業フォルダー）、インストラクションの版、更新ジョブと移行状態。
 - `projects/<projectId>.sqlite` にタスク情報・文書・版・ナレッジ・イベントを保存します。

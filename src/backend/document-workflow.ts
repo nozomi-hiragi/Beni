@@ -36,7 +36,7 @@ const editTool = tool('edit_document', '文書に項目を挿入・更新・移�
  { name: value, revision: { type: ['string', 'null'] }, update_id: value, edits: { type: 'array', items: editSchema, minItems: 1, maxItems: 32 } },
  ['name', 'revision', 'update_id', 'edits']);
 const reviewSignals = tool('get_retrospective_signals', '反省会で調べる対象を選ぶための手がかりを取得する。documents は文書項目の引用状況、execution は実装中の手戻りの候補。必要に応じて next を辿り、原文やイベントを確認する。', { area: { enum: ['documents', 'execution'] }, offset: cursor }, ['area']);
-const finishRetrospective = tool('finish_retrospective', '反省会の分析完了を申告する。通常の反省会チャットでは、自動分析が失敗または停止し、ユーザーが完了を依頼した場合だけ使う。反省会文書の最新版と、確認した根拠に基づく判断理由を指定する。追記すべき発見がない場合は既存の版を指定できる。', { revision: value, reason: value }, ['revision', 'reason']);
+const finishRetrospective = tool('finish_retrospective', '反省会の分析完了を申告する。文書は edit_document で保存し、タスク全体は「タスク完了」から終了する。分析完了後は、文書を追記・修正しても再申告は不要。通常の反省会チャットでは、自動分析が失敗または停止し、ユーザーが完了を依頼した場合だけ使う。反省会文書の最新版と、確認した根拠に基づく判断理由を指定する。追記すべき発見がない場合は既存の版を指定できる。', { revision: value, reason: value }, ['revision', 'reason']);
 const finishExecution = tool('finish_execution', '仕様と実装手順の作業・検証がすべて終わった場合は completed、続行不能なら blocked を記録する。理由に検証結果や未達項目を含める。', { outcome: { enum: ['completed', 'blocked'] }, reason: value }, ['outcome', 'reason']);
 const finishKnowledge = tool('finish_knowledge', 'ナレッジの確定版を指定する。変更不要の場合も既存の版を指定して判断理由を書く。', { revision: value, reason: value }, ['revision', 'reason']);
 const finishInstructions = tool('finish_instruction_update', '準備した指示の変更を確定する。変更不要の場合はその理由を記録する。', { reason: value }, ['reason']);
@@ -352,6 +352,7 @@ export class DocumentWorkflow {
   }
   if (name === 'finish_retrospective') {
    const taskId = c.taskId!, state = this.review(c.projectId, taskId)?.state;
+   if (state === 'done') throw new ManualToolInputError('反省会の分析はすでに完了しています。文書の追記・修正後も、分析完了の再申告は不要です。');
    const available = c.systemGenerated
     ? state === 'running' && this.reviewRuns.get(taskId)?.sendId === c.sendId
     : this.reviewIsAvailable(taskId) && (state === 'failed' || state === 'stopped');

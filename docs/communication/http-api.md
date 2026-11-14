@@ -6,7 +6,7 @@ HTTP による取得・操作と、チャットのパック同期の契約を定
 
 ## 共通規則
 
-- 接続先は `http://127.0.0.1:3210`。ポートは `BENI_PORT` で変更可能。Tailscale Serve の HTTPS 公開 URL は `BENI_PUBLIC_ORIGIN` に指定する（パスや末尾 `/` なし）。
+- 接続先は `http://127.0.0.1:3210`。ポートは `BENI_PORT` で変更可能。Tailscale Serve の HTTPS 公開 URL は `BENI_PUBLIC_ORIGIN` に指定する（パスや末尾 `/` なし）。実行ファイルの `--tailscale` は自分のノードの URL を検出し、同じ公開 Origin の検査へ設定する。詳細は [PWA と Tailscale](../features/pwa.md) を参照。
 - URL のホスト名が `127.0.0.1` の場合、または URL の host（ポートを含む）が指定した公開 origin の host と一致する場合に受け付ける。それ以外は 403。WebSocket にも同じホスト制限がある。通常の GET に共通の Origin 検査はない。
 - POST は `Origin` がローカル要求 URL の origin、または公開 host に対しては設定した HTTPS origin と一致し、`Content-Type` が厳密に `application/json` であること。転送ヘッダーは判定に使わない。違反は 403。
 - POST の本文は JSON オブジェクト。配列・null・不正 JSON は 400。本文上限は 65,536 バイトで、`/api/instructions/apply` に限り `65536 * 6 + 1024` バイト。超過は 413。
@@ -143,16 +143,21 @@ type CodexStatus = {
 type ClaudeStatus = Omit<CodexStatus, 'auth'> & {
   auth: 'claude' | 'apiKey' | 'other' | 'none' | 'unknown';
 };
+type ChatDiagnostic = {
+  stage: string; reason: string; failureCode?: string;
+  rpcCode?: number; exitCode?: number; signal?: number; spawnError?: string; configChecks?: readonly string[];
+};
 type ChatMessage = {
   id: string; sendId: string; role: 'user' | 'assistant'; content: string;
   provider: string; model: string | null; createdAt: string; updatedAt: string;
   status: 'pending' | 'streaming' | 'completed' | 'failed' | 'interrupted' | 'unknown';
   threadId: string | null; sessionId: string | null; errorCode?: 'MODEL_UNAVAILABLE'; systemGenerated?: true;
+  diagnostic?: ChatDiagnostic;
 };
 type ChatCommand = {
   id: string; name: string;
   status: 'running' | 'completed' | 'failed' | 'interrupted' | 'unknown';
-  error?: string; output?: string;
+  error?: string; output?: string; diagnostic?: ChatDiagnostic;
 };
 type ContextUsage = {usedTokens: number; maxTokens: number};
 type Conversation = {
@@ -299,7 +304,7 @@ WebSocketも `chat` トピックに限りこのスコープを許可します。
 
 編集相談の送信では `instructionFocus`（`common`、各フェーズのキー、`editor` のいずれか）を必須とします。未選択・未知の対象は履歴追加前に拒否します。会話の `lastInstructionFocus` は最後に受理された送信の対象を表し、クリックによる選択とは別です。
 
-フォーカス対象のキー・本文は初回、対象変更、保存本文変更、新しいLLMセッション開始時に渡します。全テンプレートを毎回送信せず、編集相談専用の `list_instructions`・`get_instruction` で必要な指示を取得します。これらはLLMの埋め込みツールであり、追加のHTTPエンドポイントではありません。
+フォーカス対象のキー・本文は初回、対象変更、保存本文変更、新しいLLMセッション開始時に渡します。全テンプレートを毎回送信せず、編集相談専用の `list_instructions`・`get_instruction` で必要な指示を取得します。編集相談の発言と指示の項目を引用元として取得し、`update_instruction` で版を照合して項目ごとの本文・採用理由・引用を保存します。変更しない項目の根拠は維持します。これらは埋め込みツールと手動ツール API から利用し、追加の専用HTTPエンドポイントは設けません。引数は [インストラクション管理](../features/instructions.md#編集相談用の埋め込みツール) を参照してください。
 
 ## 手動ツール
 
@@ -319,4 +324,4 @@ Navbar の [ツール](../features/manual-tools.md) はモデルや CLI を呼�
 
 新規受付は202、同じ操作の再受付は200。不正な引数は400、対象・操作の不存在や別スコープの参照は404、実行条件の変更や競合は409、本文超過は413を返す。
 
-POST は既存 API と同じ origin 検証を適用する。本文上限は `65536 * 6 * 2 + 4096`（790528 バイト）とし、インストラクションの新旧本文がそれぞれ JSON エスケープで膨らむ場合も扱う。操作 ID の再利用は同じ対象・ツール・引数の場合だけ既存結果を返す。異なる入力での再利用、古い定義、実行中の競合は拒否する。通信切断時には GET で照合し、別 ID で自動再送しない。スコープ外の操作結果は返さない。
+POST は既存 API と同じ origin 検証を適用する。本文上限は `65536 * 6 * 2 + 4096`（790528 バイト）とし、インストラクションの編集本文と原文引用が JSON エスケープで膨らむ場合も扱う。操作 ID の再利用は同じ対象・ツール・引数の場合だけ既存結果を返す。異なる入力での再利用、古い定義、実行中の競合は拒否する。通信切断時には GET で照合し、別 ID で自動再送しない。スコープ外の操作結果は返さない。

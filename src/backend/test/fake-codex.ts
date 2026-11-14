@@ -34,6 +34,30 @@ function* lastDocumentItem(name:string):Generator<Call,any,ToolReply>{
  while(result.next!==null)result=yield* invoke('read_document',{name,...result.next});
  return result;
 }
+function* instructionEditor(text:string):Generator<Call,void,ToolReply>{
+ const current=yield* invoke('get_instruction',{key:'common'});
+ const listed=yield* invoke('list_chat_sources');
+ const message=listed.sources.find((item:any)=>item.role==='user'&&item.excerpt===text);
+ const {text:original}=yield* invoke('read_source',{kind:message.kind,id:message.id});
+ const quote={kind:message.kind,id:message.id,text:original.slice(2),start:2};
+ const replacement='# Updated {{working_directory}} {{project_directory}} {{working_directory}}';
+ const id=current.item.id, key='common', revision=current.revision;
+ yield* invoke('update_instruction',{key,revision,edits:[{id,text:replacement}]},false);
+ yield* invoke('update_instruction',{key,revision,edits:[
+  {id,text:replacement,reason:'ユーザーの希望を反映',sources:[quote]},
+  {text:'偽の引用',reason:'偽の引用の検証',sources:[{...quote,text:'存在しない原文'}]},
+ ]},false);
+ yield* invoke('update_instruction',{key,revision,edits:[{id,text:replacement,reason:'ユーザーの希望を反映',sources:[{...quote,start:1}]}]},false);
+ const first=yield* invoke('update_instruction',{key,revision,edits:[{id,text:replacement,reason:'ユーザーの希望を反映',sources:[quote]}]});
+ yield* invoke('update_instruction',{key,revision:first.revision,edits:[{id,text:'{{task_id}}',reason:'変数の検証',sources:[quote]}]},false);
+ const past=yield* invoke('get_instruction',{key,revision});
+ const source=yield* invoke('read_source',past.item.source);
+ const second=yield* invoke('update_instruction',{key,revision:first.revision,edits:[{
+  id,reason:'採用理由を追記',sources:[quote,{...past.item.source,text:source.text.slice(0,30)}],
+ }]});
+ yield* invoke('update_instruction',{key,revision:first.revision,edits:[{id,reason:'古い版からの更新'}]},false);
+ yield* invoke('get_instruction',{key,revision:second.revision});
+}
 function* workflow(text:string):Generator<Call,void,ToolReply>{
  if(text==='task.completed'){
   const knowledge=yield* lastDocumentItem('knowledge.md');
@@ -92,6 +116,17 @@ function* workflow(text:string):Generator<Call,void,ToolReply>{
 for await (const line of createInterface({input:process.stdin})) {
  if(embedded){const response=JSON.parse(line);if(typeof response.id==='string'&&response.id.startsWith('embedded:')){if(process.env.FAKE_CODEX_LOG)appendFileSync(process.env.FAKE_CODEX_LOG,JSON.stringify(response)+'\n');const call=embedded.call!;if(!embedded.workflow)embedded.results.push(response.result);embeddedEvent('item/completed',{type:'dynamicToolCall',id:response.id,tool:call.tool,arguments:call.arguments,contentItems:response.result?.contentItems,status:response.result?.success?'completed':'failed'});embedded.index++;nextEmbedded(response.result);continue}}
  const msg=JSON.parse(line);if(process.env.FAKE_CODEX_LOG)appendFileSync(process.env.FAKE_CODEX_LOG,JSON.stringify(msg)+'\n');if(msg.id==='approval-test'){if(msg.error?.code===-32601)send({method:'item/agentMessage/delta',params:{threadId,turnId:turn,itemId:'message-1',delta:' denied'}});continue}if(!msg.id)continue;
+ const privateError='fake-private-detail /example/private/config.toml token=fake-secret';
+ if(process.env.FAKE_CODEX_DIAGNOSTIC==='initialize-close'&&msg.method==='initialize'){
+  process.stderr.write(privateError);process.exit(27);
+ }
+ if(process.env.FAKE_CODEX_DIAGNOSTIC==='config-timeout'&&msg.method==='config/read')continue;
+ if(process.env.FAKE_CODEX_DIAGNOSTIC==='config-reject'&&msg.method==='config/read'){
+  process.stderr.write(privateError);send({id:msg.id,error:{code:-32001,message:privateError,data:{detail:privateError}}});continue;
+ }
+ if(process.env.FAKE_CODEX_DIAGNOSTIC==='unsafe-config'&&msg.method==='config/read'){
+  send({id:msg.id,result:{config:{mcp_servers:{[privateError]:{enabled:true}}}}});continue;
+ }
  if(msg.method==='initialize')send({id:msg.id,result:{codexHome:process.env.FAKE_CODEX_ROLLOUT_HOME}});
  else if(msg.method==='account/read')send({id:msg.id,result:{account:{type:process.env.FAKE_AUTH??'chatgpt',email:process.env.FAKE_CODEX_EMAIL??'example@example.test'}}});
  else if(msg.method==='account/rateLimits/read')send({id:msg.id,result:{rateLimits:process.env.FAKE_CODEX_RATE_LIMIT ? {primary:{usedPercent:Number(process.env.FAKE_CODEX_RATE_LIMIT),windowDurationMins:300}} : null}});
@@ -117,7 +152,15 @@ for await (const line of createInterface({input:process.stdin})) {
    send({id:msg.id,error:{code:-32600,message:`no rollout found for thread id ${msg.params.threadId}`}});continue;
   }
   if(msg.method==='thread/resume'&&mode==='reject'){
-   send({id:msg.id,error:{code:-32600,message:'Invalid model configuration'}});continue;
+   send({id:msg.id,error:{code:-32600,message:privateError,data:{detail:privateError}}});continue;
+  }
+  if(msg.method==='thread/resume'&&mode?.startsWith('active-writer')){
+   const message=mode==='active-writer-prefix'?'failed to resume local thread recorder: thread thread-1 already has an active writer':
+    mode==='active-writer-other-thread'?'thread another-thread already has an active writer':
+    mode==='active-writer-long'?'x'.repeat(4097)+'thread thread-1 already has an active writer':
+    mode==='active-writer-wrong-code'?'thread thread-1 already has an active writer':
+    'thread thread-1 already has an active writer ';
+   send({id:msg.id,error:{code:mode==='active-writer-wrong-code'?-32000:-32600,message}});continue;
   }
   threadId=msg.params.threadId??(mode==='missing'?'thread-replacement':'thread-1');
   developerInstructions=msg.params.developerInstructions??'';
@@ -155,14 +198,18 @@ for await (const line of createInterface({input:process.stdin})) {
   if(text==='write documents'&&(!toolFeatures.shell_tool||!toolFeatures.code_mode_host)){send({id:msg.id,error:{code:-32600,message:'Required tools disabled'}});continue}
   if(text==='write documents'){writeFileSync(join(msg.params.cwd,'requirements.md'),'# Updated requirements\n');writeFileSync(join(msg.params.cwd,'implementation.md'),'# Updated plan\n')}
   if(text==='disconnect')process.exit(0);
+  if(text==='disconnect after acceptance'){
+   send({id:msg.id,result:{turn:{id:turn}}});process.stderr.write(privateError);process.kill(process.pid,'SIGTERM');continue;
+  }
   if(text==='reject model'){send({id:msg.id,error:{code:-32600,data:{code:'model_not_found'},message:'Model unavailable'}});continue}
   if(text==='reject'){send({id:msg.id,error:{code:-32600,message:'rejected'}});continue}
-  if(text==='event tools'||process.env.FAKE_EMBEDDED_CALLS||process.env.FAKE_CODEX_WORKFLOW){
+  if(text==='event tools'||process.env.FAKE_EMBEDDED_CALLS||process.env.FAKE_CODEX_WORKFLOW||process.env.FAKE_CODEX_INSTRUCTION_EDITOR){
    if(!toolFeatures.code_mode_host){send({id:msg.id,error:{code:-32600,message:'code-mode host is disabled'}});continue}
    const range=msg.params.input.find((input:any)=>input.text.startsWith('Beni project event review range:'))?.text.match(/after (\d+), through (\d+)/);
    const calls:Call[]=process.env.FAKE_EMBEDDED_CALLS?JSON.parse(process.env.FAKE_EMBEDDED_CALLS):[{tool:'list_events',arguments:{after:Number(range?.[1]??0),through:Number(range?.[2]??0),limit:1}},{tool:'acknowledge_events',arguments:{through:Number(range?.[2]??0)}}];
    const workflowMode=!!process.env.FAKE_CODEX_WORKFLOW;
-   embedded={script:workflowMode?workflow(text):(function*(){yield* calls})(),results:[],index:0,workflow:workflowMode};
+   const script=process.env.FAKE_CODEX_INSTRUCTION_EDITOR?instructionEditor(text):workflowMode?workflow(text):(function*(){yield* calls})();
+   embedded={script,results:[],index:0,workflow:workflowMode};
    send({method:'turn/started',params:{threadId,turn:{id:turn}}});nextEmbedded();send({id:msg.id,result:{turn:{id:turn}}});continue;
   }
   if(['tools','unfinished tools','duplicate tools','failed tools','large tools'].includes(text)){
@@ -202,6 +249,7 @@ for await (const line of createInterface({input:process.stdin})) {
    usage({turnId:'wrong-turn',tokenUsage:{last:{totalTokens:80_000},modelContextWindow:100_000}});
   }
   send({id:msg.id,result:{turn:{id:turn}}});
-  if(text!=='wait')setTimeout(()=>send({method:'turn/completed',params:{threadId,turn:{id:turn,status:text==='fail'?'failed':'completed'}}}),30);
+  if(text!=='wait')setTimeout(()=>send({method:'turn/completed',params:{threadId,turn:{id:turn,status:text==='fail'?'failed':'completed',
+   ...(text==='fail'?{error:{code:-32000,message:privateError,data:{detail:privateError}}}:{})}}}),30);
  } else if(msg.method==='turn/interrupt') {send({id:msg.id,result:{}});send({method:'turn/completed',params:{threadId,turn:{id:turn,status:'interrupted'}}})}
 }

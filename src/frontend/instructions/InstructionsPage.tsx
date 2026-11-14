@@ -230,9 +230,13 @@ function InstructionReferences() {
           <dt class="break-all"><code>list_instructions</code></dt>
           <dd class="min-w-0">一覧の取得（キー・表示名）</dd>
           <dt class="break-all"><code>get_instruction</code></dt>
-          <dd class="min-w-0">本文の取得（指定したキー）</dd>
+          <dd class="min-w-0">指定した指示の版と項目の取得</dd>
+          <dt class="break-all"><code>list_chat_sources</code></dt>
+          <dd class="min-w-0">編集相談チャットの引用元一覧の取得</dd>
+          <dt class="break-all"><code>read_source</code></dt>
+          <dd class="min-w-0">発言や指示項目の原文の取得</dd>
           <dt class="break-all"><code>update_instruction</code></dt>
-          <dd class="min-w-0">指示の更新・保存（編集相談チャット専用）</dd>
+          <dd class="min-w-0">指示の項目と根拠の更新・保存</dd>
         </dl>
       </Show>
     </div>

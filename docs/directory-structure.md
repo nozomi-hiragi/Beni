@@ -11,8 +11,14 @@ Beni/
 ├── src/                              アプリケーションのコード
 │   ├── backend/                      Bun で動くサーバー側の処理
 │   │   ├── server.ts                 サーバー起動、API、フロントエンド配信、保存先設定
+│   │   ├── executable.ts             単体実行ファイルの引数処理、SQL子プロセスの入口
+│   │   ├── tailscale.ts              自分のHTTPS URLの検出、Serveの競合検査・転送設定
+│   │   ├── tailscale.test.ts         偽CLIによるTailscale起動・既存設定保護のテスト
+│   │   ├── frontend-assets.ts        ソース起動と実行ファイルで共通の画面配信
+│   │   ├── pwa.test.ts               マニフェスト・アイコンの配信と公開Originのテスト
 │   │   ├── server.test.ts            API・配信・文書管理・変更通知・保存先のテスト
 │   │   ├── instructions.ts           指示テンプレートの初期値と変数の置換
+│   │   ├── instruction-editor-tools.ts 編集相談の項目編集・根拠と引用元の検証
 │   │   ├── chat.ts                   会話の保存・再開・イベント配信・中断
 │   │   ├── chat-store.ts             チャットID・参照・JSON保存・操作復旧
 │   │   ├── chat-migration.ts         用途別の旧チャットの移行と検証
@@ -66,11 +72,13 @@ Beni/
 │   │   ├── task-phase.ts             共通のフェーズ識別子と検証
 │   │   ├── agent.ts                  Agent ID・登録情報・接続状態の共通型
 │   │   ├── chat-commands.ts          コマンドの共通型・Beni の共通操作・候補内の別名解決・入力解析
+│   │   ├── chat-diagnostic.ts        会話の失敗診断の型と許可値の検証
 │   │   ├── manual-tools.ts           手動ツールの API 型と引数スキーマ検証
 │   │   ├── communication.ts          パック・WS メッセージの型、受信検証、ハッシュ
 │   │   └── project-files.ts          プロジェクトファイル一覧・プレビューの型
 │   └── frontend/                     ブラウザーで動く SolidJS の画面
 │       ├── index.html                アプリの表示先と JavaScript・CSS の読み込み
+│       ├── pwa/                      インストール用マニフェストとオリジナルのBアイコン
 │       ├── main.tsx                  SolidJS アプリを HTML に取り付ける入口
 │       ├── App.tsx                   URL に応じた画面の切り替えと共通ヘッダー
 │       ├── App.test.tsx              画面遷移とルーティングのテスト
@@ -86,8 +94,10 @@ Beni/
 │       │       └── FolderPicker.tsx  バックエンドが動く環境のフォルダー選択
 │       ├── project/
 │       │   ├── ProjectPage.tsx       プロジェクトとタスクを確認し、作業画面を表示
+│       │   ├── ProjectPage.test.tsx  プロジェクト内のタスク追加と作成後の表示のテスト
 │       │   └── components/
 │       │       ├── Workspace.tsx     チャット・タスク・文書の表示とタブ管理
+│       │       ├── TaskCreateDialog.tsx  現在のプロジェクトにタスクを追加するダイアログ
 │       │       ├── TerminalPanel.tsx ターミナルタブ・描画・操作権・再接続
 │       │       ├── PhaseIndicator.tsx フェーズ表示と実装開始・停止・タスク完了・再開
 │       │       ├── ProjectFiles.tsx  作業フォルダーのツリーとファイルのプレビュー
@@ -121,6 +131,7 @@ Beni/
 │       │       ├── Navbar.tsx         共通ヘッダーと画面の移動
 │       │       ├── UsageIndicators.tsx  接続先ごとの利用枠ゲージ
 │       │       ├── ChatPanel.tsx      会話、モデル選択、送信・中断、履歴表示
+│       │       ├── ChatDiagnostic.tsx 会話の失敗理由と診断の詳細表示
 │       │       ├── ChatComposer.tsx   テキスト入力と送信フォーム
 │       │       ├── ContextGauge.tsx   コンテキスト使用率と圧縮メニュー
 │       │       ├── ModelPicker.tsx    チャット用モデルの選択と接続先アイコン
@@ -138,14 +149,20 @@ Beni/
 │           ├── ClaudeChat.test.tsx     Claude チャットのテスト
 │           ├── CodexChat.test.tsx      Codex チャットのテスト
 │           └── RegisteredAgents.test.tsx 登録済み Agent のテスト
+├── scripts/
+│   ├── build-exe.ts                  macOS arm64 の単体実行ファイルを生成
+│   ├── start-exe.ts                  最新のビルド済み実行ファイルを起動
+│   └── test-exe.ts                   生成物の隔離起動・偽エージェント・SQL・PTY・再起動を検証
 ├── dist/                             [生成] ビルド出力
-│   └── frontend/                     フロントエンドの生成物
-│       ├── app.js                    Vite が生成する JavaScript
-│       ├── beni.css                  xterm.js のスタイル
-│       └── generated.css             Tailwind CSS・daisyUI が生成する CSS
+│   ├── frontend/                     フロントエンドの生成物
+│   │   ├── app.js                    Vite が生成する JavaScript
+│   │   ├── beni.css                  xterm.js のスタイル
+│   │   └── generated.css             Tailwind CSS・daisyUI が生成する CSS
+│   └── executables/<build-id>/beni   ビルドごとに保存する単体実行ファイル
 ├── docs/                             仕様書、画面モック、構成の説明
 │   ├── README.md                     ドキュメントの目次
 │   ├── directory-structure.md        この文書
+│   ├── executable.md                 実行ファイルの生成・検証・自己開発・切り替え手順
 │   ├── data/                         データの仕様
 │   │   ├── README.md                 保存責任・正本・データの関係
 │   │   ├── storage.md                データ集約の採用仕様・移行条件
@@ -178,9 +195,11 @@ Beni/
 │   │   ├── task-events.md            フェーズ間の変更履歴と文書の版
 │   │   └── terminal.md               ターミナルとシェル
 │   ├── features/                     機能ごとの仕様
+│   │   ├── pwa.md                    アプリのインストールとTailscale経由の起動
 │   │   ├── instructions.md           インストラクション管理と編集相談
 │   │   ├── llm-chat.md               LLM チャット連携
 │   │   ├── terminal.md               ターミナルの機能仕様
+│   │   ├── task-creation.md          プロジェクト画面からのタスク追加
 │   │   └── task-search.md            タスク検索
 │   └── mockups/                      過去の画面・部品の検討用 HTML と CSS
 │       └── components/               部品ごとのモック

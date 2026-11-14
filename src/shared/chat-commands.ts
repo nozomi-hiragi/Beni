@@ -1,5 +1,7 @@
+import type { ChatDiagnostic } from './chat-diagnostic';
+
 export type ChatCommandName = string;
-export type ChatCommand = {id:string;name:ChatCommandName;status:'running'|'completed'|'failed'|'interrupted'|'unknown';error?:string;output?:string};
+export type ChatCommand = {id:string;name:ChatCommandName;status:'running'|'completed'|'failed'|'interrupted'|'unknown';error?:string;output?:string;diagnostic?:ChatDiagnostic};
 export type ChatCommandDefinition = {name:ChatCommandName;command:string;description:string;kind:'operation'|'message';argumentHint?:string;aliases?:readonly string[]};
 export const beniChatCommands:readonly ChatCommandDefinition[] = [
  {name:'clear',command:'/clear',description:'履歴を残して新しい会話',kind:'operation',aliases:['new','reset']},

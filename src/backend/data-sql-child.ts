@@ -170,5 +170,9 @@ function run({source,sql}: DataSqlInput): DataSqlOutput {
   }
 }
 
-const result = run(await Bun.stdin.json() as DataSqlInput);
-process.stdout.write(JSON.stringify(result));
+export async function runDataSqlChild() {
+  const result = run(await Bun.stdin.json() as DataSqlInput);
+  process.stdout.write(JSON.stringify(result));
+}
+
+if (import.meta.main && !Bun.isStandaloneExecutable) await runDataSqlChild();

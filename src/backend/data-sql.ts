@@ -3,6 +3,7 @@ import type { DataSqlCatalog, DataSqlResult } from '../shared/data-browser';
 
 export const maxSqlBytes = 64 * 1024;
 export const maxSqlResponseBytes = 4 * 1024 * 1024;
+export const internalDataSqlArgument = '--internal-data-sql';
 const maxDurationMs = 3000;
 const maxConcurrent = 2;
 let running = 0;
@@ -45,7 +46,8 @@ export async function runDataSql(source: () => DataSqlSource, sql: string | unde
   try {
     const input: DataSqlInput = {source:source(), sql};
     // Bun Worker の終了要求では SQLite のネイティブ実行を中断できない。
-    const child = Bun.spawn([process.execPath,fileURLToPath(new URL('./data-sql-child.ts',import.meta.url))], {
+    const entry = Bun.isStandaloneExecutable ? internalDataSqlArgument : fileURLToPath(new URL('./data-sql-child.ts',import.meta.url));
+    const child = Bun.spawn([process.execPath,entry], {
       stdin:Buffer.from(JSON.stringify(input)), stdout:'pipe', stderr:'ignore',
     });
     let interrupted: 'cancelled' | 'timeout' | undefined;

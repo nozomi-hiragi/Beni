@@ -5,6 +5,7 @@
 ## 開発
 
 - [ディレクトリ構成](directory-structure.md)
+- [実行ファイルと自己開発](executable.md)
 - [通信仕様・API](communication/README.md)
 - [データ設計](data/README.md)
 - [保存データの集約](data/storage.md)
@@ -24,11 +25,14 @@
   - [設定画面](screens/settings.md)
   - [データ画面](screens/data.md)
 - 機能
+  - [PWA と Tailscale](features/pwa.md)
   - [要求・根拠を追跡できる文書管理](traceable-documents-design.md)
   - [インストラクション管理](features/instructions.md)
+  - [インストラクション編集画面のツール一覧（未実装）](features/instruction-tools.md)
   - [イベントに対応するワークフロー](features/workflows.md)
   - [LLM チャット連携](features/llm-chat.md)
   - [Navbar のツール](features/manual-tools.md)
+  - [プロジェクト画面からのタスク追加](features/task-creation.md)
   - [タスク検索（未実装）](features/task-search.md)
   - [プロジェクト内ターミナル](features/terminal.md)
 
